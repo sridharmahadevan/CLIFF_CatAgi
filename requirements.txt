@@ -1,0 +1,21 @@
+# Core Python dependencies for the public-facing CLIFF_CatAgi repo.
+#
+# Optional integrations such as Democritus, BASKET/ROCKET, brand diffusion,
+# the course repo, and FunctorFlow.jl are discovered separately via
+# environment variables or sibling/third_party directories documented in the
+# README.
+
+matplotlib>=3.8
+networkx>=3.2
+numpy>=1.26,<2.0
+pandas>=2.2
+pdfminer.six>=20221105
+PyMuPDF>=1.24
+pypdf>=4.2
+pyarrow>=16.0
+scikit-learn>=1.4
+scipy>=1.11
+sentence-transformers>=2.6
+torch>=2.3
+tqdm>=4.66
+umap-learn>=0.5.6

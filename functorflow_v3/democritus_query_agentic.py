@@ -1,0 +1,2007 @@
+"""Query-driven corpus acquisition layer for agentic Democritus."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import re
+import shutil
+import webbrowser
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Callable, Protocol
+from urllib.parse import urlencode
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+from xml.etree import ElementTree as ET
+
+from .democritus_batch_agentic import (
+    DemocritusBatchAgenticRunner,
+    DemocritusBatchConfig,
+    DemocritusBatchRecord,
+    DemocritusBatchRunResult,
+)
+from .dashboard_query_launcher import DashboardQueryLauncher, DashboardQueryLauncherConfig
+from .evidence_convergence import (
+    EvidenceConvergenceAdapter,
+    EvidenceConvergencePolicy,
+    EvidenceConvergenceTracker,
+)
+
+_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "benefits",
+    "can",
+    "drinking",
+    "find",
+    "filing",
+    "filings",
+    "for",
+    "from",
+    "have",
+    "help",
+    "id",
+    "in",
+    "interested",
+    "is",
+    "it",
+    "know",
+    "learn",
+    "like",
+    "me",
+    "n",
+    "of",
+    "on",
+    "or",
+    "please",
+    "report",
+    "reports",
+    "show",
+    "studies",
+    "study",
+    "that",
+    "the",
+    "these",
+    "those",
+    "tell",
+    "to",
+    "understand",
+    "want",
+    "with",
+    "would",
+}
+
+_SEC_COMPANY_QUERY_STOPWORDS = {
+    "10",
+    "8",
+    "k",
+    "q",
+    "annual",
+    "quarterly",
+    "current",
+    "recent",
+    "latest",
+    "new",
+    "sec",
+    "edgar",
+    "filing",
+    "filings",
+    "form",
+    "forms",
+    "report",
+    "reports",
+    "company",
+    "companies",
+    "workflow",
+    "workflows",
+    "extract",
+    "extracts",
+    "extraction",
+    "extractions",
+    "analyze",
+    "analysis",
+    "review",
+    "reviews",
+    "document",
+    "documents",
+}
+
+_DJIA_COMPANY_TARGETS: tuple[tuple[str, ...], ...] = (
+    ("3m", "mmm"),
+    ("amazon", "amzn"),
+    ("american express", "axp"),
+    ("amgen", "amgn"),
+    ("apple", "aapl"),
+    ("boeing", "ba"),
+    ("caterpillar", "cat"),
+    ("chevron", "cvx"),
+    ("cisco", "csco"),
+    ("coca cola", "ko"),
+    ("disney", "dis"),
+    ("goldman sachs", "gs"),
+    ("home depot", "hd"),
+    ("honeywell", "hon"),
+    ("ibm", "international business machines"),
+    ("johnson johnson", "jnj"),
+    ("jpmorgan", "jpm"),
+    ("mcdonald s", "mcd"),
+    ("merck", "mrk"),
+    ("microsoft", "msft"),
+    ("nike", "nke"),
+    ("nvidia", "nvda"),
+    ("procter gamble", "pg"),
+    ("salesforce", "crm"),
+    ("sherwin williams", "shw"),
+    ("travelers", "trv"),
+    ("unitedhealth", "unh"),
+    ("verizon", "vz"),
+    ("visa", "v"),
+    ("walmart", "wmt"),
+)
+
+_SEC_COMPANY_GROUPS: tuple[tuple[tuple[str, ...], tuple[tuple[str, ...], ...]], ...] = (
+    (("djia",), _DJIA_COMPANY_TARGETS),
+    (("dow jones industrial average",), _DJIA_COMPANY_TARGETS),
+    (("dow companies",), _DJIA_COMPANY_TARGETS),
+    (("dow 30",), _DJIA_COMPANY_TARGETS),
+)
+
+_NUMBER_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+}
+
+_COUNT_FILLER_PATTERN = r"(?:\s+(?:recent|latest|new|top|best|peer[- ]reviewed|open[- ]access|additional|relevant|high[- ]quality))*"
+
+
+def _slugify(name: str, maxlen: int = 80) -> str:
+    collapsed = re.sub(r"\s+", " ", name.strip().lower())
+    cleaned = re.sub(r"[^a-z0-9 _-]+", "", collapsed).strip().replace(" ", "_")
+    return cleaned[:maxlen] if cleaned else "document"
+
+
+def _read_records(path: Path) -> list[dict[str, object]]:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, list):
+            return [dict(item) for item in payload]
+        raise ValueError(f"Expected a JSON list in {path}")
+    if suffix == ".jsonl":
+        records = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                records.append(dict(json.loads(line)))
+        return records
+    if suffix == ".csv":
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            return [dict(row) for row in csv.DictReader(handle)]
+    raise ValueError(f"Unsupported manifest format for {path}; expected .json, .jsonl, or .csv")
+
+
+def _write_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _looks_like_pdf(url: str) -> bool:
+    lowered = url.lower()
+    return lowered.endswith(".pdf") or "pdf" in lowered.split("?")[0]
+
+
+def _infer_document_format(url: str | None) -> str:
+    if not url:
+        return "unknown"
+    lowered = url.lower()
+    if _looks_like_pdf(lowered):
+        return "pdf"
+    if lowered.endswith(".htm") or lowered.endswith(".html"):
+        return "html"
+    if lowered.endswith(".txt"):
+        return "txt"
+    return "unknown"
+
+
+def _tokenize(text: str) -> tuple[str, ...]:
+    normalized = " ".join(text.lower().split())
+    return tuple(
+        token
+        for token in re.findall(r"[a-z0-9]+", normalized)
+        if token not in _STOPWORDS and len(token) > 1
+    )
+
+
+def _match_score(plan: "QueryPlan", *texts: str) -> tuple[float, tuple[str, ...]]:
+    haystack = " ".join(texts).lower()
+    evidence = []
+    score = 0.0
+    if plan.normalized_query and plan.normalized_query in haystack:
+        score += 5.0
+        evidence.append("exact_query")
+    matched = sorted({token for token in plan.keyword_tokens if token in haystack})
+    score += float(len(matched))
+    evidence.extend(matched)
+    return score, tuple(evidence)
+
+
+def _sec_company_match_score(plan: "QueryPlan", *texts: str) -> tuple[float, tuple[str, ...]]:
+    haystack = " ".join(texts).lower()
+    company_tokens = tuple(
+        token
+        for token in plan.keyword_tokens
+        if not str(token).isdigit() and token not in _SEC_COMPANY_QUERY_STOPWORDS and len(token) >= 3
+    )
+    if not company_tokens:
+        return _match_score(plan, *texts)
+    matched = sorted({token for token in company_tokens if token in haystack})
+    return float(len(matched)), tuple(matched)
+
+
+def _company_text_tokens(*texts: str) -> set[str]:
+    return set(_tokenize(" ".join(texts)))
+
+
+def _alias_tokens(alias: str) -> tuple[str, ...]:
+    return tuple(
+        token
+        for token in _tokenize(alias)
+        if token not in _SEC_COMPANY_QUERY_STOPWORDS
+    )
+
+
+def _sec_company_target_match_score(plan: "QueryPlan", *texts: str) -> tuple[float, tuple[str, ...]]:
+    if not plan.sec_company_targets:
+        return 0.0, ()
+    company_tokens = _company_text_tokens(*texts)
+    best_score = 0.0
+    best_evidence: tuple[str, ...] = ()
+    for target in plan.sec_company_targets:
+        matched_aliases: list[str] = []
+        matched_token_count = 0
+        for alias in target:
+            alias_token_values = _alias_tokens(alias)
+            if alias_token_values and set(alias_token_values).issubset(company_tokens):
+                matched_aliases.append(alias)
+                matched_token_count = max(matched_token_count, len(alias_token_values))
+        if matched_aliases:
+            score = 100.0 + float(matched_token_count)
+            evidence = tuple(sorted(set(matched_aliases)))
+            if score > best_score:
+                best_score = score
+                best_evidence = evidence
+    return best_score, best_evidence
+
+
+@dataclass(frozen=True)
+class QueryPlan:
+    """Interpreted query intent for corpus acquisition."""
+
+    query: str
+    normalized_query: str
+    keyword_tokens: tuple[str, ...]
+    target_documents: int
+    requested_forms: tuple[str, ...] = ()
+    retrieval_query: str = ""
+    sec_company_targets: tuple[tuple[str, ...], ...] = ()
+    sec_cohort_mode: str = "ranked"
+
+
+def _derive_retrieval_query(query: str) -> str:
+    normalized = " ".join(query.lower().split())
+    stripped = normalized
+    for pattern in (
+        r"^i(?:'d|\swould)?\s+like\s+to\s+know\s+",
+        r"^i\s+want\s+to\s+know\s+",
+        r"^i(?:'m|\sam)\s+interested\s+in\s+",
+        r"^tell\s+me\s+about\s+",
+        r"^help\s+me\s+understand\s+",
+        r"^what\s+do\s+we\s+know\s+about\s+",
+        r"^what\s+are\s+the\s+",
+        r"^what\s+is\s+the\s+",
+    ):
+        stripped = re.sub(pattern, "", stripped)
+    retrieval_tokens = _tokenize(stripped)
+    if retrieval_tokens:
+        return " ".join(retrieval_tokens)
+    fallback_tokens = _tokenize(normalized)
+    if fallback_tokens:
+        return " ".join(fallback_tokens)
+    return normalized
+
+
+def _extract_sec_company_targets(query: str) -> tuple[tuple[str, ...], ...]:
+    normalized = " ".join(str(query).lower().split())
+    for phrases, targets in _SEC_COMPANY_GROUPS:
+        if any(phrase in normalized for phrase in phrases):
+            return targets
+
+    stripped = re.sub(r"\b(?:10-k|10-q|8-k)\b", " ", normalized)
+    segments = re.split(r"\b(?:and|or)\b|,|&", stripped)
+    targets: list[tuple[str, ...]] = []
+    seen: set[tuple[str, ...]] = set()
+    for segment in segments:
+        tokens = [
+            token
+            for token in re.findall(r"[a-z0-9]+", segment)
+            if token not in _STOPWORDS and token not in _SEC_COMPANY_QUERY_STOPWORDS and len(token) >= 2
+        ]
+        if not tokens:
+            continue
+        alias = " ".join(tokens)
+        target = (alias,)
+        if target in seen:
+            continue
+        seen.add(target)
+        targets.append(target)
+    return tuple(targets)
+
+
+def _infer_sec_cohort_mode(query: str, sec_company_targets: tuple[tuple[str, ...], ...]) -> str:
+    normalized = " ".join(str(query).lower().split())
+    if len(sec_company_targets) > 1 and any(
+        phrase in normalized
+        for phrase in (
+            "djia",
+            "dow jones industrial average",
+            "dow companies",
+            "dow 30",
+            "companies",
+        )
+    ):
+        return "latest_per_company"
+    return "ranked"
+
+
+def _document_identity(document: "DiscoveredDocument") -> str:
+    return (
+        document.identifier
+        or document.download_url
+        or document.url
+        or document.source_path
+        or document.title
+    ).lower()
+
+
+def infer_requested_result_count(query: str, *, nouns: tuple[str, ...]) -> int | None:
+    normalized = " ".join(str(query).lower().split())
+    if not normalized or not nouns:
+        return None
+    noun_pattern = "|".join(re.escape(noun.lower()) for noun in nouns)
+    match = re.search(
+        rf"\b(?P<count>\d+|{'|'.join(_NUMBER_WORDS)})\b{_COUNT_FILLER_PATTERN}\s+(?P<noun>{noun_pattern})\b",
+        normalized,
+    )
+    if not match:
+        return None
+    raw_count = match.group("count")
+    if raw_count.isdigit():
+        return max(1, int(raw_count))
+    return _NUMBER_WORDS.get(raw_count)
+
+
+_BROWSER_DOWNLOAD_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
+_DEFAULT_RETRIEVAL_USER_AGENT = "FunctorFlow_v2/0.1 (agentic retrieval; local use)"
+
+
+def _looks_like_placeholder_user_agent(value: str) -> bool:
+    normalized = " ".join(str(value).split()).strip()
+    if not normalized:
+        return True
+    lowered = normalized.lower()
+    return (
+        lowered.startswith("functorflow_v3/")
+        or lowered.startswith("functorflow_v2/")
+        or lowered.startswith("functorflow v3/")
+        or lowered.startswith("functorflow v2/")
+    )
+
+
+def _resolve_sec_user_agent(user_agent: str) -> str:
+    normalized = " ".join(str(user_agent).split()).strip()
+    if normalized and not _looks_like_placeholder_user_agent(normalized):
+        return normalized
+
+    for env_name in ("FF3_SEC_USER_AGENT", "FF2_SEC_USER_AGENT", "SEC_USER_AGENT", "SEC_IDENTITY"):
+        env_value = " ".join(os.environ.get(env_name, "").split()).strip()
+        if env_value:
+            return env_value
+
+    contact_name = " ".join(os.environ.get("SEC_CONTACT_NAME", "").split()).strip()
+    contact_email = " ".join(os.environ.get("SEC_CONTACT_EMAIL", "").split()).strip()
+    if contact_name and contact_email:
+        return f"{contact_name} {contact_email}"
+
+    raise ValueError(
+        "SEC retrieval requires an identifying User-Agent that includes contact information. "
+        "Pass --retrieval-user-agent 'Your Name your_email@example.com' or set "
+        "FF3_SEC_USER_AGENT, FF2_SEC_USER_AGENT, SEC_USER_AGENT, SEC_IDENTITY, or SEC_CONTACT_NAME plus "
+        "SEC_CONTACT_EMAIL."
+    )
+
+
+@dataclass(frozen=True)
+class DiscoveredDocument:
+    """Metadata for one candidate document returned by a search provider."""
+
+    title: str
+    score: float
+    retrieval_backend: str = "unknown"
+    source_path: str | None = None
+    download_url: str | None = None
+    url: str | None = None
+    abstract: str = ""
+    year: str = ""
+    identifier: str = ""
+    document_format: str = "pdf"
+    evidence: tuple[str, ...] = ()
+    metadata: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AcquiredCorpusDocument:
+    """A document copied or downloaded into the working Democritus corpus."""
+
+    title: str
+    acquired_pdf_path: str
+    source_path: str
+    score: float
+    run_name_hint: str
+    retrieval_backend: str
+
+
+@dataclass(frozen=True)
+class DemocritusEvidenceSnapshot:
+    """Retrieval-side snapshot used for Democritus convergence checks."""
+
+    keyword_support: tuple[str, ...]
+    top_context_terms: tuple[str, ...]
+    average_score: float
+    evidence_count: int
+
+
+class DemocritusConvergenceAdapter(EvidenceConvergenceAdapter[DemocritusEvidenceSnapshot]):
+    """Convergence semantics for retrieval evidence in query-driven Democritus."""
+
+    def similarity(
+        self,
+        previous: DemocritusEvidenceSnapshot,
+        current: DemocritusEvidenceSnapshot,
+        *,
+        policy: EvidenceConvergencePolicy,
+    ) -> float:
+        del policy
+        keyword_score = self._tuple_overlap(previous.keyword_support, current.keyword_support)
+        term_score = self._tuple_overlap(previous.top_context_terms, current.top_context_terms)
+        score_delta = abs(previous.average_score - current.average_score)
+        score_score = max(0.0, 1.0 - min(score_delta / 2.0, 1.0))
+        return round(0.45 * keyword_score + 0.45 * term_score + 0.10 * score_score, 3)
+
+    def describe(self, snapshot: DemocritusEvidenceSnapshot) -> str:
+        keywords = ", ".join(snapshot.keyword_support) or "no matched keywords"
+        terms = ", ".join(snapshot.top_context_terms[:4]) or "no stable context terms yet"
+        return (
+            f"matched_keywords=[{keywords}], context_terms=[{terms}], "
+            f"avg_score={snapshot.average_score:.3f}"
+        )
+
+    @staticmethod
+    def _tuple_overlap(left_values: tuple[str, ...], right_values: tuple[str, ...]) -> float:
+        if not left_values and not right_values:
+            return 1.0
+        left = set(left_values)
+        right = set(right_values)
+        if not left or not right:
+            return 0.0
+        return len(left & right) / len(left | right)
+
+
+@dataclass(frozen=True)
+class DemocritusQueryAgenticConfig:
+    """Configuration for query-driven Democritus corpus acquisition."""
+
+    query: str
+    outdir: Path
+    target_documents: int = 10
+    manifest_path: Path | None = None
+    source_pdf_root: Path | None = None
+    retrieval_backend: str = "auto"
+    retrieval_user_agent: str = "FunctorFlow_v2/0.1 (agentic retrieval; local use)"
+    retrieval_timeout_seconds: float = 20.0
+    corpus_name: str = "query_corpus"
+    max_docs: int = 0
+    consensus_enabled: bool = True
+    consensus_batch_size: int = 1
+    consensus_similarity_threshold: float = 0.9
+    consensus_required_stable_passes: int = 1
+    max_workers: int = 8
+    agent_concurrency_limits: tuple[tuple[str, int], ...] = ()
+    include_phase2: bool = True
+    auto_topics_from_pdf: bool = True
+    root_topic_strategy: str = "v0_openai"
+    intra_document_shards: int = 1
+    discovery_only: bool = False
+    dry_run: bool = False
+    enable_corpus_synthesis: bool = True
+    sec_form_types: tuple[str, ...] = ("10-K", "10-Q")
+    sec_company_limit: int = 3
+
+    def resolved(self) -> "DemocritusQueryAgenticConfig":
+        return DemocritusQueryAgenticConfig(
+            query=self.query.strip(),
+            outdir=self.outdir.resolve(),
+            target_documents=self.target_documents,
+            manifest_path=self.manifest_path.resolve() if self.manifest_path else None,
+            source_pdf_root=self.source_pdf_root.resolve() if self.source_pdf_root else None,
+            retrieval_backend=self.retrieval_backend,
+            retrieval_user_agent=self.retrieval_user_agent,
+            retrieval_timeout_seconds=self.retrieval_timeout_seconds,
+            corpus_name=self.corpus_name,
+            max_docs=self.max_docs,
+            consensus_enabled=self.consensus_enabled,
+            consensus_batch_size=self.consensus_batch_size,
+            consensus_similarity_threshold=self.consensus_similarity_threshold,
+            consensus_required_stable_passes=self.consensus_required_stable_passes,
+            max_workers=self.max_workers,
+            agent_concurrency_limits=tuple(self.agent_concurrency_limits),
+            include_phase2=self.include_phase2,
+            auto_topics_from_pdf=self.auto_topics_from_pdf,
+            root_topic_strategy=self.root_topic_strategy,
+            intra_document_shards=max(1, int(self.intra_document_shards)),
+            discovery_only=self.discovery_only,
+            dry_run=self.dry_run,
+            enable_corpus_synthesis=self.enable_corpus_synthesis,
+            sec_form_types=tuple(self.sec_form_types),
+            sec_company_limit=self.sec_company_limit,
+        )
+
+
+@dataclass(frozen=True)
+class DemocritusQueryRunResult:
+    """Result bundle for query-driven corpus acquisition plus optional batch execution."""
+
+    query_plan: QueryPlan
+    selected_documents: tuple[DiscoveredDocument, ...]
+    acquired_documents: tuple[AcquiredCorpusDocument, ...]
+    batch_records: tuple[DemocritusBatchRecord, ...]
+    pdf_dir: Path
+    batch_outdir: Path
+    summary_path: Path
+    analysis_iterations: int = 0
+    consensus_reached: bool = False
+    convergence_assessment: dict[str, object] | None = None
+    csql_sqlite_path: Path | None = None
+    csql_summary_path: Path | None = None
+    corpus_synthesis_summary_path: Path | None = None
+    corpus_synthesis_dashboard_path: Path | None = None
+
+
+class RetrievalBackend(Protocol):
+    """Retrieval backend interface."""
+
+    backend_name: str
+
+    def search(self, plan: QueryPlan, *, limit: int) -> tuple[DiscoveredDocument, ...]:
+        """Return ranked candidate documents for a query plan."""
+
+
+class HttpJsonRetrievalBackend:
+    """Base class for JSON-over-HTTP retrieval backends."""
+
+    backend_name = "http_json"
+
+    def __init__(self, *, user_agent: str, timeout_seconds: float) -> None:
+        self.user_agent = user_agent
+        self.timeout_seconds = timeout_seconds
+
+    def _fetch_json(self, url: str, params: dict[str, object] | None = None) -> object:
+        full_url = url
+        if params:
+            full_url = f"{url}?{urlencode(params, doseq=True)}"
+        request = Request(full_url, headers={"User-Agent": self.user_agent, "Accept": "application/json"})
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _fetch_text(
+        self,
+        url: str,
+        params: dict[str, object] | None = None,
+        *,
+        accept: str = "text/plain",
+    ) -> str:
+        full_url = url
+        if params:
+            full_url = f"{url}?{urlencode(params, doseq=True)}"
+        request = Request(full_url, headers={"User-Agent": self.user_agent, "Accept": accept})
+        with urlopen(request, timeout=self.timeout_seconds) as response:
+            return response.read().decode("utf-8")
+
+
+class EuropePMCOARetrievalBackend(HttpJsonRetrievalBackend):
+    """Europe PMC open-access retrieval with PMC OA PDF resolution."""
+
+    backend_name = "europe_pmc"
+
+    def __init__(self, *, user_agent: str, timeout_seconds: float) -> None:
+        super().__init__(user_agent=user_agent, timeout_seconds=timeout_seconds)
+        self._oa_link_cache: dict[str, tuple[str | None, str]] = {}
+
+    def search(self, plan: QueryPlan, *, limit: int) -> tuple[DiscoveredDocument, ...]:
+        query = f"({plan.retrieval_query or plan.query}) OPEN_ACCESS:y"
+        payload = self._fetch_json(
+            "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+            {
+                "query": query,
+                "format": "json",
+                "pageSize": max(limit, plan.target_documents),
+                "resultType": "core",
+            },
+        )
+        items = list((((payload or {}).get("resultList") or {}).get("result")) or [])
+        candidates: list[DiscoveredDocument] = []
+        for item in items:
+            if str(item.get("isOpenAccess") or "").upper() != "Y":
+                continue
+            title = str(item.get("title") or "untitled_paper").strip()
+            abstract = str(item.get("abstractText") or "")
+            journal = str(item.get("journalTitle") or "")
+            score, evidence = _match_score(plan, title, abstract, journal)
+            score += float(item.get("citedByCount") or 0) / 250.0
+            if score <= 0.0:
+                continue
+            pmcid = self._normalize_pmcid(str(item.get("pmcid") or ""))
+            download_url: str | None = None
+            document_format = "unknown"
+            if pmcid:
+                download_url, document_format = self._resolve_oa_pdf(pmcid)
+            if document_format != "pdf":
+                continue
+            doi = str(item.get("doi") or "").strip()
+            source = str(item.get("source") or "MED").strip()
+            article_id = str(item.get("id") or "").strip()
+            source_url = None
+            if pmcid:
+                source_url = f"https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/"
+            elif doi:
+                source_url = f"https://doi.org/{doi}"
+            elif article_id:
+                source_url = f"https://europepmc.org/article/{source}/{article_id}"
+            candidates.append(
+                DiscoveredDocument(
+                    title=title,
+                    score=score,
+                    retrieval_backend=self.backend_name,
+                    download_url=download_url,
+                    url=source_url,
+                    abstract=abstract,
+                    year=str(item.get("pubYear") or ""),
+                    identifier=pmcid or doi or article_id,
+                    document_format=document_format,
+                    evidence=evidence,
+                    metadata={
+                        "pmcid": pmcid,
+                        "doi": doi,
+                        "source": source,
+                        "journal": journal,
+                    },
+                )
+            )
+        candidates.sort(key=lambda item: (-item.score, item.title.lower()))
+        return tuple(candidates[:limit])
+
+    def _resolve_oa_pdf(self, pmcid: str) -> tuple[str | None, str]:
+        cached = self._oa_link_cache.get(pmcid)
+        if cached is not None:
+            return cached
+        xml_text = self._fetch_text(
+            "https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi",
+            {"id": pmcid},
+            accept="application/xml,text/xml;q=0.9,*/*;q=0.8",
+        )
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            resolved = (None, "unknown")
+            self._oa_link_cache[pmcid] = resolved
+            return resolved
+        download_url: str | None = None
+        document_format = "unknown"
+        for record in root.findall(".//record"):
+            for link in record.findall("./link"):
+                fmt = str(link.attrib.get("format") or "").lower()
+                href = str(link.attrib.get("href") or "").strip()
+                if not href:
+                    continue
+                if fmt == "pdf":
+                    download_url = self._normalize_oa_href(href)
+                    document_format = "pdf"
+                    break
+            if download_url:
+                break
+        resolved = (download_url, document_format)
+        self._oa_link_cache[pmcid] = resolved
+        return resolved
+
+    @staticmethod
+    def _normalize_pmcid(value: str) -> str:
+        raw = value.strip()
+        if not raw:
+            return ""
+        return raw if raw.upper().startswith("PMC") else f"PMC{raw}"
+
+    @staticmethod
+    def _normalize_oa_href(href: str) -> str:
+        if href.startswith("ftp://ftp.ncbi.nlm.nih.gov/"):
+            return "https://ftp.ncbi.nlm.nih.gov/" + href[len("ftp://ftp.ncbi.nlm.nih.gov/") :]
+        if href.startswith("ftp://"):
+            return "https://" + href[len("ftp://") :]
+        return href
+
+
+class ManifestRetrievalBackend:
+    """Search local manifest metadata using token-overlap heuristics."""
+
+    backend_name = "manifest"
+
+    def __init__(self, manifest_path: Path, source_pdf_root: Path | None = None) -> None:
+        self.manifest_path = manifest_path
+        self.source_pdf_root = source_pdf_root
+        self._records = _read_records(manifest_path)
+
+    def search(self, plan: QueryPlan, *, limit: int) -> tuple[DiscoveredDocument, ...]:
+        candidates: list[DiscoveredDocument] = []
+        for record in self._records:
+            title = str(record.get("title") or record.get("name") or "").strip()
+            abstract = str(record.get("abstract") or record.get("summary") or "").strip()
+            keywords = str(record.get("keywords") or record.get("tags") or "").strip()
+            score, evidence = _match_score(plan, title, abstract, keywords)
+            if "study" in (title + " " + abstract + " " + keywords).lower():
+                score += 0.5
+            if score <= 0.0:
+                continue
+            source_path = self._resolve_source_path(record)
+            download_url = str(record.get("download_url") or record.get("pdf_url") or "") or None
+            url = str(record.get("url") or download_url or "") or None
+            candidates.append(
+                DiscoveredDocument(
+                    title=title or (Path(source_path).stem if source_path else "untitled_document"),
+                    score=score,
+                    retrieval_backend=self.backend_name,
+                    source_path=str(source_path) if source_path else None,
+                    download_url=download_url,
+                    url=url,
+                    abstract=abstract,
+                    year=str(record.get("year") or ""),
+                    identifier=str(record.get("doi") or record.get("id") or ""),
+                    document_format=str(record.get("document_format") or _infer_document_format(download_url or url)),
+                    evidence=evidence,
+                    metadata={
+                        key: str(value)
+                        for key, value in record.items()
+                        if key
+                        not in {
+                            "title",
+                            "name",
+                            "abstract",
+                            "summary",
+                            "keywords",
+                            "tags",
+                            "url",
+                            "download_url",
+                            "pdf_url",
+                            "document_format",
+                        }
+                        and value not in (None, "")
+                    },
+                )
+            )
+        candidates.sort(key=lambda item: (-item.score, item.title.lower()))
+        return tuple(candidates[:limit])
+
+    def _resolve_source_path(self, record: dict[str, object]) -> Path | None:
+        for key in ("pdf_path", "path", "local_path", "file_path", "source_path"):
+            raw = record.get(key)
+            if not raw:
+                continue
+            candidate = Path(str(raw))
+            if candidate.is_absolute():
+                return candidate
+            if self.source_pdf_root:
+                return self.source_pdf_root / candidate
+            return (self.manifest_path.parent / candidate).resolve()
+        return None
+
+
+class FilesystemRetrievalBackend:
+    """Search PDF filenames directly when no manifest is available."""
+
+    backend_name = "filesystem"
+
+    def __init__(self, source_pdf_root: Path) -> None:
+        self.source_pdf_root = source_pdf_root
+
+    def search(self, plan: QueryPlan, *, limit: int) -> tuple[DiscoveredDocument, ...]:
+        candidates: list[DiscoveredDocument] = []
+        for path in sorted(self.source_pdf_root.rglob("*.pdf")):
+            title = path.stem.replace("_", " ").replace("-", " ")
+            score, evidence = _match_score(plan, title)
+            if score <= 0.0:
+                continue
+            candidates.append(
+                DiscoveredDocument(
+                    title=path.stem,
+                    score=score,
+                    retrieval_backend=self.backend_name,
+                    source_path=str(path),
+                    document_format="pdf",
+                    evidence=evidence,
+                )
+            )
+        candidates.sort(key=lambda item: (-item.score, item.title.lower()))
+        return tuple(candidates[:limit])
+
+
+class CrossrefRetrievalBackend(HttpJsonRetrievalBackend):
+    """Crossref metadata retrieval with optional PDF link extraction."""
+
+    backend_name = "crossref"
+
+    def search(self, plan: QueryPlan, *, limit: int) -> tuple[DiscoveredDocument, ...]:
+        retrieval_query = plan.retrieval_query or plan.normalized_query or plan.query
+        payload = self._fetch_json(
+            "https://api.crossref.org/works",
+            {
+                "query.bibliographic": retrieval_query,
+                "rows": max(limit, plan.target_documents),
+                "select": "DOI,title,abstract,published-print,published-online,URL,link,type,is-referenced-by-count",
+            },
+        )
+        items = list(((payload or {}).get("message") or {}).get("items") or [])
+        candidates: list[DiscoveredDocument] = []
+        for item in items:
+            title_values = item.get("title") or []
+            title = title_values[0].strip() if title_values else "untitled_work"
+            abstract = str(item.get("abstract") or "")
+            score, evidence = _match_score(plan, title, abstract)
+            score += float(item.get("is-referenced-by-count") or 0) / 500.0
+            if score <= 0.0:
+                continue
+            links = item.get("link") or []
+            download_url = None
+            for link in links:
+                link_url = str(link.get("URL") or "")
+                content_type = str(link.get("content-type") or "")
+                if "pdf" in content_type.lower() or _looks_like_pdf(link_url):
+                    download_url = link_url
+                    break
+            year = self._extract_crossref_year(item)
+            candidates.append(
+                DiscoveredDocument(
+                    title=title,
+                    score=score,
+                    retrieval_backend=self.backend_name,
+                    download_url=download_url,
+                    url=str(item.get("URL") or "") or None,
+                    abstract=abstract,
+                    year=year,
+                    identifier=str(item.get("DOI") or ""),
+                    document_format=_infer_document_format(download_url or str(item.get("URL") or "")),
+                    evidence=evidence,
+                    metadata={"type": str(item.get("type") or "")},
+                )
+            )
+        candidates.sort(key=lambda item: (-item.score, item.title.lower()))
+        return tuple(candidates[:limit])
+
+    @staticmethod
+    def _extract_crossref_year(item: dict[str, object]) -> str:
+        for key in ("published-print", "published-online"):
+            date_parts = (((item.get(key) or {}).get("date-parts") or [[]])[0] if isinstance(item.get(key), dict) else [])
+            if date_parts:
+                return str(date_parts[0])
+        return ""
+
+
+class SemanticScholarRetrievalBackend(HttpJsonRetrievalBackend):
+    """Semantic Scholar paper search with open-access PDF extraction."""
+
+    backend_name = "semantic_scholar"
+
+    def search(self, plan: QueryPlan, *, limit: int) -> tuple[DiscoveredDocument, ...]:
+        retrieval_query = plan.retrieval_query or plan.normalized_query or plan.query
+        payload = self._fetch_json(
+            "https://api.semanticscholar.org/graph/v1/paper/search",
+            {
+                "query": retrieval_query,
+                "limit": max(limit, plan.target_documents),
+                "fields": "title,abstract,year,url,venue,citationCount,openAccessPdf",
+            },
+        )
+        items = list((payload or {}).get("data") or [])
+        candidates: list[DiscoveredDocument] = []
+        for item in items:
+            title = str(item.get("title") or "untitled_paper")
+            abstract = str(item.get("abstract") or "")
+            score, evidence = _match_score(plan, title, abstract, str(item.get("venue") or ""))
+            score += float(item.get("citationCount") or 0) / 250.0
+            if score <= 0.0:
+                continue
+            open_access_pdf = item.get("openAccessPdf") or {}
+            download_url = str(open_access_pdf.get("url") or "") or None
+            candidates.append(
+                DiscoveredDocument(
+                    title=title,
+                    score=score,
+                    retrieval_backend=self.backend_name,
+                    download_url=download_url,
+                    url=str(item.get("url") or "") or None,
+                    abstract=abstract,
+                    year=str(item.get("year") or ""),
+                    identifier=str(item.get("paperId") or ""),
+                    document_format=_infer_document_format(download_url or str(item.get("url") or "")),
+                    evidence=evidence,
+                    metadata={"venue": str(item.get("venue") or "")},
+                )
+            )
+        candidates.sort(key=lambda item: (-item.score, item.title.lower()))
+        return tuple(candidates[:limit])
+
+
+class ScholarlyRetrievalBackend:
+    """Aggregate scholarly retrieval across multiple paper backends."""
+
+    backend_name = "scholarly"
+
+    def __init__(self, backends: tuple[RetrievalBackend, ...]) -> None:
+        self.backends = backends
+
+    def search(self, plan: QueryPlan, *, limit: int) -> tuple[DiscoveredDocument, ...]:
+        merged: dict[str, DiscoveredDocument] = {}
+        backend_limit = min(max(limit, plan.target_documents * 4, 20), 100)
+        backend_failures: list[str] = []
+        for backend in self.backends:
+            try:
+                results = backend.search(plan, limit=backend_limit)
+            except Exception as exc:
+                backend_failures.append(f"{getattr(backend, 'backend_name', type(backend).__name__)}: {exc}")
+                continue
+            for item in results:
+                key = (item.identifier or item.download_url or item.url or item.title).lower()
+                existing = merged.get(key)
+                if existing is None or self._rank_key(item) > self._rank_key(existing):
+                    merged[key] = item
+        ranked = sorted(merged.values(), key=self._sort_key, reverse=True)
+        if not ranked and backend_failures:
+            raise RuntimeError("All scholarly backends failed: " + "; ".join(backend_failures))
+        return tuple(ranked[:limit])
+
+    @staticmethod
+    def _rank_key(item: DiscoveredDocument) -> tuple[int, float]:
+        return (
+            1 if item.document_format == "pdf" else 0,
+            1 if item.retrieval_backend == "europe_pmc" else 0,
+            float(item.score),
+        )
+
+    @staticmethod
+    def _sort_key(item: DiscoveredDocument) -> tuple[int, float]:
+        return (
+            1 if item.document_format == "pdf" else 0,
+            1 if item.retrieval_backend == "europe_pmc" else 0,
+            float(item.score),
+        )
+
+
+class SECFilingRetrievalBackend(HttpJsonRetrievalBackend):
+    """SEC EDGAR retrieval backend for recent company filings."""
+
+    backend_name = "sec"
+
+    def __init__(
+        self,
+        *,
+        user_agent: str,
+        timeout_seconds: float,
+        form_types: tuple[str, ...],
+        company_limit: int,
+    ) -> None:
+        super().__init__(user_agent=_resolve_sec_user_agent(user_agent), timeout_seconds=timeout_seconds)
+        self.form_types = tuple(form_types)
+        self.company_limit = max(1, company_limit)
+
+    def search(self, plan: QueryPlan, *, limit: int) -> tuple[DiscoveredDocument, ...]:
+        requested_forms = plan.requested_forms or self.form_types
+        companies = self._search_companies(plan)
+        candidates: list[DiscoveredDocument] = []
+        company_limit = max(self.company_limit, len(plan.sec_company_targets)) if plan.sec_company_targets else self.company_limit
+        for company in companies[: company_limit]:
+            submissions = self._fetch_json(company["submissions_url"])
+            recent = ((submissions or {}).get("filings") or {}).get("recent") or {}
+            accession_numbers = list(recent.get("accessionNumber") or [])
+            forms = list(recent.get("form") or [])
+            filing_dates = list(recent.get("filingDate") or [])
+            primary_documents = list(recent.get("primaryDocument") or [])
+            for accession, form, filing_date, primary_document in zip(
+                accession_numbers,
+                forms,
+                filing_dates,
+                primary_documents,
+            ):
+                if requested_forms and str(form) not in requested_forms:
+                    continue
+                accession_no_dash = str(accession).replace("-", "")
+                primary_document = str(primary_document)
+                filing_url = (
+                    f"https://www.sec.gov/Archives/edgar/data/"
+                    f"{company['cik_nopad']}/{accession_no_dash}/{primary_document}"
+                )
+                title = f"{company['title']} {form} {filing_date}"
+                score, evidence = _match_score(plan, title, company["title"], company["ticker"])
+                score += company["score"]
+                candidates.append(
+                    DiscoveredDocument(
+                        title=title,
+                        score=score,
+                        retrieval_backend=self.backend_name,
+                        download_url=filing_url,
+                        url=filing_url,
+                        year=str(filing_date).split("-", 1)[0],
+                        identifier=str(accession),
+                        document_format=_infer_document_format(filing_url),
+                        evidence=evidence + (str(form),),
+                        metadata={
+                            "ticker": company["ticker"],
+                            "company": company["title"],
+                            "cik": company["cik"],
+                            "form": str(form),
+                            "filing_date": str(filing_date),
+                        },
+                    )
+                )
+                if len(candidates) >= limit * 2:
+                    break
+                if plan.sec_cohort_mode == "latest_per_company":
+                    break
+            if len(candidates) >= limit * 2:
+                break
+        candidates.sort(key=lambda item: (-item.score, item.title.lower()))
+        return tuple(candidates[:limit])
+
+    def _search_companies(self, plan: QueryPlan) -> list[dict[str, object]]:
+        payload = self._fetch_json("https://www.sec.gov/files/company_tickers.json")
+        companies = []
+        values = payload.values() if isinstance(payload, dict) else []
+        for item in values:
+            title = str(item.get("title") or "")
+            ticker = str(item.get("ticker") or "")
+            if plan.sec_company_targets:
+                score, evidence = _sec_company_target_match_score(plan, title, ticker)
+                if score <= 0.0:
+                    continue
+            else:
+                score, evidence = _sec_company_match_score(plan, title, ticker)
+                if score <= 0.0:
+                    continue
+            cik_str = str(item.get("cik_str") or "")
+            cik = cik_str.zfill(10)
+            companies.append(
+                {
+                    "title": title,
+                    "ticker": ticker,
+                    "cik": cik,
+                    "cik_nopad": str(int(cik_str)) if cik_str else "",
+                    "score": score,
+                    "evidence": evidence,
+                    "submissions_url": f"https://data.sec.gov/submissions/CIK{cik}.json",
+                }
+            )
+        companies.sort(key=lambda item: (-float(item["score"]), str(item["title"]).lower()))
+        return companies
+
+
+class DemocritusQueryAgenticRunner:
+    """Query-first ingress layer that acquires a corpus before running Democritus."""
+
+    def __init__(self, config: DemocritusQueryAgenticConfig) -> None:
+        self.config = config.resolved()
+        if not self.config.query:
+            raise ValueError("A non-empty acquisition query is required.")
+        self.logs_dir = self.config.outdir / "query_agent_logs"
+        self.query_plan_path = self.config.outdir / "query_plan.json"
+        self.discovered_path = self.config.outdir / "discovered_documents.json"
+        self.selected_path = self.config.outdir / "selected_documents.json"
+        self.corpus_manifest_path = self.config.outdir / "acquired_corpus_manifest.json"
+        self.summary_path = self.config.outdir / "query_run_summary.json"
+        self.pdf_dir = self.config.outdir / "acquired_pdfs"
+        self.batch_outdir = self.config.outdir / "democritus_runs"
+
+    def run(self) -> DemocritusQueryRunResult:
+        self.config.outdir.mkdir(parents=True, exist_ok=True)
+        batch_runner: DemocritusBatchAgenticRunner | None = None
+        batch_result: DemocritusBatchRunResult | None = None
+        if not self.config.discovery_only and not self.config.dry_run:
+            batch_runner = self._build_batch_runner(streaming=True)
+        selected_documents: tuple[DiscoveredDocument, ...] = ()
+        acquired: tuple[AcquiredCorpusDocument, ...] = ()
+        analysis_iterations = 0
+        consensus_reached = False
+        convergence_assessment = None
+        if batch_runner is not None:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                batch_future = executor.submit(batch_runner.run_with_artifacts)
+                try:
+                    plan = self._run_query_interpretation_agent()
+                    (
+                        selected_documents,
+                        acquired,
+                        analysis_iterations,
+                        consensus_reached,
+                        convergence_assessment,
+                    ) = self._run_corpus_materialization_agent(
+                        plan,
+                        on_document_acquired=lambda item: batch_runner.register_document(
+                            Path(item.acquired_pdf_path)
+                        ),
+                    )
+                finally:
+                    batch_runner.close_document_stream()
+                batch_result = batch_future.result()
+        else:
+            plan = self._run_query_interpretation_agent()
+            if self.config.discovery_only:
+                discovered = self._run_document_discovery_agent(plan)
+                selected_documents = tuple(discovered[: plan.target_documents])
+            else:
+                (
+                    selected_documents,
+                    acquired,
+                    analysis_iterations,
+                    consensus_reached,
+                    convergence_assessment,
+                ) = self._run_corpus_materialization_agent(
+                    plan,
+                )
+                batch_runner = self._build_batch_runner(streaming=False)
+                batch_result = batch_runner.run_with_artifacts()
+        batch_records: tuple[DemocritusBatchRecord, ...] = ()
+        if batch_result is not None:
+            batch_records = batch_result.records
+        result = DemocritusQueryRunResult(
+            query_plan=plan,
+            selected_documents=selected_documents,
+            acquired_documents=acquired,
+            batch_records=batch_records,
+            pdf_dir=self.pdf_dir,
+            batch_outdir=self.batch_outdir,
+            summary_path=self.summary_path,
+            analysis_iterations=analysis_iterations,
+            consensus_reached=consensus_reached,
+            convergence_assessment=convergence_assessment,
+            csql_sqlite_path=batch_result.csql_bundle.sqlite_path if batch_result and batch_result.csql_bundle else None,
+            csql_summary_path=batch_result.csql_bundle.summary_path if batch_result and batch_result.csql_bundle else None,
+            corpus_synthesis_summary_path=(
+                batch_result.corpus_synthesis.summary_path
+                if batch_result and batch_result.corpus_synthesis
+                else None
+            ),
+            corpus_synthesis_dashboard_path=(
+                batch_result.corpus_synthesis.dashboard_path
+                if batch_result and batch_result.corpus_synthesis
+                else None
+            ),
+        )
+        _write_json(
+            self.summary_path,
+            {
+                "query_plan": asdict(plan),
+                "selected_documents": [asdict(item) for item in selected_documents],
+                "acquired_documents": [asdict(item) for item in acquired],
+                "pdf_dir": str(self.pdf_dir),
+                "batch_outdir": str(self.batch_outdir),
+                "batch_records": len(batch_records),
+                "analysis_iterations": analysis_iterations,
+                "consensus_reached": consensus_reached,
+                "convergence_assessment": convergence_assessment,
+                "discovery_only": self.config.discovery_only,
+                "retrieval_backend": self._backend_name(),
+                "csql_sqlite_path": str(result.csql_sqlite_path) if result.csql_sqlite_path else None,
+                "csql_summary_path": str(result.csql_summary_path) if result.csql_summary_path else None,
+                "corpus_synthesis_summary_path": (
+                    str(result.corpus_synthesis_summary_path)
+                    if result.corpus_synthesis_summary_path
+                    else None
+                ),
+                "corpus_synthesis_dashboard_path": (
+                    str(result.corpus_synthesis_dashboard_path)
+                    if result.corpus_synthesis_dashboard_path
+                    else None
+                ),
+            },
+        )
+        return result
+
+    def _build_batch_runner(self, *, streaming: bool) -> DemocritusBatchAgenticRunner:
+        return DemocritusBatchAgenticRunner(
+            DemocritusBatchConfig(
+                pdf_dir=self.pdf_dir,
+                outdir=self.batch_outdir,
+                request_query=self.config.query,
+                max_docs=self.config.max_docs,
+                max_workers=self.config.max_workers,
+                agent_concurrency_limits=self.config.agent_concurrency_limits,
+                include_phase2=self.config.include_phase2,
+                auto_topics_from_pdf=self.config.auto_topics_from_pdf,
+                root_topic_strategy=self.config.root_topic_strategy,
+                intra_document_shards=self.config.intra_document_shards,
+                enable_corpus_synthesis=self.config.enable_corpus_synthesis,
+                discover_existing_documents=not streaming,
+                allow_incremental_admission=streaming,
+                dry_run=self.config.dry_run,
+            )
+        )
+
+    def _log(self, agent_name: str, lines: list[str]) -> None:
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        (self.logs_dir / f"{agent_name}.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def _run_query_interpretation_agent(self) -> QueryPlan:
+        raw_normalized = " ".join(self.config.query.lower().split())
+        requested_forms = tuple(sorted(set(re.findall(r"\b(?:10-k|10-q|8-k)\b", raw_normalized))))
+        retrieval_query = _derive_retrieval_query(self.config.query)
+        sec_company_targets = _extract_sec_company_targets(self.config.query)
+        sec_cohort_mode = _infer_sec_cohort_mode(self.config.query, sec_company_targets)
+        explicit_target_documents = infer_requested_result_count(
+            self.config.query,
+            nouns=("filing", "filings", "report", "reports", "document", "documents"),
+        )
+        if explicit_target_documents is not None:
+            target_documents = explicit_target_documents
+        elif sec_cohort_mode == "latest_per_company":
+            target_documents = len(sec_company_targets)
+        else:
+            target_documents = max(1, self.config.target_documents)
+        plan = QueryPlan(
+            query=self.config.query,
+            retrieval_query=retrieval_query,
+            normalized_query=retrieval_query,
+            keyword_tokens=_tokenize(retrieval_query),
+            target_documents=target_documents,
+            requested_forms=tuple(form.upper() for form in requested_forms),
+            sec_company_targets=sec_company_targets,
+            sec_cohort_mode=sec_cohort_mode,
+        )
+        _write_json(self.query_plan_path, asdict(plan))
+        self._log(
+            "query_interpretation_agent",
+            [
+                f"[QUERY] {self.config.query}",
+                f"[RETRIEVAL_QUERY] {plan.retrieval_query}",
+                f"[NORMALIZED] {plan.normalized_query}",
+                f"[KEYWORDS] {', '.join(plan.keyword_tokens) if plan.keyword_tokens else '(none)'}",
+                f"[TARGET_DOCUMENTS] {plan.target_documents}",
+                f"[REQUESTED_FORMS] {', '.join(plan.requested_forms) if plan.requested_forms else '(none)'}",
+                f"[SEC_COMPANY_TARGETS] {' | '.join('/'.join(target) for target in plan.sec_company_targets) if plan.sec_company_targets else '(none)'}",
+                f"[SEC_COHORT_MODE] {plan.sec_cohort_mode}",
+                f"[RETRIEVAL_BACKEND] {self._backend_name()}",
+            ],
+        )
+        return plan
+
+    def _backend_name(self) -> str:
+        if self.config.retrieval_backend == "auto":
+            if self.config.manifest_path:
+                return "manifest"
+            if self.config.source_pdf_root:
+                return "filesystem"
+            return "scholarly"
+        return self.config.retrieval_backend
+
+    def _provider(self) -> RetrievalBackend:
+        backend_name = self._backend_name()
+        if backend_name == "manifest":
+            if not self.config.manifest_path:
+                raise ValueError("Manifest backend requires `manifest_path`.")
+            return ManifestRetrievalBackend(
+                manifest_path=self.config.manifest_path,
+                source_pdf_root=self.config.source_pdf_root,
+            )
+        if backend_name == "filesystem":
+            if not self.config.source_pdf_root:
+                raise ValueError("Filesystem backend requires `source_pdf_root`.")
+            return FilesystemRetrievalBackend(self.config.source_pdf_root)
+        if backend_name == "crossref":
+            return CrossrefRetrievalBackend(
+                user_agent=self.config.retrieval_user_agent,
+                timeout_seconds=self.config.retrieval_timeout_seconds,
+            )
+        if backend_name == "semantic_scholar":
+            return SemanticScholarRetrievalBackend(
+                user_agent=self.config.retrieval_user_agent,
+                timeout_seconds=self.config.retrieval_timeout_seconds,
+            )
+        if backend_name == "europe_pmc":
+            return EuropePMCOARetrievalBackend(
+                user_agent=self.config.retrieval_user_agent,
+                timeout_seconds=self.config.retrieval_timeout_seconds,
+            )
+        if backend_name == "scholarly":
+            return ScholarlyRetrievalBackend(
+                (
+                    EuropePMCOARetrievalBackend(
+                        user_agent=self.config.retrieval_user_agent,
+                        timeout_seconds=self.config.retrieval_timeout_seconds,
+                    ),
+                    SemanticScholarRetrievalBackend(
+                        user_agent=self.config.retrieval_user_agent,
+                        timeout_seconds=self.config.retrieval_timeout_seconds,
+                    ),
+                    CrossrefRetrievalBackend(
+                        user_agent=self.config.retrieval_user_agent,
+                        timeout_seconds=self.config.retrieval_timeout_seconds,
+                    ),
+                )
+            )
+        if backend_name == "sec":
+            return SECFilingRetrievalBackend(
+                user_agent=self.config.retrieval_user_agent,
+                timeout_seconds=self.config.retrieval_timeout_seconds,
+                form_types=self.config.sec_form_types,
+                company_limit=self.config.sec_company_limit,
+            )
+        raise ValueError(f"Unknown retrieval backend: {backend_name}")
+
+    def _discovery_limit(self, plan: QueryPlan) -> int:
+        backend_name = self._backend_name()
+        if backend_name in {"scholarly", "semantic_scholar", "crossref"}:
+            return max(plan.target_documents * 12, 30)
+        if backend_name == "sec":
+            return max(plan.target_documents * 6, 20)
+        return max(1, plan.target_documents * 3)
+
+    def _discovery_batch_size(self, plan: QueryPlan) -> int:
+        backend_name = self._backend_name()
+        if backend_name in {"scholarly", "semantic_scholar", "crossref"}:
+            return max(plan.target_documents * 2, 25)
+        if backend_name == "sec":
+            return max(plan.target_documents * 2, 10)
+        return max(plan.target_documents, 10)
+
+    def _search_documents(
+        self,
+        provider: RetrievalBackend,
+        plan: QueryPlan,
+        *,
+        limit: int,
+    ) -> tuple[DiscoveredDocument, ...]:
+        try:
+            return provider.search(plan, limit=limit)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Document discovery failed for backend {getattr(provider, 'backend_name', self._backend_name())!r} "
+                f"with retrieval query {plan.retrieval_query!r}: {exc}"
+            ) from exc
+
+    def _run_document_discovery_agent(self, plan: QueryPlan) -> tuple[DiscoveredDocument, ...]:
+        provider = self._provider()
+        discovery_limit = self._discovery_limit(plan)
+        discovered = self._search_documents(provider, plan, limit=discovery_limit)
+        if not discovered:
+            raise FileNotFoundError(
+                f"No candidate documents matched query: {self.config.query} "
+                f"(retrieval query={plan.retrieval_query!r}, backend={getattr(provider, 'backend_name', self._backend_name())!r})"
+            )
+        _write_json(self.discovered_path, [asdict(item) for item in discovered])
+        self._log(
+            "document_discovery_agent",
+            [
+                f"[QUERY] {plan.query}",
+                f"[RETRIEVAL_QUERY] {plan.retrieval_query}",
+                f"[BACKEND] {getattr(provider, 'backend_name', self._backend_name())}",
+                f"[DISCOVERED] {len(discovered)}",
+                f"[TARGET] {plan.target_documents}",
+                *[
+                    f"[DOC {index:02d}] score={item.score:.3f} backend={item.retrieval_backend} "
+                    f"format={item.document_format} title={item.title}"
+                    for index, item in enumerate(discovered[: plan.target_documents], start=1)
+                ],
+            ],
+        )
+        return discovered
+
+    def _run_corpus_materialization_agent(
+        self,
+        plan: QueryPlan,
+        *,
+        on_document_acquired: Callable[[AcquiredCorpusDocument], object] | None = None,
+    ) -> tuple[
+        tuple[DiscoveredDocument, ...],
+        tuple[AcquiredCorpusDocument, ...],
+        int,
+        bool,
+        dict[str, object] | None,
+    ]:
+        self.pdf_dir.mkdir(parents=True, exist_ok=True)
+        selected: list[DiscoveredDocument] = []
+        acquired: list[AcquiredCorpusDocument] = []
+        analysis_iterations = 0
+        consensus_reached = False
+        convergence_assessment: dict[str, object] | None = None
+        provider = self._provider()
+        log_lines = [
+            f"[CORPUS] {self.config.corpus_name}",
+            f"[TARGET_DIR] {self.pdf_dir}",
+            "[MODE] materialize_pdf_documents",
+        ]
+        failures: list[str] = []
+        max_documents = max(0, int(self.config.max_docs))
+        batch_size = max(1, int(self.config.consensus_batch_size))
+        convergence_tracker = self._build_convergence_tracker(plan, max_documents=max_documents)
+        discovery_batch_size = self._discovery_batch_size(plan)
+        discovered_documents: list[DiscoveredDocument] = []
+        seen_document_keys: set[str] = set()
+        candidate_index = 0
+        requested_limit = 0
+        discovery_round = 0
+        discovery_exhausted = False
+
+        while True:
+            while candidate_index >= len(discovered_documents) and not discovery_exhausted:
+                discovery_round += 1
+                next_limit = requested_limit + discovery_batch_size if requested_limit else max(
+                    plan.target_documents,
+                    discovery_batch_size,
+                )
+                if max_documents > 0:
+                    next_limit = min(next_limit, max_documents)
+                if next_limit <= requested_limit:
+                    discovery_exhausted = True
+                    break
+                batch = self._search_documents(provider, plan, limit=next_limit)
+                previous_count = len(discovered_documents)
+                requested_limit = next_limit
+                for document in batch:
+                    key = _document_identity(document)
+                    if key in seen_document_keys:
+                        continue
+                    seen_document_keys.add(key)
+                    discovered_documents.append(document)
+                    if max_documents > 0 and len(discovered_documents) >= max_documents:
+                        break
+                _write_json(self.discovered_path, [asdict(item) for item in discovered_documents])
+                log_lines.append(
+                    f"[DISCOVERY] round={discovery_round} backend={getattr(provider, 'backend_name', self._backend_name())} "
+                    f"requested_limit={requested_limit} total_candidates={len(discovered_documents)} "
+                    f"retrieval_query={plan.retrieval_query}"
+                )
+                if len(discovered_documents) == previous_count:
+                    discovery_exhausted = True
+                    log_lines.append("[DISCOVERY] no new candidates returned; treating retrieval as exhausted")
+                elif len(batch) < requested_limit:
+                    discovery_exhausted = True
+                    log_lines.append(
+                        f"[DISCOVERY] provider returned only {len(batch)} candidates for limit={requested_limit}; "
+                        "treating retrieval as exhausted"
+                    )
+                elif max_documents > 0 and len(discovered_documents) >= max_documents:
+                    discovery_exhausted = True
+                    log_lines.append(
+                        f"[DISCOVERY] reached configured max_docs={max_documents}; stopping further retrieval"
+                    )
+
+            if candidate_index >= len(discovered_documents):
+                break
+
+            document = discovered_documents[candidate_index]
+            candidate_index += 1
+            target_name = f"{len(acquired) + 1:04d}_{_slugify(document.title)}.pdf"
+            target_path = self.pdf_dir / target_name
+            if document.source_path:
+                source_path = Path(document.source_path)
+                if not source_path.exists():
+                    failures.append(f"{document.title}: missing local source {source_path}")
+                    log_lines.append(f"[SKIP] missing local source for {document.title}: {source_path}")
+                    continue
+                shutil.copy2(source_path, target_path)
+                try:
+                    self._validate_materialized_pdf(target_path)
+                except Exception as exc:
+                    if target_path.exists():
+                        target_path.unlink()
+                    failures.append(f"{document.title}: {exc}")
+                    log_lines.append(
+                        f"[SKIP] rank={candidate_index} copied file invalid for {document.title}: {exc}"
+                    )
+                    continue
+                selected.append(document)
+                materialized = AcquiredCorpusDocument(
+                    title=document.title,
+                    acquired_pdf_path=str(target_path),
+                    source_path=str(source_path),
+                    score=document.score,
+                    run_name_hint=target_path.stem,
+                    retrieval_backend=document.retrieval_backend,
+                )
+                acquired.append(materialized)
+                self._persist_materialized_corpus(selected, acquired)
+                if on_document_acquired is not None:
+                    on_document_acquired(materialized)
+                log_lines.append(f"[COPY] rank={candidate_index} {source_path} -> {target_path}")
+                stop_now, assessment_ran, reason = self._assess_convergence_if_ready(
+                    plan,
+                    selected,
+                    acquired_count=len(acquired),
+                    search_exhausted=discovery_exhausted and candidate_index >= len(discovered_documents),
+                    batch_size=batch_size,
+                    tracker=convergence_tracker,
+                )
+                if assessment_ran:
+                    analysis_iterations += 1
+                    convergence_assessment = convergence_tracker.last_assessment().as_dict()
+                if reason:
+                    log_lines.append(f"[CONVERGENCE] {reason}")
+                if stop_now:
+                    consensus_reached = (
+                        convergence_tracker.last_assessment().stop_trigger == "stability"
+                    )
+                    break
+                continue
+            if document.download_url and document.document_format == "pdf":
+                try:
+                    self._download_file(document.download_url, target_path, referer=document.url)
+                    self._validate_materialized_pdf(target_path)
+                except Exception as exc:
+                    if target_path.exists():
+                        target_path.unlink()
+                    failures.append(f"{document.title}: {exc}")
+                    log_lines.append(
+                        f"[SKIP] rank={candidate_index} download failed for {document.title}: {exc}"
+                    )
+                    continue
+                selected.append(document)
+                materialized = AcquiredCorpusDocument(
+                    title=document.title,
+                    acquired_pdf_path=str(target_path),
+                    source_path=document.download_url,
+                    score=document.score,
+                    run_name_hint=target_path.stem,
+                    retrieval_backend=document.retrieval_backend,
+                )
+                acquired.append(materialized)
+                self._persist_materialized_corpus(selected, acquired)
+                if on_document_acquired is not None:
+                    on_document_acquired(materialized)
+                log_lines.append(f"[DOWNLOAD] rank={candidate_index} {document.download_url} -> {target_path}")
+                stop_now, assessment_ran, reason = self._assess_convergence_if_ready(
+                    plan,
+                    selected,
+                    acquired_count=len(acquired),
+                    search_exhausted=discovery_exhausted and candidate_index >= len(discovered_documents),
+                    batch_size=batch_size,
+                    tracker=convergence_tracker,
+                )
+                if assessment_ran:
+                    analysis_iterations += 1
+                    convergence_assessment = convergence_tracker.last_assessment().as_dict()
+                if reason:
+                    log_lines.append(f"[CONVERGENCE] {reason}")
+                if stop_now:
+                    consensus_reached = (
+                        convergence_tracker.last_assessment().stop_trigger == "stability"
+                    )
+                    break
+                continue
+            failures.append(
+                f"{document.title}: unsupported document format {document.document_format!r} "
+                f"from backend {document.retrieval_backend!r}"
+            )
+            log_lines.append(
+                f"[SKIP] rank={candidate_index} unsupported format={document.document_format} "
+                f"backend={document.retrieval_backend} title={document.title}"
+            )
+        if not acquired:
+            self._log("corpus_materialization_agent", log_lines + ["[ERROR] no materializable PDF documents found"])
+            failure_preview = "; ".join(failures[:3]) if failures else "no candidates were materializable"
+            raise RuntimeError(
+                "Failed to materialize any PDF documents for Democritus. "
+                f"First issues: {failure_preview}"
+            )
+        if not consensus_reached and not discovery_exhausted and max_documents == 0:
+            log_lines.append("[WARN] retrieval loop exited before declaring convergence or exhaustion")
+        if len(acquired) < self.config.target_documents:
+            log_lines.append(
+                f"[WARN] acquired {len(acquired)} documents out of requested {self.config.target_documents}"
+            )
+        self._persist_materialized_corpus(selected, acquired)
+        self._log("corpus_materialization_agent", log_lines)
+        return tuple(selected), tuple(acquired), analysis_iterations, consensus_reached, convergence_assessment
+
+    def _assess_convergence_if_ready(
+        self,
+        plan: QueryPlan,
+        selected: list[DiscoveredDocument],
+        *,
+        acquired_count: int,
+        search_exhausted: bool,
+        batch_size: int,
+        tracker: EvidenceConvergenceTracker[DemocritusEvidenceSnapshot],
+    ) -> tuple[bool, bool, str]:
+        if not self.config.consensus_enabled:
+            return acquired_count >= self.config.target_documents, False, ""
+        if acquired_count < self.config.target_documents:
+            return False, False, ""
+        is_batch_boundary = (acquired_count - self.config.target_documents) % batch_size == 0
+        is_last_candidate = search_exhausted
+        if not is_batch_boundary and not is_last_candidate:
+            return False, False, ""
+        snapshot = self._democritus_convergence_snapshot(plan, tuple(selected))
+        assessment = tracker.assess(snapshot, evidence_count=acquired_count)
+        return assessment.stop, True, assessment.reason
+
+    def _build_convergence_tracker(
+        self,
+        plan: QueryPlan,
+        *,
+        max_documents: int,
+    ) -> EvidenceConvergenceTracker[DemocritusEvidenceSnapshot]:
+        del plan
+        return EvidenceConvergenceTracker(
+            policy=EvidenceConvergencePolicy(
+                min_evidence=max(1, self.config.target_documents),
+                stability_threshold=float(self.config.consensus_similarity_threshold),
+                required_stable_passes=max(1, self.config.consensus_required_stable_passes),
+                max_evidence=max(0, max_documents),
+            ),
+            adapter=DemocritusConvergenceAdapter(),
+        )
+
+    def _max_documents_to_consider(self, discovered_count: int) -> int:
+        if self.config.max_docs > 0:
+            return min(self.config.max_docs, discovered_count)
+        return discovered_count
+
+    def _democritus_convergence_snapshot(
+        self,
+        plan: QueryPlan,
+        selected_documents: tuple[DiscoveredDocument, ...],
+    ) -> DemocritusEvidenceSnapshot:
+        corpus_tokens: Counter[str] = Counter()
+        matched_keywords = set()
+        total_score = 0.0
+        for document in selected_documents:
+            total_score += float(document.score)
+            text = " ".join(
+                value
+                for value in (
+                    document.title,
+                    document.abstract,
+                    " ".join(document.evidence),
+                    document.year,
+                )
+                if value
+            ).lower()
+            tokens = _tokenize(text)
+            for token in tokens:
+                if token in plan.keyword_tokens:
+                    matched_keywords.add(token)
+                    continue
+                corpus_tokens[token] += 1
+        top_terms = tuple(
+            token
+            for token, _ in corpus_tokens.most_common(6)
+            if token not in plan.keyword_tokens
+        )
+        average_score = total_score / len(selected_documents) if selected_documents else 0.0
+        return DemocritusEvidenceSnapshot(
+            keyword_support=tuple(sorted(matched_keywords)),
+            top_context_terms=top_terms,
+            average_score=round(average_score, 3),
+            evidence_count=len(selected_documents),
+        )
+
+    def _persist_materialized_corpus(
+        self,
+        selected: list[DiscoveredDocument],
+        acquired: list[AcquiredCorpusDocument],
+    ) -> None:
+        _write_json(self.selected_path, [asdict(item) for item in selected])
+        _write_json(self.corpus_manifest_path, [asdict(item) for item in acquired])
+
+    def _download_file(self, url: str, target_path: Path, *, referer: str | None = None) -> None:
+        candidate_urls = [url]
+        if url.startswith("http://"):
+            candidate_urls.insert(0, "https://" + url[len("http://") :])
+        last_error: Exception | None = None
+        for candidate_url in dict.fromkeys(candidate_urls):
+            headers = self._download_request_headers(referer=referer)
+            request = Request(candidate_url, headers=headers)
+            try:
+                with urlopen(request, timeout=self.config.retrieval_timeout_seconds) as response:
+                    content = response.read()
+            except (HTTPError, URLError) as exc:
+                last_error = exc
+                continue
+            target_path.write_bytes(content)
+            try:
+                self._validate_pdf_file(target_path)
+            except Exception as exc:
+                if target_path.exists():
+                    target_path.unlink()
+                last_error = exc
+                continue
+            return
+        if last_error is None:
+            raise RuntimeError(f"Could not download {url}")
+        raise last_error
+
+    def _validate_materialized_pdf(self, path: Path) -> None:
+        self._validate_pdf_file(path)
+        if not self.config.auto_topics_from_pdf:
+            return
+        text = self._extract_pdf_text_for_validation(path)
+        if text is None:
+            return
+        if not text.strip():
+            raise RuntimeError(
+                f"PDF {path.name!r} does not contain extractable text for Democritus topic discovery"
+            )
+
+    @staticmethod
+    def _extract_pdf_text_for_validation(path: Path, *, max_chars: int = 12000) -> str | None:
+        text = ""
+        backend_available = False
+        try:
+            import fitz  # PyMuPDF
+            backend_available = True
+
+            doc = fitz.open(str(path))
+            try:
+                for index in range(min(5, doc.page_count)):
+                    text += doc.load_page(index).get_text("text") + "\n"
+                    if len(text) >= max_chars:
+                        break
+            finally:
+                doc.close()
+        except Exception:
+            try:
+                from pypdf import PdfReader
+                backend_available = True
+
+                reader = PdfReader(str(path))
+                for index in range(min(5, len(reader.pages))):
+                    text += (reader.pages[index].extract_text() or "") + "\n"
+                    if len(text) >= max_chars:
+                        break
+            except Exception as exc:
+                if not backend_available:
+                    return None
+                raise RuntimeError(f"Could not extract text from PDF {path!r}") from exc
+        return text[:max_chars]
+
+    def _download_request_headers(self, *, referer: str | None = None) -> dict[str, str]:
+        user_agent = self.config.retrieval_user_agent.strip()
+        if not user_agent or user_agent.startswith("FunctorFlow_v2/"):
+            user_agent = _BROWSER_DOWNLOAD_USER_AGENT
+        headers = {
+            "User-Agent": user_agent,
+            "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        if referer:
+            headers["Referer"] = referer
+        return headers
+
+    @staticmethod
+    def _validate_pdf_file(path: Path) -> None:
+        if not path.exists():
+            raise FileNotFoundError(path)
+        payload = path.read_bytes()
+        if not payload:
+            raise RuntimeError(f"downloaded file {path.name!r} is empty")
+        if not payload.lstrip().startswith(b"%PDF-"):
+            raise RuntimeError(f"downloaded file {path.name!r} is not a valid PDF payload")
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Acquire a query-driven corpus, then run agentic Democritus.")
+    parser.add_argument(
+        "--query",
+        default="",
+        help="Natural-language corpus acquisition request. If omitted, a local dashboard will open to collect it.",
+    )
+    parser.add_argument("--outdir", required=True)
+    parser.add_argument("--target-docs", type=int, default=None)
+    parser.add_argument("--manifest", default="")
+    parser.add_argument("--source-pdf-root", default="")
+    parser.add_argument(
+        "--retrieval-backend",
+        default="auto",
+        choices=["auto", "manifest", "filesystem", "crossref", "semantic_scholar", "europe_pmc", "scholarly", "sec"],
+    )
+    parser.add_argument(
+        "--retrieval-user-agent",
+        default=_DEFAULT_RETRIEVAL_USER_AGENT,
+        help=(
+            "Retrieval identity string. For SEC EDGAR this should include contact info, "
+            "for example 'Your Name your_email@example.com'."
+        ),
+    )
+    parser.add_argument("--retrieval-timeout-seconds", type=float, default=20.0)
+    parser.add_argument("--discovery-only", action="store_true")
+    parser.add_argument("--sec-form", action="append", default=[], help="SEC form to request, e.g. 10-K. May be repeated.")
+    parser.add_argument("--sec-company-limit", type=int, default=3)
+    parser.add_argument("--corpus-name", default="query_corpus")
+    parser.add_argument("--max-docs", type=int, default=None)
+    parser.add_argument("--consensus-batch-size", type=int, default=1)
+    parser.add_argument("--consensus-similarity-threshold", type=float, default=0.9)
+    parser.add_argument("--consensus-stable-passes", type=int, default=1)
+    parser.add_argument("--disable-consensus", action="store_true")
+    parser.add_argument("--max-workers", type=int, default=8)
+    parser.add_argument(
+        "--agent-limit",
+        action="append",
+        default=[],
+        help="Per-agent concurrency limit in the form agent_name=limit. May be repeated.",
+    )
+    parser.add_argument("--skip-phase2", action="store_true")
+    parser.add_argument("--root-topic-strategy", default="v0_openai", choices=["v0_openai", "heuristic"])
+    parser.add_argument("--no-auto-topics", action="store_true")
+    parser.add_argument("--intra-document-shards", type=int, default=1)
+    parser.add_argument("--dry-run", action="store_true")
+    return parser.parse_args()
+
+
+def _parse_agent_limit_args(values: list[str]) -> tuple[tuple[str, int], ...]:
+    parsed: list[tuple[str, int]] = []
+    for value in values:
+        if "=" not in value:
+            raise ValueError(f"Invalid --agent-limit value {value!r}; expected agent_name=limit.")
+        agent_name, raw_limit = value.split("=", 1)
+        agent_name = agent_name.strip()
+        if not agent_name:
+            raise ValueError(f"Invalid --agent-limit value {value!r}; missing agent name.")
+        try:
+            limit = int(raw_limit)
+        except ValueError as exc:
+            raise ValueError(f"Invalid --agent-limit value {value!r}; limit must be an integer.") from exc
+        parsed.append((agent_name, limit))
+    return tuple(parsed)
+
+
+def _resolve_query_for_main(args: argparse.Namespace) -> str:
+    query = " ".join(str(args.query or "").split()).strip()
+    if query:
+        return query
+    artifact_path = (
+        Path(args.outdir).resolve()
+        / "democritus_runs"
+        / "corpus_synthesis"
+        / "democritus_corpus_synthesis.html"
+    )
+    with DashboardQueryLauncher(
+        DashboardQueryLauncherConfig(
+            title="Democritus Query Dashboard",
+            subtitle=(
+                "Describe the corpus you want BAFFLE to retrieve, analyze document by document, "
+                "and then synthesize across the full corpus."
+            ),
+            query_label="Corpus acquisition query",
+            query_placeholder=(
+                "Analyze 10 studies on the benefits of drinking red wine and synthesize the results\n"
+                "or\n"
+                "Analyze recent 10-K filings for Nvidia and AMD"
+            ),
+            submit_label="Launch Democritus Run",
+            waiting_message=(
+                "The query has been captured. BAFFLE will retrieve the corpus, analyze each document, and open the synthesized Democritus result when the run finishes."
+            ),
+            artifact_path=artifact_path,
+        )
+    ) as launcher:
+        return launcher.wait_for_submission()
+
+
+def _open_dashboard_artifact(path: Path | None) -> None:
+    if path is None or not path.exists():
+        return
+    try:
+        webbrowser.open(path.resolve().as_uri(), new=1, autoraise=True)
+    except Exception:
+        pass
+
+
+def main() -> None:
+    args = _parse_args()
+    query = _resolve_query_for_main(args)
+    inferred_target = infer_requested_result_count(
+        query,
+        nouns=("study", "studies", "paper", "papers", "article", "articles", "document", "documents"),
+    )
+    target_documents = int(args.target_docs) if args.target_docs is not None else (inferred_target or 10)
+    max_docs = int(args.max_docs) if args.max_docs is not None else (inferred_target or 0)
+    runner = DemocritusQueryAgenticRunner(
+        DemocritusQueryAgenticConfig(
+            query=query,
+            outdir=Path(args.outdir),
+            target_documents=target_documents,
+            manifest_path=Path(args.manifest) if args.manifest else None,
+            source_pdf_root=Path(args.source_pdf_root) if args.source_pdf_root else None,
+            retrieval_backend=args.retrieval_backend,
+            retrieval_user_agent=args.retrieval_user_agent,
+            retrieval_timeout_seconds=args.retrieval_timeout_seconds,
+            discovery_only=args.discovery_only,
+            sec_form_types=tuple(args.sec_form) if args.sec_form else ("10-K", "10-Q"),
+            sec_company_limit=args.sec_company_limit,
+            corpus_name=args.corpus_name,
+            max_docs=max_docs,
+            consensus_enabled=not args.disable_consensus,
+            consensus_batch_size=args.consensus_batch_size,
+            consensus_similarity_threshold=args.consensus_similarity_threshold,
+            consensus_required_stable_passes=args.consensus_stable_passes,
+            max_workers=args.max_workers,
+            agent_concurrency_limits=_parse_agent_limit_args(args.agent_limit),
+            include_phase2=not args.skip_phase2,
+            auto_topics_from_pdf=not args.no_auto_topics,
+            root_topic_strategy=args.root_topic_strategy,
+            intra_document_shards=args.intra_document_shards,
+            dry_run=args.dry_run,
+        )
+    )
+    result = runner.run()
+    artifact_path = result.corpus_synthesis_dashboard_path
+    if artifact_path is None or not artifact_path.exists():
+        gui_path = result.batch_outdir / "democritus_gui.html"
+        artifact_path = gui_path if gui_path.exists() else result.batch_outdir / "dashboard.html"
+    _open_dashboard_artifact(artifact_path)
+    print(
+        json.dumps(
+            {
+                "query": result.query_plan.query,
+                "retrieval_backend": runner._backend_name(),
+                "selected_documents": len(result.selected_documents),
+                "acquired_documents": len(result.acquired_documents),
+                "pdf_dir": str(result.pdf_dir),
+                "batch_outdir": str(result.batch_outdir),
+                "batch_records": len(result.batch_records),
+                "summary_path": str(result.summary_path),
+                "corpus_synthesis_dashboard_path": (
+                    str(result.corpus_synthesis_dashboard_path)
+                    if result.corpus_synthesis_dashboard_path
+                    else None
+                ),
+            },
+            indent=2,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

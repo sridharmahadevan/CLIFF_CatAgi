@@ -1,0 +1,395 @@
+"""Tests for the CLIFF entrypoint and conscious handoff."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+try:
+    from functorflow_v3 import cliff as module
+    from functorflow_v3.product_feedback_query_agentic import ProductFeedbackQueryRunResult, ReviewQueryPlan
+except ModuleNotFoundError:
+    from ..functorflow_v3 import cliff as module
+    from ..functorflow_v3.product_feedback_query_agentic import ProductFeedbackQueryRunResult, ReviewQueryPlan
+
+
+class CLIFFTests(unittest.TestCase):
+    def test_route_cliff_query_routes_sec_language(self) -> None:
+        decision = module.route_cliff_query("Find me 10 recent AMD 10-K filings")
+
+        self.assertEqual(decision.route_name, "basket_rocket_sec")
+
+    def test_route_cliff_query_routes_vehicle_usability_to_product_feedback(self) -> None:
+        decision = module.route_cliff_query("How easy is it to drive the Mazda Miata 3?")
+
+        self.assertEqual(decision.route_name, "product_feedback")
+
+    def test_route_cliff_query_routes_running_shoe_usability_to_product_feedback(self) -> None:
+        decision = module.route_cliff_query("How easy is it to run with the Nike Pegasus 41 running shoes?")
+
+        self.assertEqual(decision.route_name, "product_feedback")
+
+    def test_route_cliff_query_routes_culinary_tour_request(self) -> None:
+        decision = module.route_cliff_query("Plan a kimchi culinary tour in Seoul July 6-11 under $50 per meal")
+
+        self.assertEqual(decision.route_name, "culinary_tour")
+
+    def test_route_cliff_query_routes_bare_food_tour_request(self) -> None:
+        decision = module.route_cliff_query("Plan a kimchi tour of Seoul from July 6-10th")
+
+        self.assertEqual(decision.route_name, "culinary_tour")
+
+    def test_route_cliff_query_routes_course_demo_request(self) -> None:
+        decision = module.route_cliff_query("Explain the Geometric Transformer on the Sudoku problem")
+
+        self.assertEqual(decision.route_name, "course_demo")
+
+    def test_route_cliff_query_routes_sheaves_request_to_course_demo(self) -> None:
+        decision = module.route_cliff_query("Explain sheaves via covers and gluing")
+
+        self.assertEqual(decision.route_name, "course_demo")
+
+    def test_route_cliff_query_routes_julia_ket_request_to_course_demo(self) -> None:
+        decision = module.route_cliff_query("Show me the Julia version of KET")
+
+        self.assertEqual(decision.route_name, "course_demo")
+
+    def test_report_to_cliff_consciousness_selects_completed_report(self) -> None:
+        decision = module.route_cliff_query("How comfortable is the Lovesac sectional sofa?")
+
+        report = module.report_to_cliff_consciousness(
+            "How comfortable is the Lovesac sectional sofa?",
+            decision,
+            artifact_path=Path("/tmp/product_feedback_dashboard.html"),
+        )
+
+        self.assertEqual(len(report.workspace_state.selected), 1)
+        self.assertEqual(report.workspace_state.selected[0].process.source_agent, "product_feedback")
+        self.assertEqual(report.workspace_state.deferred, ())
+
+    def test_build_worker_command_includes_query_and_outdir(self) -> None:
+        args = argparse.Namespace(
+            route="auto",
+            democritus_manifest="",
+            democritus_source_pdf_root="",
+            democritus_target_docs=None,
+            democritus_retrieval_backend="auto",
+            democritus_max_docs=None,
+            democritus_intra_document_shards=1,
+            democritus_discovery_only=False,
+            democritus_dry_run=False,
+            product_manifest="",
+            culinary_manifest="/tmp/culinary_stop_manifest.jsonl",
+            product_target_docs=None,
+            product_max_docs=None,
+            product_name="",
+            brand_name="",
+            analysis_question="",
+            product_discovery_only=False,
+            sec_target_filings=None,
+            sec_retrieval_user_agent="",
+            sec_form=[],
+            sec_company_limit=3,
+            sec_discovery_only=False,
+            sec_dry_run=False,
+            course_repo_root="",
+            course_no_execute=False,
+            course_timeout_sec=900,
+        )
+
+        command = module._build_worker_command(
+            args,
+            run_outdir=Path("/tmp/cliff-run-0001"),
+            query="How easy is it to drive the Mazda Miata 3?",
+        )
+
+        self.assertIn("-m", command)
+        self.assertIn("functorflow_v3.cliff_worker", command)
+        self.assertIn("How easy is it to drive the Mazda Miata 3?", command)
+        self.assertIn("/tmp/cliff-run-0001", command)
+        self.assertIn("--culinary-manifest", command)
+        self.assertIn("/tmp/culinary_stop_manifest.jsonl", command)
+        self.assertIn("--course-timeout-sec", command)
+
+    def test_run_cliff_session_query_moves_back_to_conscious_layer(self) -> None:
+        class FakeLauncher:
+            def __init__(self) -> None:
+                self.updates: list[dict[str, object]] = []
+
+            def update_session_run(self, run_id: str, **kwargs) -> None:
+                payload = {"run_id": run_id}
+                payload.update(kwargs)
+                self.updates.append(payload)
+
+        class FakeRouter:
+            def __init__(self, config) -> None:
+                self.config = config
+
+            def run(self):
+                route_outdir = self.config.outdir / "product_feedback"
+                artifact_path = route_outdir / "product_feedback_run" / "product_feedback_dashboard.html"
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                artifact_path.write_text("<html>ok</html>", encoding="utf-8")
+                plan = ReviewQueryPlan(
+                    query=self.config.query,
+                    normalized_query=self.config.query.lower(),
+                    keyword_tokens=("lovesac", "sofa"),
+                    target_documents=5,
+                    product_name="Lovesac sofa",
+                )
+                result = ProductFeedbackQueryRunResult(
+                    query_plan=plan,
+                    selected_documents=(),
+                    materialized_documents=(),
+                    materialized_feedback_manifest_path=self.config.outdir / "materialized_feedback_manifest.jsonl",
+                    summary_path=self.config.outdir / "review_query_summary.json",
+                    product_feedback_result=SimpleNamespace(dashboard_path=artifact_path),
+                )
+                return module.CLIFFRouterRunResult(
+                    route_decision=module.CLIFFRouteDecision(
+                        route_name="product_feedback",
+                        module_name="functorflow_v3.product_feedback_query_agentic",
+                        rationale="test",
+                    ),
+                    route_outdir=route_outdir,
+                    summary_path=self.config.outdir / "ff2_query_router_summary.json",
+                    product_feedback_result=result,
+                )
+
+        launcher = FakeLauncher()
+        args = SimpleNamespace(
+            outdir="/tmp/cliff",
+            route="auto",
+            democritus_manifest="",
+            democritus_source_pdf_root="",
+            democritus_target_docs=None,
+            democritus_retrieval_backend="auto",
+            democritus_max_docs=None,
+            democritus_intra_document_shards=1,
+            democritus_discovery_only=False,
+            democritus_dry_run=False,
+            product_manifest="",
+            culinary_manifest="",
+            product_target_docs=None,
+            product_max_docs=None,
+            product_name="",
+            brand_name="",
+            analysis_question="",
+            product_discovery_only=False,
+            sec_target_filings=None,
+            sec_retrieval_user_agent="",
+            sec_form=[],
+            sec_company_limit=3,
+            sec_discovery_only=False,
+            sec_dry_run=False,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.object(module, "_build_router_from_args_with_outdir") as build_router:
+                with patch.object(module, "_open_artifact") as open_artifact:
+                    build_router.return_value = FakeRouter(
+                        SimpleNamespace(
+                            outdir=Path(tmpdir),
+                            query="How comfortable are Lovesac sofas?",
+                        )
+                    )
+                    module._run_cliff_session_query(
+                        launcher,
+                        args,
+                        run_id="run-0001",
+                        query="How comfortable are Lovesac sofas?",
+                    )
+
+        self.assertEqual(launcher.updates[0]["mind_layer"], "conscious")
+        self.assertEqual(launcher.updates[1]["mind_layer"], "unconscious")
+        self.assertEqual(launcher.updates[-1]["mind_layer"], "conscious")
+        self.assertEqual(launcher.updates[-1]["status"], "complete")
+        self.assertIn("not auto-opened", launcher.updates[-1]["note"])
+        self.assertIn("second unconscious synthesis pass", launcher.updates[-1]["note"])
+        open_artifact.assert_not_called()
+
+    def test_monitor_cliff_session_worker_re_dispatches_after_first_pass(self) -> None:
+        class FakeLauncher:
+            def __init__(self) -> None:
+                self.updates: list[dict[str, object]] = []
+
+            def update_session_run(self, run_id: str, **kwargs) -> None:
+                payload = {"run_id": run_id}
+                payload.update(kwargs)
+                self.updates.append(payload)
+
+        class FakeProcess:
+            def wait(self):
+                return 0
+
+        class FakeHandle:
+            def close(self) -> None:
+                return None
+
+        launcher = FakeLauncher()
+        args = argparse.Namespace(
+            outdir="/tmp/cliff",
+            route="auto",
+            democritus_manifest="",
+            democritus_source_pdf_root="",
+            democritus_target_docs=None,
+            democritus_retrieval_backend="auto",
+            democritus_max_docs=None,
+            democritus_intra_document_shards=1,
+            democritus_discovery_only=False,
+            democritus_dry_run=False,
+            product_manifest="",
+            culinary_manifest="",
+            product_target_docs=None,
+            product_max_docs=None,
+            product_name="",
+            brand_name="",
+            analysis_question="",
+            product_discovery_only=False,
+            sec_target_filings=None,
+            sec_retrieval_user_agent="",
+            sec_form=[],
+            sec_company_limit=3,
+            sec_discovery_only=False,
+            sec_dry_run=False,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_outdir = Path(tmpdir)
+            result_path = run_outdir / module._WORKER_RESULT_FILENAME
+            artifact_path = run_outdir / "basket_rocket_sec" / "workflow_batches" / "basket_rocket_gui.html"
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_path.write_text("<html>first pass</html>", encoding="utf-8")
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "status": "phase1_complete",
+                        "artifact_path": str(artifact_path),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            worker = module._ActiveCLIFFWorker(
+                process=FakeProcess(),
+                stdout_handle=FakeHandle(),
+                stderr_handle=FakeHandle(),
+                run_outdir=run_outdir,
+                stage="first_pass",
+            )
+            active_runs = {"run-0003": worker}
+            resumed_worker = module._ActiveCLIFFWorker(
+                process=FakeProcess(),
+                stdout_handle=FakeHandle(),
+                stderr_handle=FakeHandle(),
+                run_outdir=run_outdir,
+                stage="synthesis_pass",
+            )
+            decision = module.CLIFFRouteDecision(
+                route_name="basket_rocket_sec",
+                module_name="functorflow_v3.basket_rocket_sec_agentic",
+                rationale="test",
+            )
+            with patch.object(module, "_launch_cliff_worker", return_value=resumed_worker):
+                with patch.object(module.threading, "Thread") as thread_ctor:
+                    thread_ctor.return_value = SimpleNamespace(start=lambda: None)
+                    module._monitor_cliff_session_worker(
+                        launcher,
+                        args=args,
+                        run_id="run-0003",
+                        query="Analyze 10 recent 10-K filings from Adobe",
+                        decision=decision,
+                        active_runs=active_runs,
+                        active_runs_lock=module.threading.Lock(),
+                    )
+
+        self.assertEqual(launcher.updates[0]["mind_layer"], "conscious")
+        self.assertEqual(launcher.updates[0]["status"], "routing")
+        self.assertIn("first pass", launcher.updates[0]["note"])
+        self.assertEqual(launcher.updates[1]["mind_layer"], "unconscious")
+        self.assertEqual(launcher.updates[1]["status"], "running")
+        self.assertTrue(str(launcher.updates[1]["artifact_path"]).endswith("basket_rocket_sec/workflow_batches/corpus_synthesis/basket_rocket_corpus_synthesis.html"))
+
+    def test_start_cliff_session_query_seeds_predicted_artifact_for_running_democritus(self) -> None:
+        class FakeLauncher:
+            def __init__(self) -> None:
+                self.updates: list[dict[str, object]] = []
+
+            def update_session_run(self, run_id: str, **kwargs) -> None:
+                payload = {"run_id": run_id}
+                payload.update(kwargs)
+                self.updates.append(payload)
+
+        class FakeProcess:
+            def poll(self):
+                return None
+
+        launcher = FakeLauncher()
+        args = argparse.Namespace(
+            outdir="/tmp/cliff",
+            route="auto",
+            democritus_manifest="",
+            democritus_source_pdf_root="",
+            democritus_target_docs=None,
+            democritus_retrieval_backend="auto",
+            democritus_max_docs=None,
+            democritus_intra_document_shards=1,
+            democritus_discovery_only=False,
+            democritus_dry_run=False,
+            product_manifest="",
+            culinary_manifest="",
+            product_target_docs=None,
+            product_max_docs=None,
+            product_name="",
+            brand_name="",
+            analysis_question="",
+            product_discovery_only=False,
+            sec_target_filings=None,
+            sec_retrieval_user_agent="",
+            sec_form=[],
+            sec_company_limit=3,
+            sec_discovery_only=False,
+            sec_dry_run=False,
+        )
+
+        with patch.object(module, "route_cliff_query") as route_query:
+            with patch.object(module.subprocess, "Popen", return_value=FakeProcess()):
+                with patch.object(module.threading, "Thread") as thread_ctor:
+                    route_query.return_value = module.CLIFFRouteDecision(
+                        route_name="democritus",
+                        module_name="functorflow_v3.democritus_query_agentic",
+                        rationale="test",
+                    )
+                    thread_ctor.return_value = SimpleNamespace(start=lambda: None)
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        active_runs: dict[str, object] = {}
+                        module._start_cliff_session_query(
+                            launcher,
+                            args,
+                            run_id="run-0002",
+                            query="Find me 10 studies of red wine",
+                            active_runs=active_runs,
+                            active_runs_lock=module.threading.Lock(),
+                        )
+                        for worker in active_runs.values():
+                            if getattr(worker, "stdout_handle", None):
+                                worker.stdout_handle.close()
+                            if getattr(worker, "stderr_handle", None):
+                                worker.stderr_handle.close()
+
+        self.assertEqual(launcher.updates[0]["status"], "routing")
+        self.assertEqual(launcher.updates[1]["status"], "running")
+        self.assertTrue(
+            str(launcher.updates[1]["artifact_path"]).endswith(
+                "democritus/democritus_runs/democritus_gui.html"
+            )
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
