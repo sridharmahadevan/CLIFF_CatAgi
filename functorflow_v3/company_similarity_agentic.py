@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .democritus_query_agentic import _resolve_sec_user_agent
-from .repo_layout import repo_root, resolve_brand_awareness_root, resolve_brand_panel_root
+from .repo_layout import repo_root, resolve_brand_panel_root
 from .textbook_backstop import recommend_textbook_backstop, render_textbook_backstop_html
 
 
@@ -364,6 +364,7 @@ def _python_has_modules(python_executable: str, modules: tuple[str, ...], *, cwd
 def _select_python_for_brand_pipeline() -> str:
     env_override = os.environ.get("CLIFF_BRAND_PIPELINE_PYTHON", "").strip()
     workspace_root = repo_root().parents[0]
+    brand_root = resolve_brand_panel_root()
     required_modules = (
         "brand_democritus_block_denoise",
         "pandas",
@@ -375,7 +376,7 @@ def _select_python_for_brand_pipeline() -> str:
     candidates = [
         env_override,
         sys.executable,
-        str((resolve_brand_awareness_root() / ".venv_studio" / "bin" / "python")),
+        str((brand_root / ".venv" / "bin" / "python")),
         str((repo_root() / ".venv" / "bin" / "python")),
         "/opt/homebrew/bin/python3",
         "python3",

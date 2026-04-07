@@ -33,14 +33,6 @@ def resolve_brand_panel_root() -> Path:
     )
 
 
-def resolve_brand_awareness_root() -> Path:
-    return _resolve_dependency_root(
-        env_var="CLIFF_BRAND_AWARENESS_ROOT",
-        repo_local=_REPO_ROOT / "third_party" / "brand_awareness_democritus",
-        sibling=_WORKSPACE_ROOT / "brand_awareness_democritus",
-    )
-
-
 def resolve_democritus_root() -> Path:
     env_value = os.environ.get("CLIFF_DEMOCRITUS_ROOT") or os.environ.get("DEMOCRITUS_REPO_ROOT")
     if env_value:

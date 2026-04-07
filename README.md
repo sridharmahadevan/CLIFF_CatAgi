@@ -50,7 +50,7 @@ If you are new to the repo, start here first:
 | `course_demo` | Runs textbook-linked demos, recommendations, project ideas, and code snippets | Partly | `Category-Theory-for-AGI-UMass-CMPSCI-692CT`; for Julia paths also `FunctorFlow.jl`, optionally `Julia FF`, and a Julia runtime |
 | `democritus` | Finds studies or documents, runs synthesis, and builds corpus-level claims dashboards | No | `Democritus_OpenAI`; OpenAI API access for LLM-backed stages |
 | `basket_rocket_sec` | Recovers workflows from SEC filings and builds BASKET/ROCKET-style dashboards | No | `BASKET`, `brand_democritus_block_denoise` |
-| `company_similarity` | Compares companies through the diffusion/manifold pipeline and links back to the textbook | No | `brand_democritus_block_denoise`; strongest path also uses `brand_awareness_democritus` |
+| `company_similarity` | Compares companies through the diffusion/manifold pipeline and links back to the textbook | No | `brand_democritus_block_denoise` and a Python environment with its dependencies |
 | `product_feedback` | Builds product-feedback syntheses, workflows, and causal hypotheses with textbook pointers | Mostly | No extra repo for the basic route; external review sources may still matter depending on retrieval path |
 | `culinary_tour` | Demonstrates conscious message-passing through itinerary planning with textbook backstops | Yes | None for the core demo path |
 
@@ -173,18 +173,16 @@ Also needed:
 
 - `BASKET`
 - `brand_democritus_block_denoise`
-- for the strongest company-similarity path, `brand_awareness_democritus`
 
 Resolution options:
 
 - sibling repos beside `CLIFF_CatAgi`
 - `third_party/BASKET`
 - `third_party/brand_democritus_block_denoise`
-- `third_party/brand_awareness_democritus`
 - env vars:
   - `CLIFF_BASKET_ROOT`
   - `CLIFF_BRAND_PANEL_ROOT`
-  - `CLIFF_BRAND_AWARENESS_ROOT`
+  - `CLIFF_BRAND_PIPELINE_PYTHON` if the company-similarity backend needs a dedicated interpreter
 
 Useful checks:
 
@@ -259,7 +257,6 @@ Optional sibling or `third_party/` repos:
 - `Democritus_OpenAI`
 - `BASKET`
 - `brand_democritus_block_denoise`
-- `brand_awareness_democritus`
 - `Category-Theory-for-AGI-UMass-CMPSCI-692CT`
 - `FunctorFlow.jl`
 - `Julia FF`
@@ -281,7 +278,7 @@ Environment variables:
 - `CLIFF_DEMOCRITUS_PDF_ROOT`
 - `CLIFF_BASKET_ROOT`
 - `CLIFF_BRAND_PANEL_ROOT`
-- `CLIFF_BRAND_AWARENESS_ROOT`
+- `CLIFF_BRAND_PIPELINE_PYTHON`
 - `CLIFF_COURSE_REPO_ROOT`
 - `CLIFF_JULIA_REPO_ROOT`
 - `CLIFF_JULIA_EXAMPLES_ROOT`
