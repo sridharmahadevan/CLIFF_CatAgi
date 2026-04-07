@@ -295,10 +295,29 @@ def _run_command(command: list[str], *, cwd: Path) -> None:
     env = os.environ.copy()
     env.setdefault("MPLBACKEND", "Agg")
     env.setdefault("MPLCONFIGDIR", "/tmp/mplconfig")
-    subprocess.run(command, cwd=str(cwd), check=True, env=env)
+    try:
+        subprocess.run(
+            command,
+            cwd=str(cwd),
+            check=True,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr_tail = "\n".join((exc.stderr or "").splitlines()[-20:]).strip()
+        stdout_tail = "\n".join((exc.stdout or "").splitlines()[-20:]).strip()
+        details = stderr_tail or stdout_tail or "No stdout/stderr was captured."
+        raise RuntimeError(
+            "Company similarity backend command failed.\n"
+            f"Command: {' '.join(command)}\n"
+            f"CWD: {cwd}\n"
+            f"Exit code: {exc.returncode}\n"
+            f"Last output:\n{details}"
+        ) from exc
 
 
-def _python_has_modules(python_executable: str, modules: tuple[str, ...]) -> bool:
+def _python_has_modules(python_executable: str, modules: tuple[str, ...], *, cwd: Path | None = None) -> bool:
     probe = [
         python_executable,
         "-c",
@@ -314,6 +333,7 @@ def _python_has_modules(python_executable: str, modules: tuple[str, ...]) -> boo
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            cwd=str(cwd) if cwd is not None else None,
         )
         return True
     except Exception:
@@ -321,7 +341,10 @@ def _python_has_modules(python_executable: str, modules: tuple[str, ...]) -> boo
 
 
 def _select_python_for_brand_pipeline() -> str:
+    env_override = os.environ.get("CLIFF_BRAND_PIPELINE_PYTHON", "").strip()
+    workspace_root = repo_root().parents[0]
     required_modules = (
+        "brand_democritus_block_denoise",
         "pandas",
         "pyarrow",
         "matplotlib",
@@ -329,20 +352,22 @@ def _select_python_for_brand_pipeline() -> str:
         "umap",
     )
     candidates = [
+        env_override,
         sys.executable,
         str((resolve_brand_awareness_root() / ".venv_studio" / "bin" / "python")),
         str((repo_root() / ".venv" / "bin" / "python")),
         "/opt/homebrew/bin/python3",
         "python3",
     ]
-    for candidate in dict.fromkeys(candidates):
+    for candidate in dict.fromkeys(item for item in candidates if item):
         if candidate != "python3" and not Path(candidate).exists():
             continue
-        if _python_has_modules(candidate, required_modules):
+        if _python_has_modules(candidate, required_modules, cwd=workspace_root):
             return candidate
     raise RuntimeError(
         "Could not find a Python interpreter with the required brand diffusion pipeline dependencies "
-        "(pandas, pyarrow, matplotlib, tqdm, umap)."
+        "(brand_democritus_block_denoise, pandas, pyarrow, matplotlib, tqdm, umap). "
+        "If needed, set CLIFF_BRAND_PIPELINE_PYTHON to the correct interpreter."
     )
 
 

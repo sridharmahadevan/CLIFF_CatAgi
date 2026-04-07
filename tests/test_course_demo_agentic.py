@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -93,6 +94,9 @@ class CourseDemoAgenticTests(unittest.TestCase):
     def test_explain_how_ket_works_counts_as_learning_request(self) -> None:
         self.assertTrue(module.is_course_learning_query("Explain how the Kan Extension Transformer works"))
 
+    def test_explain_gt_on_sudoku_is_not_learning_query(self) -> None:
+        self.assertFalse(module.is_course_learning_query("Explain the Geometric Transformer on the Sudoku problem"))
+
     def test_course_demo_runner_recommendation_mode_skips_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             result = module.CourseDemoAgenticRunner(
@@ -157,6 +161,37 @@ class CourseDemoAgenticTests(unittest.TestCase):
 
         self.assertEqual(result.response_mode, "learning_guide")
         self.assertGreaterEqual(len(result.code_snippets), 2)
+
+    def test_course_demo_runner_gt_sudoku_prefers_demo_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            notebook_path = workdir / "notebooks" / "week01_sudoku_gt_db.ipynb"
+            notebook_path.parent.mkdir(parents=True, exist_ok=True)
+            notebook_path.write_text(
+                json.dumps(
+                    {
+                        "cells": [
+                            {
+                                "cell_type": "code",
+                                "source": ["print('sudoku demo')\n"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = module.CourseDemoAgenticRunner(
+                module.CourseDemoAgenticConfig(
+                    query="Explain the Geometric Transformer on the Sudoku problem",
+                    outdir=workdir / "out",
+                    course_repo_root=workdir,
+                    execute_demo=False,
+                )
+            ).run()
+
+        self.assertEqual(result.response_mode, "demo_run")
+        self.assertEqual(result.execution_status, "not_requested")
+        self.assertEqual(result.selected_demo.demo_id, "geometric_transformer_sudoku")
 
     def test_course_demo_runner_julia_recommendation_mode_skips_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

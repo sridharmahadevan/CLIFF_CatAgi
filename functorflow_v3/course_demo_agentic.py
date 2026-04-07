@@ -731,7 +731,6 @@ _LEARNING_CUES = (
     "learn about",
     "teach me",
     "explain how",
-    "explain the",
     "show code",
     "show me the code",
     "code snippet",
@@ -1139,6 +1138,14 @@ def is_course_project_query(query: str) -> bool:
 def is_course_learning_query(query: str) -> bool:
     normalized = _normalize_query_text(query)
     if any(cue in normalized for cue in _LEARNING_CUES):
+        return True
+    if (
+        normalized.startswith("explain the ")
+        and " on " not in normalized
+        and " problem" not in normalized
+        and " demo" not in normalized
+        and " notebook" not in normalized
+    ):
         return True
     if "explain" in normalized and "works" in normalized:
         return True
