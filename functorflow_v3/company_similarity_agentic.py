@@ -48,6 +48,21 @@ def _resolve_brand_workspace_root() -> Path:
     return candidate
 
 
+def _portable_output_path(raw_path: str, *, brand_root: Path, fallback: Path) -> Path:
+    raw = str(raw_path or "").strip()
+    if not raw:
+        return fallback.resolve()
+    candidate = Path(raw).expanduser()
+    if candidate.exists():
+        return candidate.resolve()
+    parts = candidate.parts
+    if "outputs" in parts:
+        outputs_index = parts.index("outputs")
+        translated = brand_root / Path(*parts[outputs_index:])
+        return translated.resolve()
+    return fallback.resolve()
+
+
 @dataclass(frozen=True)
 class CompanySimilarityQueryPlan:
     query: str
@@ -115,17 +130,23 @@ def _load_company_registry(brand_root: Path) -> dict[str, _CompanyRecord]:
                 if len(ticker) >= 3:
                     aliases.append(ticker)
                 outdir_raw = str(row.get("outdir", "")).strip()
-                outdir = Path(outdir_raw).expanduser() if outdir_raw else (brand_root / "outputs" / slug)
+                default_outdir = (brand_root / "outputs" / slug).resolve()
+                outdir = _portable_output_path(outdir_raw, brand_root=brand_root, fallback=default_outdir)
                 combined_raw = str(row.get("existing_combined_dir", "")).strip()
-                combined_dir = Path(combined_raw).expanduser() if combined_raw else None
+                default_combined = default_outdir / f"runs_{slug}_financial_filings" / f"atlas_{slug}_financial_combined"
+                combined_dir = (
+                    _portable_output_path(combined_raw, brand_root=brand_root, fallback=default_combined)
+                    if combined_raw
+                    else None
+                )
                 records[slug] = _CompanyRecord(
                     brand=brand,
                     slug=slug,
                     aliases=tuple(dict.fromkeys(alias for alias in aliases if alias)),
                     ticker=ticker,
                     index_url=str(row.get("index_url", "")).strip(),
-                    outdir=outdir.resolve(),
-                    existing_combined_dir=combined_dir.resolve() if combined_dir else None,
+                    outdir=outdir,
+                    existing_combined_dir=combined_dir if combined_dir else None,
                 )
     outputs_root = brand_root / "outputs"
     if outputs_root.exists():
