@@ -31,6 +31,18 @@ def _normalize_alias(value: str) -> str:
     return lowered
 
 
+def _infer_ticker_from_aliases(brand: str, slug: str, aliases: list[str]) -> str:
+    brand_norm = _normalize_alias(brand)
+    slug_norm = _normalize_alias(slug.replace("_", " "))
+    for alias in aliases:
+        token = alias.strip().lower()
+        if not token or token in {brand_norm, slug_norm}:
+            continue
+        if re.fullmatch(r"[a-z]{1,5}", token):
+            return token
+    return ""
+
+
 def _safe_read_json(path: Path) -> dict[str, object]:
     try:
         return dict(json.loads(path.read_text(encoding="utf-8")))
@@ -127,6 +139,8 @@ def _load_company_registry(brand_root: Path) -> dict[str, _CompanyRecord]:
                 if alias_field:
                     aliases.extend(_normalize_alias(item.replace("_", " ")) for item in alias_field.split(","))
                 ticker = str(row.get("edgar_ticker", "")).strip().lower()
+                if not ticker:
+                    ticker = _infer_ticker_from_aliases(brand, slug, aliases)
                 if len(ticker) >= 3:
                     aliases.append(ticker)
                 outdir_raw = str(row.get("outdir", "")).strip()
@@ -441,12 +455,12 @@ def _ensure_company_analysis(
     ]
     if existing_filing_manifest is not None:
         command.extend(["--manifest", str(existing_filing_manifest)])
-    elif record.index_url:
-        command.extend(["--index-url", record.index_url])
     elif record.ticker:
         resolved_sec_user_agent = _resolve_sec_user_agent(sec_user_agent)
         command.extend(["--edgar-ticker", record.ticker])
         command.extend(["--sec-user-agent", resolved_sec_user_agent])
+    elif record.index_url:
+        command.extend(["--index-url", record.index_url])
     _run_command(command, cwd=workspace_root)
     combined_dir = _existing_combined_dir(record)
     if combined_dir is None:
