@@ -403,7 +403,7 @@ def _monitor_cliff_session_worker(
             mind_layer="conscious",
             route_name=decision.route_name,
             note=(
-                "An unconscious run failed and reported the error back to CLIFF's conscious layer: "
+                "A background run failed: "
                 + str(payload.get("error") or f"worker exited with code {return_code}")
             ),
             artifact_path=error_artifact_path,
@@ -416,7 +416,7 @@ def _monitor_cliff_session_worker(
         status="failed",
         mind_layer="conscious",
         route_name=decision.route_name,
-        note=f"The unconscious worker exited unexpectedly with code {return_code}.",
+        note=f"A background worker exited unexpectedly with code {return_code}.",
         outdir=worker.run_outdir,
     )
 
@@ -439,7 +439,7 @@ def _start_cliff_session_query(
         status="routing",
         mind_layer="conscious",
         route_name=decision.route_name,
-        note="CLIFF conscious layer accepted the query and is dispatching it to the unconscious orchestrator.",
+        note="CLIFF accepted the query and is sending it to the background runner.",
         artifact_path=predicted_artifact_path,
         outdir=run_outdir,
     )
@@ -456,7 +456,7 @@ def _start_cliff_session_query(
         status="running",
         mind_layer="unconscious",
         route_name=decision.route_name,
-        note=f"CLIFF's unconscious orchestrator is running the {decision.route_name} workflow.",
+        note=f"CLIFF is running the {decision.route_name} workflow in the background.",
         artifact_path=predicted_artifact_path,
         outdir=run_outdir,
     )
@@ -522,7 +522,7 @@ def _run_cliff_session_query(
         status="routing",
         mind_layer="conscious",
         route_name=decision.route_name,
-        note="CLIFF conscious layer accepted the query and is dispatching it to the unconscious orchestrator.",
+        note="CLIFF accepted the query and is sending it to the background runner.",
         artifact_path=predicted_artifact_path,
         outdir=run_outdir,
     )
@@ -532,7 +532,7 @@ def _run_cliff_session_query(
             status="running",
             mind_layer="unconscious",
             route_name=decision.route_name,
-            note=f"CLIFF's unconscious orchestrator is running the {decision.route_name} workflow.",
+            note=f"CLIFF is running the {decision.route_name} workflow in the background.",
             artifact_path=predicted_artifact_path,
             outdir=run_outdir,
         )
@@ -612,7 +612,7 @@ def _run_cliff_session_query(
             status="failed",
             mind_layer="conscious",
             route_name=decision.route_name,
-            note=f"An unconscious run failed and reported the error back to CLIFF's conscious layer: {message}",
+            note=f"A background run failed: {message}",
             artifact_path=error_path,
             outdir=run_outdir,
         )
@@ -701,14 +701,16 @@ def main() -> None:
                     subtitle=(
                         "Ask about an idea from the textbook, a course demo, a project direction, or one of the "
                         "supporting applications. CLIFF helps you connect the book to runnable examples, code "
-                        "fragments, comparisons, and guided explorations."
+                        "fragments, comparisons, and guided explorations. CLIFF is a research prototype, and its "
+                        "analyses should not be treated as product endorsements, product criticism, or professional advice. "
+                        "AI-based analyses can make mistakes."
                     ),
                     eyebrow="CLIFF",
                     query_label="CLIFF query",
                     query_placeholder=(
                         "Analyze 10 recent Adobe 10-K filings and extract their workflows\n"
                         "or\n"
-                        "Plan a kimchi culinary tour in Seoul July 6-11 under $50 per meal\n"
+                        "Plan a seafood tour for Boston from July 6th-10th\n"
                         "or\n"
                         "Analyze 10 recent studies on red wine and synthesize what they jointly support\n"
                         "or\n"

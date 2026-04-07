@@ -959,6 +959,13 @@ class ProductFeedbackAgenticRunner:
                 {
                     "feedback_id": str(record.get("id") or record.get("review_id") or f"feedback_{index:04d}"),
                     "source": str(record.get("source") or record.get("channel") or "unknown"),
+                    "source_reference": str(
+                        record.get("source_reference")
+                        or record.get("url")
+                        or record.get("review_url")
+                        or record.get("source_url")
+                        or ""
+                    ).strip(),
                     "title": str(record.get("title") or "").strip(),
                     "text": text,
                     "rating": rating,

@@ -111,6 +111,7 @@ class ProductFeedbackAgenticTests(unittest.TestCase):
                                 "text": "Very comfortable and stylish. True to size and easy to slip on.",
                                 "rating": 5,
                                 "source": "reviews",
+                                "source_reference": "https://example.com/review/r1",
                             }
                         ),
                         json.dumps(
@@ -121,6 +122,7 @@ class ProductFeedbackAgenticTests(unittest.TestCase):
                                 "rating": 2,
                                 "source": "reviews",
                                 "returned": True,
+                                "source_reference": "https://example.com/review/r2",
                             }
                         ),
                         json.dumps(
@@ -130,6 +132,7 @@ class ProductFeedbackAgenticTests(unittest.TestCase):
                                 "text": "Nice style but the fit runs small and narrow. I had to send it back.",
                                 "rating": 1,
                                 "source": "qna",
+                                "source_reference": "https://example.com/review/r3",
                             }
                         ),
                         json.dumps(
@@ -139,6 +142,7 @@ class ProductFeedbackAgenticTests(unittest.TestCase):
                                 "text": "Easy to slip on and comfortable for airport use.",
                                 "rating": 4,
                                 "source": "social",
+                                "source_reference": "https://example.com/review/r4",
                             }
                         ),
                         json.dumps(
@@ -148,6 +152,7 @@ class ProductFeedbackAgenticTests(unittest.TestCase):
                                 "text": "Overpriced and poor quality for the money.",
                                 "rating": 2,
                                 "source": "reviews",
+                                "source_reference": "https://example.com/review/r5",
                             }
                         ),
                     ]
@@ -201,13 +206,51 @@ class ProductFeedbackAgenticTests(unittest.TestCase):
             self.assertIn("Usage Workflows", report)
 
             dashboard = result.dashboard_path.read_text(encoding="utf-8")
-            self.assertIn("BAFFLE Product Feedback Dashboard", dashboard)
+            self.assertIn("CLIFF Product Feedback Dashboard", dashboard)
             self.assertIn("Outcome Snapshot", dashboard)
             self.assertIn("Ablation Comparison", dashboard)
             self.assertIn("Prompt-like baseline", dashboard)
             self.assertIn("Causal Hypotheses", dashboard)
             self.assertIn("Usage Workflows", dashboard)
             self.assertIn("Evidence Preview", dashboard)
+            self.assertIn("Open source", dashboard)
+
+    def test_runner_preserves_source_reference_in_normalized_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            manifest_path = workdir / "feedback.jsonl"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "id": "r1",
+                        "title": "Comfort review",
+                        "text": "Comfortable and easy to use.",
+                        "rating": 4,
+                        "source": "reviews",
+                        "source_reference": "https://example.com/review-1",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            runner = ProductFeedbackAgenticRunner(
+                ProductFeedbackAgenticConfig(
+                    manifest_path=manifest_path,
+                    outdir=workdir / "out",
+                    product_name="Demo Product",
+                    brand_name="Demo Brand",
+                )
+            )
+            result = runner.run()
+
+            rows = [
+                json.loads(line)
+                for line in result.normalized_feedback_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+        self.assertEqual(rows[0]["source_reference"], "https://example.com/review-1")
 
     def test_runner_builds_vehicle_workflows_without_sofa_actions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

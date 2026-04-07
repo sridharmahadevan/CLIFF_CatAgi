@@ -388,6 +388,17 @@ def _evidence_cards(events: list[dict[str, object]], usage_workflow_payload: dic
     cards = []
     for event in ranked[:6]:
         sentiment = str(event.get("sentiment", "mixed"))
+        source_reference = str(event.get("source_reference") or "").strip()
+        source_markup = ""
+        if source_reference:
+            if source_reference.startswith(("http://", "https://")):
+                source_markup = (
+                    '<div class="evidence-source">'
+                    f'<a href="{_escape_html(source_reference)}" target="_blank" rel="noopener noreferrer">Open source</a>'
+                    "</div>"
+                )
+            else:
+                source_markup = f'<div class="evidence-source">Source: {_escape_html(source_reference)}</div>'
         tone = {
             "positive": "success",
             "negative": "danger",
@@ -405,6 +416,7 @@ def _evidence_cards(events: list[dict[str, object]], usage_workflow_payload: dic
             f'<div class="key-label">Supporting Evidence</div>'
             f'<p>{_escape_html(excerpt)}</p>'
             f'<div class="evidence-tags">{", ".join(_escape_html(item) for item in list(event.get("aspects") or [])) or "no aspects"}</div>'
+            f"{source_markup}"
             "</article>"
         )
     return "".join(cards)
@@ -472,7 +484,7 @@ def _dashboard_html(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>BAFFLE Product Feedback Dashboard · {_escape_html(title)}</title>
+  <title>CLIFF Product Feedback Dashboard · {_escape_html(title)}</title>
   <style>
     :root {{
       --ink: #153243;
@@ -763,6 +775,20 @@ def _dashboard_html(
       font-size: 13px;
       color: var(--ink);
     }}
+    .evidence-source {{
+      margin-top: 10px;
+      font-size: 13px;
+      color: var(--muted);
+      word-break: break-word;
+    }}
+    .evidence-source a {{
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 700;
+    }}
+    .evidence-source a:hover {{
+      text-decoration: underline;
+    }}
     .footnote {{
       margin-top: 14px;
       color: var(--muted);
@@ -789,7 +815,7 @@ def _dashboard_html(
     <section class="hero">
       <div class="hero-layout">
         <div class="hero-copy">
-          <div class="eyebrow">BAFFLE Product Feedback Dashboard</div>
+          <div class="eyebrow">CLIFF Product Feedback Dashboard</div>
           <h1>{_escape_html(title)}</h1>
           <p>{_escape_html(scorecard.get("analysis_question") or "")}</p>
           <div class="hero-meta">
@@ -798,6 +824,7 @@ def _dashboard_html(
             {_tone_chip(f"{int(outcome.get('feedback_count', 0))} feedback sources", "neutral")}
             {_tone_chip(f"{int(scorecard.get('hypothesis_count', 0))} hypotheses", "neutral")}
           </div>
+          <div class="footnote">CLIFF is a research prototype. This analysis is exploratory and should not be treated as a product endorsement, product criticism, or purchasing advice. AI-based analyses can make mistakes.</div>
           {f'<div class="footnote">{_escape_html(run_status_note)}</div>' if run_status_note else ""}
           {warning_banner}
         </div>
