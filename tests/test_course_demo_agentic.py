@@ -132,6 +132,29 @@ class CourseDemoAgenticTests(unittest.TestCase):
         self.assertGreaterEqual(len(result.project_ideas), 2)
         self.assertGreaterEqual(len(result.book_recommendations), 2)
 
+    def test_project_guide_dashboard_links_to_starter_demo_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            course_root = workdir / "course"
+            notebook_path = course_root / "notebooks" / "week05_kan_extension_transformer_demo.ipynb"
+            notebook_path.parent.mkdir(parents=True, exist_ok=True)
+            notebook_path.write_text(json.dumps({"cells": []}), encoding="utf-8")
+
+            result = module.CourseDemoAgenticRunner(
+                module.CourseDemoAgenticConfig(
+                    query="I would like a project suggestion that applies the Kan Extension Transformer",
+                    outdir=workdir / "out",
+                    course_repo_root=course_root,
+                    execute_demo=True,
+                )
+            ).run()
+            dashboard = result.dashboard_path.read_text(encoding="utf-8")
+
+        self.assertIn("Starter demo", dashboard)
+        self.assertIn("Open source", dashboard)
+        self.assertIn("Open in Colab", dashboard)
+        self.assertIn("week05_kan_extension_transformer_demo.ipynb", dashboard)
+
     def test_course_demo_runner_learning_mode_skips_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             result = module.CourseDemoAgenticRunner(
@@ -148,6 +171,44 @@ class CourseDemoAgenticTests(unittest.TestCase):
         self.assertEqual(result.recommendation_topic, "Kan Extension Transformers")
         self.assertGreaterEqual(len(result.code_snippets), 2)
         self.assertGreaterEqual(len(result.book_recommendations), 2)
+
+    def test_learning_guide_dashboard_links_to_snippet_sources_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workdir = Path(tmpdir)
+            course_root = workdir / "course"
+            julia_root = workdir / "FunctorFlow.jl"
+            (course_root / "notebooks").mkdir(parents=True, exist_ok=True)
+            (julia_root).mkdir(parents=True, exist_ok=True)
+            (course_root / "notebooks" / "week05_kan_extension_transformer_demo.ipynb").write_text(
+                json.dumps({"cells": []}),
+                encoding="utf-8",
+            )
+            (julia_root / "README.md").write_text("# FunctorFlow.jl\n", encoding="utf-8")
+
+            result = module.CourseDemoAgenticRunner(
+                module.CourseDemoAgenticConfig(
+                    query="Explain how the Kan Extension Transformer works",
+                    outdir=workdir / "out",
+                    course_repo_root=course_root,
+                    julia_repo_root=julia_root,
+                    execute_demo=True,
+                )
+            ).run()
+            dashboard = result.dashboard_path.read_text(encoding="utf-8")
+            python_source_view = result.route_outdir / "source_views" / "ket_python_minimal.html"
+            julia_source_view = result.route_outdir / "source_views" / "ket_julia_minimal.html"
+            python_source_view_exists = python_source_view.exists()
+            julia_source_view_exists = julia_source_view.exists()
+            python_source_view_text = python_source_view.read_text(encoding="utf-8")
+            julia_source_view_text = julia_source_view.read_text(encoding="utf-8")
+
+        self.assertIn("Open source", dashboard)
+        self.assertIn("source_views/ket_python_minimal.html", dashboard)
+        self.assertIn("source_views/ket_julia_minimal.html", dashboard)
+        self.assertTrue(python_source_view_exists)
+        self.assertTrue(julia_source_view_exists)
+        self.assertIn("week05_kan_extension_transformer_demo.ipynb", python_source_view_text)
+        self.assertIn("FunctorFlow.jl/README.md", julia_source_view_text)
 
     def test_course_demo_runner_explain_how_ket_works_returns_learning_guide(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

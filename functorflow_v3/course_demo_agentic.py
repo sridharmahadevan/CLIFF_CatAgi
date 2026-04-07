@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from .repo_layout import (
@@ -152,6 +152,7 @@ class CourseCodeSnippet:
     repo_kind: str
     snippet: str
     follow_up: str = ""
+    source_href: str = ""
 
 
 @dataclass(frozen=True)
@@ -219,6 +220,7 @@ class CourseDemoRunResult:
     stdout_path: Path
     stderr_path: Path
     implementation_language: str = "python"
+    selected_demo_source_href: str = ""
     book_pdf_path: Path | None = None
     book_recommendations: tuple[BookSectionSpec, ...] = ()
     book_rationale: str = ""
@@ -1364,6 +1366,7 @@ class CourseDemoAgenticRunner:
         learning_topic, learning_demos, learning_book_sections, learning_snippets, learning_rationale = (
             recommend_course_learning_resources(self.config.query)
         )
+        learning_snippets = self._resolve_snippet_sources(learning_snippets)
         if is_course_learning_query(self.config.query) and learning_topic:
             dashboard_path = self.config.outdir / "course_demo_dashboard.html"
             summary_path = self.config.outdir / "course_demo_summary.json"
@@ -1398,6 +1401,11 @@ class CourseDemoAgenticRunner:
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
                 implementation_language="python",
+                selected_demo_source_href=self._materialize_source_view(
+                    notebook_path,
+                    source_id=f"{selected_demo.demo_id}_starter_demo" if selected_demo else "starter_demo",
+                    title=selected_demo.title if selected_demo else learning_topic,
+                ),
                 book_pdf_path=self.config.book_pdf_path,
                 book_recommendations=learning_book_sections,
                 book_rationale=(
@@ -1450,6 +1458,11 @@ class CourseDemoAgenticRunner:
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
                 implementation_language="python",
+                selected_demo_source_href=self._materialize_source_view(
+                    notebook_path,
+                    source_id=f"{starter_demo.demo_id}_starter_demo" if starter_demo else "starter_demo",
+                    title=starter_demo.title if starter_demo else project_topic,
+                ),
                 book_pdf_path=self.config.book_pdf_path,
                 book_recommendations=project_book_sections,
                 book_rationale=(
@@ -1512,6 +1525,7 @@ class CourseDemoAgenticRunner:
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
                 implementation_language=implementation_language,
+                selected_demo_source_href="",
                 book_pdf_path=self.config.book_pdf_path,
                 book_recommendations=book_recommendations,
                 book_rationale=book_rationale,
@@ -1672,6 +1686,11 @@ class CourseDemoAgenticRunner:
             stdout_path=stdout_path,
             stderr_path=stderr_path,
             implementation_language="julia",
+            selected_demo_source_href=self._materialize_source_view(
+                source_path,
+                source_id=f"{demo.demo_id}_starter_demo",
+                title=demo.title,
+            ),
             book_pdf_path=self.config.book_pdf_path,
             book_recommendations=book_recommendations,
             book_rationale=book_rationale,
@@ -1755,6 +1774,76 @@ class CourseDemoAgenticRunner:
         if completed.returncode == 0:
             return "completed", 0, ""
         return "failed", completed.returncode, f"Julia demo exited with code {completed.returncode}."
+
+    def _resolve_snippet_sources(
+        self,
+        snippets: tuple[CourseCodeSnippet, ...],
+    ) -> tuple[CourseCodeSnippet, ...]:
+        resolved: list[CourseCodeSnippet] = []
+        for snippet in snippets:
+            source_path: Path | None = None
+            if snippet.repo_kind == "course_repo" and self.config.course_repo_root is not None:
+                source_path = self.config.course_repo_root / snippet.source_relpath
+            elif snippet.repo_kind == "functorflow_jl" and self.config.julia_repo_root is not None:
+                source_path = self.config.julia_repo_root / snippet.source_relpath
+            elif snippet.repo_kind == "julia_examples" and self.config.julia_examples_root is not None:
+                source_path = self.config.julia_examples_root / snippet.source_relpath
+            source_href = self._materialize_source_view(
+                source_path,
+                source_id=snippet.snippet_id,
+                title=snippet.title,
+            )
+            resolved.append(replace(snippet, source_href=source_href))
+        return tuple(resolved)
+
+    def _materialize_source_view(
+        self,
+        source_path: Path | None,
+        *,
+        source_id: str,
+        title: str,
+    ) -> str:
+        if source_path is None or not source_path.exists():
+            return ""
+        source_views_dir = self.config.outdir / "source_views"
+        source_views_dir.mkdir(parents=True, exist_ok=True)
+        safe_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", source_id).strip("_") or "source"
+        target_path = source_views_dir / f"{safe_id}.html"
+        escaped_title = html.escape(title)
+        escaped_label = html.escape(str(source_path))
+        escaped_body = html.escape(source_path.read_text(encoding="utf-8"))
+        target_path.write_text(
+            f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{escaped_title}</title>
+    <style>
+      body {{ margin: 0; font-family: Georgia, "Iowan Old Style", serif; background: #f5f1e8; color: #17231d; }}
+      main {{ max-width: 980px; margin: 32px auto; padding: 0 18px 40px; }}
+      .card {{ background: rgba(255, 252, 246, 0.96); border: 1px solid #d5c8af; border-radius: 24px; padding: 24px; }}
+      .eyebrow {{ margin: 0 0 10px 0; text-transform: uppercase; letter-spacing: 0.16em; font-size: 12px; color: #205c48; }}
+      p {{ color: #536258; line-height: 1.6; font-size: 16px; }}
+      pre {{ margin: 14px 0 0 0; padding: 16px; border-radius: 18px; border: 1px solid #d5c8af; background: #f8f4ec; white-space: pre-wrap; word-break: break-word; overflow-x: auto; }}
+      .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="card">
+        <p class="eyebrow">CLIFF Source View</p>
+        <h1>{escaped_title}</h1>
+        <p><span class="mono">{escaped_label}</span></p>
+        <pre>{escaped_body}</pre>
+      </section>
+    </main>
+  </body>
+</html>
+""",
+            encoding="utf-8",
+        )
+        return target_path.relative_to(self.config.outdir).as_posix()
 
 
 def _julia_runtime_error(env: dict[str, str]) -> str:
@@ -1895,6 +1984,11 @@ def _render_dashboard_html(result: CourseDemoRunResult) -> str:
             f"<strong>{esc(snippet.title)}</strong> "
             f"<span class=\"mono\">{esc(snippet.language)} · {esc(snippet.source_relpath)}</span><br />"
             f"{esc(snippet.description)}"
+            + (
+                f'<br /><a href="{esc(snippet.source_href)}" target="_blank" rel="noopener noreferrer">Open source</a>'
+                if snippet.source_href
+                else ""
+            )
             + (f"<br /><strong>Try next:</strong> {esc(snippet.follow_up)}" if snippet.follow_up else "")
             + f"<pre>{esc(snippet.snippet)}</pre>"
             + "</li>"
@@ -1903,10 +1997,19 @@ def _render_dashboard_html(result: CourseDemoRunResult) -> str:
     )
     starter_demo_html = ""
     if result.selected_demo is not None:
+        starter_links: list[str] = []
+        if result.selected_demo_source_href:
+            starter_links.append(
+                f'<a href="{esc(result.selected_demo_source_href)}" target="_blank" rel="noopener noreferrer">Open source</a>'
+            )
+        if isinstance(result.selected_demo, CourseDemoSpec):
+            starter_links.append(f'<a href="{esc(result.selected_demo.colab_url)}">Open in Colab</a>')
+        starter_link_html = f"<br />{' · '.join(starter_links)}" if starter_links else ""
         starter_demo_html = (
             "<h2>Starter demo</h2>"
             f"<p><strong>{esc(result.selected_demo.title)}</strong><br />"
-            f"{esc(result.selected_demo.description)}</p>"
+            f"{esc(result.selected_demo.description)}"
+            f"{starter_link_html}</p>"
         )
 
     if result.response_mode == "project_ideas":
