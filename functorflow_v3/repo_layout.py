@@ -46,11 +46,8 @@ def resolve_democritus_root() -> Path:
     if env_value:
         return Path(env_value).expanduser().resolve()
     candidates = (
-        _REPO_ROOT / "third_party" / "democritus_v2_public",
         _REPO_ROOT / "third_party" / "Democritus_OpenAI",
-        _WORKSPACE_ROOT / "democritus_v2_public",
         _WORKSPACE_ROOT / "Democritus_OpenAI",
-        _WORKSPACE_ROOT / "old_democritus_v2_public",
     )
     return _first_existing(candidates, fallback=candidates[0])
 

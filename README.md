@@ -24,6 +24,10 @@ The first public-facing note for that transition is:
 
 - `docs/agentic_kan_architecture.md`
 
+If you are new to the repo, start here first:
+
+- `docs/first_10_minutes.md`
+
 ## What This Repo Contains
 
 - `functorflow_v3/`: the current CLIFF package and route logic
@@ -38,6 +42,23 @@ The first public-facing note for that transition is:
 - `company_similarity`: cross-company diffusion comparison with textbook backstops
 - `product_feedback`: review synthesis with textbook backstops
 - `culinary_tour`: consciousness-style itinerary demos, also tied back to the textbook
+
+## Route Integration Table
+
+| Route | What it does | Works with core repo only? | Optional repos / runtimes |
+| --- | --- | --- | --- |
+| `course_demo` | Runs textbook-linked demos, recommendations, project ideas, and code snippets | Partly | `Category-Theory-for-AGI-UMass-CMPSCI-692CT`; for Julia paths also `FunctorFlow.jl`, optionally `Julia FF`, and a Julia runtime |
+| `democritus` | Finds studies or documents, runs synthesis, and builds corpus-level claims dashboards | No | `Democritus_OpenAI`; OpenAI API access for LLM-backed stages |
+| `basket_rocket_sec` | Recovers workflows from SEC filings and builds BASKET/ROCKET-style dashboards | No | `BASKET`, `brand_democritus_block_denoise` |
+| `company_similarity` | Compares companies through the diffusion/manifold pipeline and links back to the textbook | No | `brand_democritus_block_denoise`; strongest path also uses `brand_awareness_democritus` |
+| `product_feedback` | Builds product-feedback syntheses, workflows, and causal hypotheses with textbook pointers | Mostly | No extra repo for the basic route; external review sources may still matter depending on retrieval path |
+| `culinary_tour` | Demonstrates conscious message-passing through itinerary planning with textbook backstops | Yes | None for the core demo path |
+
+Quick rule of thumb:
+
+- start with `product_feedback` or `culinary_tour` if you want a lightweight first run
+- add `course_demo` next if you want the clearest textbook experience
+- add `democritus`, `basket_rocket_sec`, and `company_similarity` when you want the full research workflow stack
 
 ## Install
 
@@ -54,6 +75,180 @@ Run CLIFF:
 python3 -m functorflow_v3.cliff --outdir /tmp/cliff-session
 ```
 
+## Install Matrix
+
+Use the same base Python environment for every setup:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -e .
+```
+
+### 1. Core Only
+
+Best for:
+
+- router testing
+- textbook backstops
+- product feedback demos
+- culinary tour demos
+- basic CLIFF UI checks
+
+Needed:
+
+- this repo
+- `catagi.pdf` in the repo root, or `CLIFF_BOOK_PDF_PATH`
+
+Useful checks:
+
+```bash
+python3 -m unittest tests.test_textbook_backstop tests.test_query_router_agentic tests.test_cliff
+```
+
+### 2. Course Demo Setup
+
+Best for:
+
+- textbook-guided course demos
+- project ideas
+- learning guides
+- PyTorch snippet walkthroughs
+
+Also needed:
+
+- `Category-Theory-for-AGI-UMass-CMPSCI-692CT`
+
+Resolution options:
+
+- sibling repo beside `CLIFF_CatAgi`
+- `third_party/Category-Theory-for-AGI-UMass-CMPSCI-692CT`
+- `CLIFF_COURSE_REPO_ROOT=/path/to/Category-Theory-for-AGI-UMass-CMPSCI-692CT`
+
+Useful checks:
+
+```bash
+python3 -m unittest tests.test_course_demo_agentic tests.test_query_router_agentic
+```
+
+### 3. Democritus Setup
+
+Best for:
+
+- multi-document synthesis
+- study retrieval and corpus gluing
+- CSQL-backed textbook-grounded analysis
+
+Also needed:
+
+- `Democritus_OpenAI`
+- OpenAI API access for the LLM-backed steps
+
+Resolution options:
+
+- sibling repo beside `CLIFF_CatAgi`
+- `third_party/Democritus_OpenAI`
+- `CLIFF_DEMOCRITUS_ROOT=/path/to/Democritus_OpenAI`
+
+Optional seed corpus path:
+
+- `CLIFF_DEMOCRITUS_PDF_ROOT=/path/to/pdf/root`
+
+Useful checks:
+
+```bash
+python3 -m unittest tests.test_democritus_agentic tests.test_democritus_query_agentic
+```
+
+### 4. BASKET/ROCKET And Company Similarity Setup
+
+Best for:
+
+- SEC workflow recovery
+- company diffusion comparisons
+- finance-oriented dashboards
+
+Also needed:
+
+- `BASKET`
+- `brand_democritus_block_denoise`
+- for the strongest company-similarity path, `brand_awareness_democritus`
+
+Resolution options:
+
+- sibling repos beside `CLIFF_CatAgi`
+- `third_party/BASKET`
+- `third_party/brand_democritus_block_denoise`
+- `third_party/brand_awareness_democritus`
+- env vars:
+  - `CLIFF_BASKET_ROOT`
+  - `CLIFF_BRAND_PANEL_ROOT`
+  - `CLIFF_BRAND_AWARENESS_ROOT`
+
+Useful checks:
+
+```bash
+python3 -m unittest tests.test_basket_rocket_sec_agentic tests.test_query_router_agentic tests.test_cliff
+```
+
+### 5. Julia Setup
+
+Best for:
+
+- Julia KET demos
+- Julia causal-semantics demos
+- side-by-side Julia/Python educational comparisons
+
+Also needed:
+
+- `FunctorFlow.jl`
+- optionally `Julia FF`
+- a working Julia runtime
+
+Resolution options:
+
+- sibling repos beside `CLIFF_CatAgi`
+- `third_party/FunctorFlow.jl`
+- `third_party/Julia FF`
+- env vars:
+  - `CLIFF_JULIA_REPO_ROOT`
+  - `CLIFF_JULIA_EXAMPLES_ROOT`
+  - `CLIFF_JULIA_DEPOT_PATH`
+  - `CLIFF_JULIA_BIN`
+  - `CLIFF_JULIAUP_BIN`
+
+Useful checks:
+
+```bash
+python3 -m unittest tests.test_course_demo_agentic
+```
+
+### 6. Full Textbook Interface Setup
+
+Best for:
+
+- the full CLIFF_CatAgi vision
+- private multi-machine testing before public release
+
+Needed:
+
+- this repo
+- `catagi.pdf`
+- course repo
+- Democritus repo
+- BASKET/ROCKET-related repos
+- Julia repos if you want both language paths
+
+Recommended smoke queries:
+
+- `Explain the Geometric Transformer on the Sudoku problem`
+- `What demo should I use for causality?`
+- `Show me the Julia version of KET`
+- `How similar is Adobe to Nike?`
+- `Give me 5 studies of global warming and synthesize their joint claims`
+- `How easy is it to drive a Tesla Model 3?`
+
 ## Optional Integrations
 
 `CLIFF_CatAgi` is designed to work even when some supporting repos are absent.
@@ -61,7 +256,7 @@ Routes should degrade gracefully and explain what is missing.
 
 Optional sibling or `third_party/` repos:
 
-- `democritus_v2_public` or `Democritus_OpenAI`
+- `Democritus_OpenAI`
 - `BASKET`
 - `brand_democritus_block_denoise`
 - `brand_awareness_democritus`

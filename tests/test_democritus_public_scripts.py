@@ -16,7 +16,7 @@ from types import ModuleType
 
 class DemocritusPublicScriptTests(unittest.TestCase):
     def _with_public_script_module(self, module_name: str):
-        repo_root = Path("/Users/sridharmahadevan/Downloads/mac-cech_homology_GT/democritus_v2_public")
+        repo_root = Path("/Users/sridharmahadevan/Documents/Playground/Democritus_OpenAI")
         if str(repo_root) not in sys.path:
             sys.path.insert(0, str(repo_root))
             added = True
