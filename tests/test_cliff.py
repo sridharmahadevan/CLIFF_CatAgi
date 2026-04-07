@@ -209,8 +209,8 @@ class CLIFFTests(unittest.TestCase):
         self.assertEqual(launcher.updates[1]["mind_layer"], "unconscious")
         self.assertEqual(launcher.updates[-1]["mind_layer"], "conscious")
         self.assertEqual(launcher.updates[-1]["status"], "complete")
-        self.assertIn("not auto-opened", launcher.updates[-1]["note"])
-        self.assertIn("second unconscious synthesis pass", launcher.updates[-1]["note"])
+        self.assertIn("won't open automatically", launcher.updates[-1]["note"])
+        self.assertIn("second synthesis pass", launcher.updates[-1]["note"])
         open_artifact.assert_not_called()
 
     def test_monitor_cliff_session_worker_re_dispatches_after_first_pass(self) -> None:

@@ -53,6 +53,30 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         self.assertEqual(state["runs"][0]["route_name"], "democritus")
         self.assertEqual(state["runs"][0]["outdir"], "/tmp/ff2-run-0001")
 
+    def test_render_launcher_page_includes_demo_tour_queries(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Ask a question",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                demo_queries=(
+                    "Explain the Geometric Transformer on the Sudoku problem",
+                    "Explain how the Kan Extension Transformer works",
+                ),
+                session_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        markup = launcher._render_launcher_page()
+
+        self.assertIn("Take the 2-minute tour", markup)
+        self.assertIn("Explain the Geometric Transformer on the Sudoku problem", markup)
+        self.assertIn("demo-tour-button", markup)
+
     def test_render_session_runs_markup_highlights_completed_results(self) -> None:
         launcher = DashboardQueryLauncher(
             DashboardQueryLauncherConfig(
@@ -60,7 +84,7 @@ class DashboardQueryLauncherTests(unittest.TestCase):
                 subtitle="Test session",
                 query_label="CLIFF query",
                 query_placeholder="How comfortable is it to drive the Mazda Miata 3?",
-                submit_label="Send To CLIFF",
+                submit_label="Ask CLIFF",
                 waiting_message="Runs stay in the background.",
                 session_mode=True,
             )
@@ -83,7 +107,7 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         )
 
         self.assertIn("run-card-complete", markup)
-        self.assertIn("ready in conscious layer", markup)
+        self.assertIn("status-complete", markup)
         self.assertIn("Open result", markup)
         self.assertIn("/run-artifact?run_id=run-0001", markup)
 
@@ -94,7 +118,7 @@ class DashboardQueryLauncherTests(unittest.TestCase):
                 subtitle="Test session",
                 query_label="CLIFF query",
                 query_placeholder="Find me 10 studies of red wine",
-                submit_label="Send To CLIFF",
+                submit_label="Ask CLIFF",
                 waiting_message="Runs stay in the background.",
                 session_mode=True,
             )
@@ -126,7 +150,7 @@ class DashboardQueryLauncherTests(unittest.TestCase):
                 subtitle="Test session",
                 query_label="CLIFF query",
                 query_placeholder="How comfortable is it to drive the Mazda Miata 3?",
-                submit_label="Send To CLIFF",
+                submit_label="Ask CLIFF",
                 waiting_message="Runs stay in the background.",
                 session_mode=True,
             )
@@ -159,7 +183,7 @@ class DashboardQueryLauncherTests(unittest.TestCase):
                 subtitle="Test session",
                 query_label="CLIFF query",
                 query_placeholder="Find me 10 studies of red wine",
-                submit_label="Send To CLIFF",
+                submit_label="Ask CLIFF",
                 waiting_message="Runs stay in the background.",
                 session_mode=True,
             )
@@ -185,7 +209,7 @@ class DashboardQueryLauncherTests(unittest.TestCase):
 
             rendered = launcher._render_run_artifact_page(run_id)
 
-            self.assertIn("Inspecting Unconscious Run", rendered)
+            self.assertIn("Inspecting Run", rendered)
             self.assertIn("/run-file?run_id=", rendered)
             self.assertIn("setInterval", rendered)
             self.assertIn("/state?ts=", rendered)
@@ -199,7 +223,7 @@ class DashboardQueryLauncherTests(unittest.TestCase):
                 subtitle="Test session",
                 query_label="CLIFF query",
                 query_placeholder="Find me 10 Adobe 10-K filings",
-                submit_label="Send To CLIFF",
+                submit_label="Ask CLIFF",
                 waiting_message="Runs stay in the background.",
                 session_mode=True,
             )
@@ -245,7 +269,7 @@ class DashboardQueryLauncherTests(unittest.TestCase):
                 subtitle="Test session",
                 query_label="CLIFF query",
                 query_placeholder="Find me 10 Adobe 10-K filings",
-                submit_label="Send To CLIFF",
+                submit_label="Ask CLIFF",
                 waiting_message="Runs stay in the background.",
                 session_mode=True,
             )
@@ -284,7 +308,7 @@ class DashboardQueryLauncherTests(unittest.TestCase):
                 subtitle="Test session",
                 query_label="CLIFF query",
                 query_placeholder="How comfortable is it to drive the Mazda Miata 3?",
-                submit_label="Send To CLIFF",
+                submit_label="Ask CLIFF",
                 waiting_message="Runs stay in the background.",
                 session_mode=True,
                 run_control_handler=lambda action, run_id: calls.append((action, run_id)),

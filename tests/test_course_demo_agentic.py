@@ -212,6 +212,29 @@ class CourseDemoAgenticTests(unittest.TestCase):
         self.assertGreaterEqual(len(result.recommendation_julia_demos), 1)
         self.assertGreaterEqual(len(result.book_recommendations), 1)
 
+    def test_extract_notebook_script_includes_matplotlib_safety_prelude(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            notebook_path = Path(tmpdir) / "demo.ipynb"
+            notebook_path.write_text(
+                json.dumps(
+                    {
+                        "cells": [
+                            {
+                                "cell_type": "code",
+                                "source": ["import matplotlib.pyplot as plt\n", "plt.show()\n"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            script = module._extract_notebook_script(notebook_path)
+
+        self.assertIn('os.environ.setdefault("MPLBACKEND", "Agg")', script)
+        self.assertIn('matplotlib.use("Agg", force=True)', script)
+        self.assertIn("plt.show = lambda *args, **kwargs: None", script)
+
     def test_execution_output_copy_mentions_julia_for_julia_runs(self) -> None:
         result = module.CourseDemoRunResult(
             query_plan=module.CourseDemoQueryPlan(

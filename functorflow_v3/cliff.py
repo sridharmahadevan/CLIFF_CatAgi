@@ -95,11 +95,8 @@ def report_to_cliff_consciousness(
 
 def _cliff_complete_note(report: CLIFFConsciousReturn) -> str:
     if report.workspace_state.selected:
-        return (
-            "The unconscious orchestrator completed the query and reported back into "
-            "CLIFF's conscious layer."
-        )
-    return "The unconscious orchestrator finished, but the report is waiting for conscious attention."
+        return "CLIFF finished the query and brought the result back into your session."
+    return "CLIFF finished the background work, but the result is still waiting for your attention."
 
 
 def _worker_result_path(run_outdir: Path) -> Path:
@@ -109,8 +106,7 @@ def _worker_result_path(run_outdir: Path) -> Path:
 def _cliff_cycle_complete_note(report: CLIFFConsciousReturn) -> str:
     base = _cliff_complete_note(report)
     return (
-        "The unconscious orchestrator completed a first pass, reported back into CLIFF's conscious layer, "
-        "then consciousness initiated a second unconscious synthesis pass. "
+        "CLIFF completed a first pass, then ran a second synthesis pass to refine the result. "
         + base
     )
 
@@ -393,7 +389,7 @@ def _monitor_cliff_session_worker(
                         if worker.stage == "synthesis_pass"
                         else _cliff_complete_note(conscious_report)
                     )
-                    + " The result is marked in CLIFF's conscious layer and is not auto-opened."
+                    + " The result is ready in the session list and won't open automatically."
                 ),
                 artifact_path=artifact_path,
                 outdir=worker.run_outdir,
@@ -577,7 +573,7 @@ def _run_cliff_session_query(
                     if _decision_supports_conscious_redispatch(decision)
                     else _cliff_complete_note(conscious_report)
                 )
-                + " The result is marked in CLIFF's conscious layer and is not auto-opened."
+                + " The result is ready in the session list and won't open automatically."
             ),
             artifact_path=artifact_path,
             outdir=run_outdir,
@@ -701,19 +697,16 @@ def main() -> None:
             launcher_artifact_path = _router_launcher_artifact_path(Path(args.outdir))
             with DashboardQueryLauncher(
                 DashboardQueryLauncherConfig(
-                    title="Consciousness Layer Interface Functor Flow",
+                    title="CLIFF for Categories for AGI",
                     subtitle=(
-                        "CLIFF is the conscious interface for FunctorFlow v3. Enter natural-language queries here, "
-                        "and CLIFF will dispatch each request into its unconscious agent orchestrator to retrieve "
-                        "documents when needed, analyze them, compare company diffusion models when asked, and report the completed results back into the "
-                        "conscious workspace."
+                        "Ask about an idea from the textbook, a course demo, a project direction, or one of the "
+                        "supporting applications. CLIFF helps you connect the book to runnable examples, code "
+                        "fragments, comparisons, and guided explorations."
                     ),
                     eyebrow="CLIFF",
                     query_label="CLIFF query",
                     query_placeholder=(
                         "Analyze 10 recent Adobe 10-K filings and extract their workflows\n"
-                        "or\n"
-                        "How similar is Adobe to Nike?\n"
                         "or\n"
                         "Plan a kimchi culinary tour in Seoul July 6-11 under $50 per meal\n"
                         "or\n"
@@ -721,8 +714,14 @@ def main() -> None:
                         "or\n"
                         "How comfortable is the Lovesac sectional sofa?"
                     ),
-                    submit_label="Send To CLIFF",
-                    waiting_message="CLIFF keeps this conscious interface open while unconscious agent runs retrieve inputs, perform their analyses, and report back in the background.",
+                    submit_label="Ask CLIFF",
+                    waiting_message="CLIFF keeps this workspace open while the background analysis runs, gathers what it needs, and prepares the result for you.",
+                    demo_queries=(
+                        "Explain the Geometric Transformer on the Sudoku problem",
+                        "Explain how the Kan Extension Transformer works",
+                        "What demo should I use for causality?",
+                        "How comfortable is the Lovesac sectional sofa?",
+                    ),
                     artifact_path=launcher_artifact_path,
                     session_mode=True,
                     run_control_handler=lambda action, run_id: _handle_cliff_run_control(

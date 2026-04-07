@@ -28,6 +28,7 @@ class DashboardQueryLauncherConfig:
     query_placeholder: str
     submit_label: str
     waiting_message: str
+    demo_queries: tuple[str, ...] = ()
     eyebrow: str = "FunctorFlow Dashboard Launch"
     artifact_path: Path | None = None
     session_mode: bool = False
@@ -409,7 +410,7 @@ class DashboardQueryLauncher:
     ) -> str:
         title = html.escape(self.config.title)
         query = html.escape(str(run_state.get("query") or ""))
-        note = html.escape(str(run_state.get("note") or "CLIFF is gathering live partial outputs from the unconscious run."))
+        note = html.escape(str(run_state.get("note") or "CLIFF is gathering live partial outputs from this run."))
         iframe_src = self._launcher_href_for_run_file(run_id, artifact_path)
         return f"""<!doctype html>
 <html lang="en">
@@ -471,7 +472,7 @@ class DashboardQueryLauncher:
   <body>
     <main>
       <section class="panel">
-        <p class="eyebrow">Inspecting Unconscious Run</p>
+        <p class="eyebrow">Inspecting Run</p>
         <h1>{query}</h1>
         <p>{note}</p>
       </section>
@@ -665,12 +666,14 @@ class DashboardQueryLauncher:
         placeholder = html.escape(self.config.query_placeholder)
         submit_label = html.escape(self.config.submit_label)
         waiting_message = html.escape(self.config.waiting_message)
+        demo_queries = tuple(query for query in self.config.demo_queries if str(query).strip())
         session_mode = self.config.session_mode
         error_html = (
             f'<p class="error" role="alert">{html.escape(error_message)}</p>'
             if error_message
             else ""
         )
+        demo_tour_markup = self._render_demo_tour_markup(demo_queries)
         form_or_status = f"""
           <form method="post" action="/submit" class="query-form">
             <label for="query">{query_label}</label>
@@ -685,14 +688,15 @@ class DashboardQueryLauncher:
             {error_html}
             <button type="submit">{submit_label}</button>
           </form>
+          {demo_tour_markup}
         """
         if session_mode:
             form_or_status = f"""
           <section class="session-shell">
             <div class="session-intro">
               <p class="status-kicker">Persistent Session</p>
-              <h2>The prompt window stays open for the next query.</h2>
-              <p>{waiting_message} Long-running jobs keep working in the background and completed results can be opened from the conscious-layer run list.</p>
+              <h2>The prompt window stays open for your next question.</h2>
+              <p>{waiting_message} Longer runs can keep working in the background, and you can open completed results from the session run list whenever they are ready.</p>
             </div>
             <form method="post" action="/submit" class="query-form">
               <label for="query">{query_label}</label>
@@ -707,6 +711,7 @@ class DashboardQueryLauncher:
               {error_html}
               <button type="submit">{submit_label}</button>
             </form>
+            {demo_tour_markup}
             <section class="session-runs">
               <div class="session-header">
                 <h2>Session Runs</h2>
@@ -737,10 +742,6 @@ class DashboardQueryLauncher:
                   cardClass += ' run-card-failed';
                 }}
                 var route = run.route_name ? '<span class="run-chip">' + escapeHtml(run.route_name) + '</span>' : '';
-                var mind = run.mind_layer ? '<span class="run-chip mind-' + escapeHtml(run.mind_layer) + '">' + escapeHtml(run.mind_layer) + '</span>' : '';
-                var attention = (run.status || '') === 'complete'
-                  ? '<span class="run-chip attention-ready">ready in conscious layer</span>'
-                  : '';
                 var stopAction = ((run.status || '') === 'queued' || (run.status || '') === 'routing' || (run.status || '') === 'running')
                   ? '<div class="run-actions"><button type="button" class="run-stop-button" onclick="requestStopRun(\\'' + escapeHtml(run.run_id || '') + '\\')">Stop query</button></div>'
                   : '';
@@ -756,7 +757,7 @@ class DashboardQueryLauncher:
                   + '<article class="' + cardClass + '">'
                   + '<div class="run-topline">'
                   + '<div class="run-id">' + escapeHtml(run.run_id) + '</div>'
-                  + '<div class="run-badges"><span class="run-chip status-' + escapeHtml(run.status || 'queued') + '">' + escapeHtml(run.status || 'queued') + '</span>' + attention + mind + route + '</div>'
+                  + '<div class="run-badges"><span class="run-chip status-' + escapeHtml(run.status || 'queued') + '">' + escapeHtml(run.status || 'queued') + '</span>' + route + '</div>'
                   + '</div>'
                   + '<div class="run-query">' + escapeHtml(run.query || '') + '</div>'
                   + '<div class="run-note">' + escapeHtml(run.note || '') + '</div>'
@@ -931,6 +932,63 @@ class DashboardQueryLauncher:
         font-weight: 700;
         cursor: pointer;
       }}
+      .demo-tour {{
+        margin-top: 18px;
+        border: 1px solid var(--line);
+        border-radius: 22px;
+        padding: 20px;
+        background: rgba(255, 250, 240, 0.88);
+      }}
+      .demo-tour h3 {{
+        margin: 0 0 8px 0;
+        font-size: 1.12rem;
+      }}
+      .demo-tour p {{
+        margin: 0 0 14px 0;
+        line-height: 1.6;
+        color: var(--muted);
+      }}
+      .demo-tour-list {{
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 10px;
+      }}
+      .demo-tour-step {{
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 12px;
+        align-items: start;
+      }}
+      .demo-tour-index {{
+        width: 28px;
+        height: 28px;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: #e2efe9;
+        color: var(--accent-strong);
+        font-size: 0.88rem;
+        font-weight: 700;
+      }}
+      .demo-tour-button {{
+        width: 100%;
+        text-align: left;
+        border: 1px solid #ccb892;
+        border-radius: 16px;
+        background: #fffdf8;
+        padding: 12px 14px;
+        color: var(--ink);
+        font: inherit;
+        line-height: 1.5;
+        cursor: pointer;
+      }}
+      .demo-tour-button:hover {{
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px rgba(15, 109, 99, 0.08);
+      }}
       .error {{
         margin: 0;
         color: var(--error);
@@ -1045,19 +1103,6 @@ class DashboardQueryLauncher:
         background: #f8dddd;
         color: var(--error);
       }}
-      .attention-ready {{
-        background: #e4f6e7;
-        color: #166534;
-        font-weight: 700;
-      }}
-      .mind-conscious {{
-        background: #e5eefc;
-        color: #1d4f91;
-      }}
-      .mind-unconscious {{
-        background: #eee3fb;
-        color: #6b21a8;
-      }}
       .run-query {{
         margin-top: 12px;
         font-size: 1.05rem;
@@ -1141,6 +1186,9 @@ class DashboardQueryLauncher:
         .artifact-shell iframe {{
           min-height: 560px;
         }}
+        .demo-tour-step {{
+          grid-template-columns: 1fr;
+        }}
       }}
     </style>
   </head>
@@ -1157,9 +1205,47 @@ class DashboardQueryLauncher:
         </article>
       </section>
     </main>
+    <script>
+      document.querySelectorAll('.demo-tour-button').forEach(function (button) {{
+        button.addEventListener('click', function () {{
+          var query = button.getAttribute('data-query') || '';
+          var textarea = document.getElementById('query');
+          if (!textarea) {{
+            return;
+          }}
+          textarea.value = query;
+          textarea.focus();
+          if (typeof textarea.setSelectionRange === 'function') {{
+            textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+          }}
+        }});
+      }});
+    </script>
   </body>
 </html>
 """
+
+    def _render_demo_tour_markup(self, demo_queries: tuple[str, ...]) -> str:
+        if not demo_queries:
+            return ""
+        steps: list[str] = []
+        for index, query in enumerate(demo_queries, start=1):
+            escaped_query = html.escape(query)
+            steps.append(
+                "<li class=\"demo-tour-step\">"
+                f"<span class=\"demo-tour-index\">{index}</span>"
+                "<div>"
+                f"<button type=\"button\" class=\"demo-tour-button\" data-query=\"{escaped_query}\">{escaped_query}</button>"
+                "</div>"
+                "</li>"
+            )
+        return (
+            "<section class=\"demo-tour\">"
+            "<h3>Take the 2-minute tour</h3>"
+            "<p>Try these in order to see how CLIFF moves from book guidance to demos, code, and applied examples.</p>"
+            f"<ol class=\"demo-tour-list\">{''.join(steps)}</ol>"
+            "</section>"
+        )
 
     def _render_session_runs_markup(self, runs: list[dict[str, object]]) -> str:
         if not runs:
@@ -1178,16 +1264,6 @@ class DashboardQueryLauncher:
             route_markup = (
                 f'<span class="run-chip">{esc(run.get("route_name"))}</span>'
                 if run.get("route_name")
-                else ""
-            )
-            mind_markup = (
-                f'<span class="run-chip mind-{esc(run.get("mind_layer"))}">{esc(run.get("mind_layer"))}</span>'
-                if run.get("mind_layer")
-                else ""
-            )
-            attention_markup = (
-                '<span class="run-chip attention-ready">ready in conscious layer</span>'
-                if run.get("status") == "complete"
                 else ""
             )
             stop_action_markup = (
@@ -1216,8 +1292,6 @@ class DashboardQueryLauncher:
                 f'<div class="run-id">{esc(run.get("run_id") or "")}</div>'
                 '<div class="run-badges">'
                 f'<span class="run-chip status-{esc(run.get("status") or "queued")}">{esc(run.get("status") or "queued")}</span>'
-                f"{attention_markup}"
-                f"{mind_markup}"
                 f"{route_markup}"
                 "</div>"
                 "</div>"
