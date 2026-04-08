@@ -7,6 +7,9 @@ without reading the whole codebase.
 
 Think of CLIFF as a textbook interface.
 
+More precisely, CLIFF now frames itself as the **Conscious Layer Interface to
+Functor Flow**.
+
 You ask a question in natural language, and CLIFF tries to respond through one
 or more of these layers:
 
@@ -18,6 +21,10 @@ or more of these layers:
 
 The big idea is that the repo is not only code.
 It is a teaching surface for *Categories for AGI*.
+
+It is also useful to keep one architectural fact in mind from the start:
+many of the heavier routes eventually reduce to building causal state from
+evidence, which is why Democritus sits so centrally in the system.
 
 ## 2. The Fastest Useful Setup
 
@@ -33,6 +40,13 @@ python3 -m functorflow_v3.cliff --outdir /tmp/cliff-session
 
 This gives you the CLIFF interface and the routes that do not require every
 optional backend to be installed.
+
+If you launch the full CLIFF GUI, you will now also see:
+
+- the acronym expansion in the banner
+- `Quick` vs `Deep` execution depth
+- a latency guide that distinguishes lightweight routes from deep-research
+  routes
 
 ## 3. How To Think About The Repo
 
@@ -115,6 +129,29 @@ What to expect:
 - usage workflows
 - textbook pointers that connect the route back to the book
 
+### Try A Deep-Research Route
+
+```text
+Analyze 10 recent studies on red wine and synthesize what they jointly support
+```
+
+What to expect:
+
+- a slower route than textbook lookup or product feedback
+- a provisional answer that improves as more evidence is processed
+- telemetry such as ETA, parallelism, and stage labels
+
+```text
+How similar is Adobe to Walmart?
+```
+
+What to expect:
+
+- the slowest major route in the current system
+- two company builds plus a cross-company comparison
+- inner Democritus-style stages such as causal statements, triple recovery, and
+  yearly atlas construction
+
 ## 5. What “Success” Looks Like
 
 In your first session, success is not “install every backend.”
@@ -125,6 +162,8 @@ Success is:
 - at least one route answers correctly
 - the result points back to the textbook
 - you can see how the repo is trying to teach, not just compute
+- you can tell the difference between lightweight routes and deep-research
+  routes
 
 If that is working, the overall design is already visible.
 
@@ -141,6 +180,10 @@ Together, they show:
 - textbook grounding
 - recommendation mode
 - Python and Julia explanation paths
+
+If you want to understand the causal core instead of the fastest path, add:
+
+4. `Analyze 10 recent studies of global warming and synthesize what they jointly support`
 
 ## 7. If Something Is Missing
 
@@ -172,5 +215,6 @@ For a first pass, you can safely ignore:
 - the BASKET/ROCKET details
 - implementation-specific path plumbing
 
-Those matter later.
-They are not the best entry point for understanding the product.
+But it is worth knowing that if you later want to optimize the system,
+Democritus and the causal-state-building path are where many of the biggest
+performance gains will come from.

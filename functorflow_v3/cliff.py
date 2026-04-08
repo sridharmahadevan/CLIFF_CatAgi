@@ -704,13 +704,13 @@ def main() -> None:
             launcher_artifact_path = _router_launcher_artifact_path(Path(args.outdir))
             with DashboardQueryLauncher(
                 DashboardQueryLauncherConfig(
-                    title="CLIFF for Categories for AGI",
+                    title="CLIFF",
                     subtitle=(
-                        "Ask about an idea from the textbook, a course demo, a project direction, or one of the "
-                        "supporting applications. CLIFF helps you connect the book to runnable examples, code "
-                        "fragments, comparisons, and guided explorations. CLIFF is a research prototype, and its "
-                        "analyses should not be treated as product endorsements, product criticism, or professional advice. "
-                        "AI-based analyses can make mistakes."
+                        "CLIFF for Categories for AGI asks about ideas from the textbook, course demos, project directions, "
+                        "and supporting applications. It helps connect the book to runnable examples, code fragments, "
+                        "comparisons, and guided explorations. CLIFF is a research prototype, and its analyses should not "
+                        "be treated as product endorsements, product criticism, or professional advice. AI-based analyses "
+                        "can make mistakes."
                     ),
                     eyebrow="CLIFF",
                     query_label="CLIFF query",

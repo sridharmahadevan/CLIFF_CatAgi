@@ -11,6 +11,13 @@ and explicit chapter recommendations.
 That educational framing is the main difference from earlier FunctorFlow
 releases.
 
+The current acronym expansion makes that architectural choice more explicit:
+
+- `CLIFF`: `Conscious Layer Interface to Functor Flow`
+
+The conscious layer is the user-facing bounded interface.
+Functor Flow is the deeper causal and compositional engine beneath it.
+
 ## From FunctorFlow v1 To CLIFF_CatAgi
 
 The original `FunctorFlow_v1` release emphasized the core semantic idea:
@@ -99,7 +106,7 @@ CLIFF adds a user-facing interpretation:
 
 This is the reason for the name:
 
-- `CLIFF`: Consciousness Layer Interface
+- `CLIFF`: Conscious Layer Interface to Functor Flow
 
 The consciousness metaphor is not decorative. It organizes the product design:
 
@@ -108,6 +115,14 @@ The consciousness metaphor is not decorative. It organizes the product design:
 - synthesize the outputs
 - show a stable conscious surface
 - point the user back to the textbook
+
+Recent work on the GUI and long-running routes has made this more literal in
+the product:
+
+- the launcher banner now expands the acronym explicitly
+- the GUI surfaces ETA and parallelism as unconscious-layer broadcasts
+- long-running routes show best-so-far answers rather than hiding all progress
+  until the end
 
 ## Textbook-Centric Design
 
@@ -143,6 +158,20 @@ The same architecture appears in different forms across routes:
 
 Some routes are closer to the mathematical core than others, but they all
 serve the same educational purpose: expose the textbook ideas through action.
+
+There is also an important asymmetry between routes:
+
+- some routes are genuinely lightweight textbook or demo lookups
+- some routes are medium-weight structured syntheses
+- some routes are deep-research workflows that eventually reduce to building
+  causal state from evidence
+
+In practice, `democritus` is now the clearest expression of that causal core,
+and `company_similarity` often becomes a Democritus-like problem internally
+because it must build local company causal state before it can compare firms.
+
+That observation is not incidental.
+It is one of the clearest guides for future optimization work in CLIFF.
 
 ## Public Repo Strategy
 

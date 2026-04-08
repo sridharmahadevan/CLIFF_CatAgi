@@ -1,9 +1,10 @@
 # CLIFF_CatAgi
 
 `CLIFF_CatAgi` is a textbook-centric version of CLIFF:
-the Consciousness Layer Interface that teaches ideas from *Categories for AGI*
-through runnable demos, project suggestions, product/company feedback views,
-Democritus synthesis, SEC workflow analysis, and book annotations.
+the **Conscious Layer Interface to Functor Flow** for *Categories for AGI*.
+It teaches ideas from the book through runnable demos, project suggestions,
+product/company feedback views, Democritus synthesis, SEC workflow analysis,
+and book annotations.
 
 The key product idea is simple:
 
@@ -13,6 +14,40 @@ The key product idea is simple:
 - external research engines should be optional integrations, not hidden assumptions
 
 This repo is intended to be the clean public-facing interface layer.
+
+## Core Product Picture
+
+CLIFF is best understood as a conscious interface sitting on top of a deeper
+Functor Flow causal engine.
+
+In practice, many apparently different queries collapse toward the same deeper
+pattern:
+
+- retrieve evidence
+- build causal state
+- synthesize a best-so-far answer
+- refine, compare, or visualize that answer
+
+That is why Democritus matters so much in this repo. Multi-study synthesis,
+company similarity, and several evidence-heavy routes eventually rely on the
+same causal-state-building machinery.
+
+## Runtime Expectations
+
+CLIFF now exposes both execution depth and route latency more explicitly in the
+GUI.
+
+- `Quick answer`
+  lightweight routes such as textbook lookup and some filing-oriented lookups
+- `Longer analysis`
+  routes such as product feedback that do structured evidence synthesis
+- `Deep research`
+  routes such as `democritus` and `company_similarity`, which may still take
+  several minutes even in `quick` mode
+
+`Quick` vs `deep` is therefore not the same as “fast” vs “slow.”
+For the deep-research routes, `quick` means an earlier, lighter, best-so-far
+answer path, not an instant answer.
 
 ## Core Design
 
@@ -56,9 +91,10 @@ If you are new to the repo, start here first:
 
 Quick rule of thumb:
 
-- start with `product_feedback` or `culinary_tour` if you want a lightweight first run
-- add `course_demo` next if you want the clearest textbook experience
-- add `democritus`, `basket_rocket_sec`, and `company_similarity` when you want the full research workflow stack
+- start with `culinary_tour`, `course_demo`, or lightweight textbook-guided prompts if you want the fastest first run
+- try `product_feedback` next if you want a medium-weight route that still feels interactive
+- add `democritus` and `company_similarity` when you want the full deep-research workflow stack
+- use `basket_rocket_sec` when you specifically want filing workflow recovery
 
 ## Install
 
@@ -139,6 +175,7 @@ Best for:
 - multi-document synthesis
 - study retrieval and corpus gluing
 - CSQL-backed textbook-grounded analysis
+- building the causal substrate that several heavier CLIFF routes depend on
 
 Also needed:
 
@@ -168,6 +205,8 @@ Best for:
 - SEC workflow recovery
 - company diffusion comparisons
 - finance-oriented dashboards
+- testing the deeper route stack that eventually leans on Democritus-style
+  causal-state construction
 
 Also needed:
 
@@ -246,6 +285,15 @@ Recommended smoke queries:
 - `How similar is Adobe to Nike?`
 - `Give me 5 studies of global warming and synthesize their joint claims`
 - `How easy is it to drive a Tesla Model 3?`
+
+## Current UX Notes
+
+- The launcher banner now expands `CLIFF` as `Conscious Layer Interface to Functor Flow`.
+- `Democritus` quick mode is intended to return a useful provisional answer
+  sooner and then improve it as more evidence is processed.
+- `Company similarity` now reports ETA, parallelism, and inner Democritus build
+  stages, but it remains the slowest major route and should still be treated as
+  deep research.
 
 ## Optional Integrations
 

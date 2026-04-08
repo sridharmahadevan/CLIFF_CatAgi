@@ -88,6 +88,33 @@ class DashboardQueryLauncher:
     def _normalize_execution_mode(value: object) -> str:
         return "deep" if str(value or "").strip().lower() == "deep" else "quick"
 
+    @staticmethod
+    def _route_research_profile(route_name: object) -> dict[str, str]:
+        normalized = str(route_name or "").strip().lower()
+        if normalized in {"basket_rocket_sec", "course_demo", "culinary_tour"}:
+            return {
+                "class_name": "quick-answer",
+                "label": "Quick answer",
+                "note": "Usually one of the faster CLIFF routes.",
+            }
+        if normalized == "product_feedback":
+            return {
+                "class_name": "longer-analysis",
+                "label": "Longer analysis",
+                "note": "Structured evidence and synthesis can take a few minutes.",
+            }
+        if normalized in {"democritus", "company_similarity"}:
+            return {
+                "class_name": "deep-research",
+                "label": "Deep research",
+                "note": "Even quick mode may take several minutes while CLIFF builds causal state.",
+            }
+        return {
+            "class_name": "route-warming-up",
+            "label": "Route warming up",
+            "note": "CLIFF is still determining how much work this question requires.",
+        }
+
     def wait_for_submission(self) -> str:
         self._submitted_event.wait()
         with self._lock:
@@ -379,7 +406,15 @@ class DashboardQueryLauncher:
             eta = self._company_similarity_eta(run_state, progress)
             telemetry = dict(progress.get("telemetry") or {})
             timing = dict(telemetry.get("timing") or {})
-            current_stage = str(timing.get("current_stage") or "").strip()
+            progress_stage = str(progress.get("current_phase") or "").strip()
+            if progress_stage in {"Preparing company inputs", "Preparing First company and Second company"}:
+                progress_stage = ""
+            current_stage = str(
+                self._company_similarity_democritus_stage_summary(progress)
+                or progress_stage
+                or timing.get("current_stage")
+                or ""
+            ).strip()
             current_parallelism = timing.get("observed_parallelism")
             peak_parallelism = timing.get("peak_parallelism")
             return {
@@ -408,6 +443,10 @@ class DashboardQueryLauncher:
             run_state["current_stage"] = eta_summary.get("current_stage")
             run_state["current_stage_label"] = eta_summary.get("current_stage_label")
             run_state["peak_parallelism"] = eta_summary.get("peak_parallelism")
+        research_profile = self._route_research_profile(run_state.get("route_name"))
+        run_state["research_profile_class"] = research_profile.get("class_name")
+        run_state["research_profile_label"] = research_profile.get("label")
+        run_state["research_profile_note"] = research_profile.get("note")
         return run_state
 
     def _render_artifact_page(self) -> str:
@@ -754,6 +793,8 @@ class DashboardQueryLauncher:
         latest_atlas_year = ""
         active_companies: list[str] = []
         active_atlas_companies: list[str] = []
+        company_substage: dict[str, str] = {}
+        company_triples: dict[str, int] = {}
         latest_batch = ""
         recent_lines = [
             self._company_similarity_activity_label(line)
@@ -840,6 +881,33 @@ class DashboardQueryLauncher:
                     atlas_year_values.add((stream_label or "unknown", latest_atlas_year))
                 if stream_label:
                     active_atlas_companies = [item for item in active_atlas_companies if item.lower() != stream_label.lower()]
+            if stream_label:
+                substage = ""
+                if "root_topic_discovery_agent" in parsed_line or "[module 1]" in lowered:
+                    substage = "root topics"
+                elif "topic_graph_agent" in parsed_line:
+                    substage = "topic graph"
+                elif "causal_question_agent" in parsed_line or "[module 2]" in lowered:
+                    substage = "causal questions"
+                elif "causal_statement_agent" in parsed_line or "[module 3]" in lowered:
+                    substage = "causal statements"
+                elif "triple_extraction_agent" in parsed_line or "[module 4]" in lowered:
+                    substage = "relational triples"
+                elif "manifold_builder_agent" in parsed_line:
+                    substage = "manifold"
+                elif "lcm_sweep_agent" in parsed_line or "lcm_scoring_agent" in parsed_line:
+                    substage = "lcm scoring"
+                elif "launching atlas build outdir=" in lowered or "atlas build completed" in lowered:
+                    substage = "yearly atlas"
+                elif "brand_democritus_block_denoise.temporal_train" in parsed_line:
+                    substage = "temporal denoiser"
+                elif "brand_democritus_block_denoise.temporal_infer" in parsed_line:
+                    substage = "temporal inference"
+                if substage:
+                    company_substage[stream_label] = substage
+                triple_match = re.search(r"Recovered\s+(\d+)\s+triples", parsed_line, flags=re.IGNORECASE)
+                if triple_match:
+                    company_triples[stream_label] = int(triple_match.group(1))
 
         company_a = company_a or "First company"
         company_b = company_b or "Second company"
@@ -892,9 +960,22 @@ class DashboardQueryLauncher:
         elif active_atlas_companies:
             current_phase = f"Building yearly atlas for {active_atlas_companies[0]}"
         elif len(active_companies) >= 2:
-            current_phase = f"Building {company_a} and {company_b} in parallel"
+            active_substages = [company_substage.get(company, "") for company in active_companies]
+            active_substages = [stage for stage in active_substages if stage]
+            if active_substages and len(set(active_substages)) == 1:
+                current_phase = f"Building {company_a} and {company_b}: {active_substages[0]}"
+            else:
+                current_phase = f"Building {company_a} and {company_b} in parallel"
         elif active_companies:
-            current_phase = f"Building {active_companies[0]}"
+            active_company = active_companies[0]
+            substage = company_substage.get(active_company, "")
+            triples = company_triples.get(active_company)
+            if substage == "relational triples" and triples:
+                current_phase = f"Building {active_company}: recovering triples ({triples})"
+            elif substage:
+                current_phase = f"Building {active_company}: {substage}"
+            else:
+                current_phase = f"Building {active_company}"
         elif query_resolved:
             current_phase = f"Preparing {company_a} and {company_b}"
 
@@ -911,10 +992,40 @@ class DashboardQueryLauncher:
             "latest_atlas_year": latest_atlas_year,
             "latest_batch": latest_batch,
             "active_atlas_companies": tuple(active_atlas_companies),
+            "company_substage": dict(company_substage),
+            "company_triples": dict(company_triples),
             "recent_lines": tuple(recent_lines),
             "log_path": log_path,
             "telemetry": telemetry,
         }
+
+    @staticmethod
+    def _company_similarity_democritus_stage_summary(progress: dict[str, object]) -> str:
+        active_companies = list(progress.get("active_companies") or ())
+        company_substage = dict(progress.get("company_substage") or {})
+        company_triples = dict(progress.get("company_triples") or {})
+        active_atlas_companies = list(progress.get("active_atlas_companies") or ())
+
+        def render_company_stage(company: str) -> str:
+            substage = str(company_substage.get(company) or "").strip()
+            triples = company_triples.get(company)
+            if substage == "relational triples" and triples:
+                return f"{company}: recovering triples ({triples})"
+            if substage:
+                return f"{company}: {substage}"
+            return company
+
+        if active_atlas_companies:
+            return " · ".join(f"{company}: yearly atlas" for company in active_atlas_companies[:2])
+        if len(active_companies) >= 2:
+            substages = [str(company_substage.get(company) or "").strip() for company in active_companies[:2]]
+            substages = [substage for substage in substages if substage]
+            if len(substages) == 2 and len(set(substages)) == 1:
+                return f'{" and ".join(active_companies[:2])}: {substages[0]}'
+            return " · ".join(render_company_stage(company) for company in active_companies[:2])
+        if active_companies:
+            return render_company_stage(active_companies[0])
+        return ""
 
     def _render_company_similarity_live_page(self, run_id: str, *, run_state: dict[str, object]) -> str:
         query = html.escape(str(run_state.get("query") or ""))
@@ -943,6 +1054,7 @@ class DashboardQueryLauncher:
         )
         metric_bits = [
             ("Current phase", str(progress["current_phase"])),
+            ("Democritus stage", self._company_similarity_democritus_stage_summary(progress) or "Waiting for inner pipeline output"),
             ("Rough ETA", str(eta["eta_human"])),
             ("Companies", f'{progress["company_a"]} vs {progress["company_b"]}'),
             ("Active builds", str(progress["active_company"] or "Waiting")),
@@ -1027,14 +1139,24 @@ class DashboardQueryLauncher:
         if str(partial_preview.get("status") or "") == "warming_up":
             atlas_years_ready = int(progress.get("atlas_years_ready") or 0)
             latest_year_hint = str(progress.get("latest_atlas_year") or progress.get("latest_year") or "").strip()
+            active_company_names = list(progress.get("active_companies") or ())
+            active_company_name = active_company_names[0] if active_company_names else ""
+            active_company_substage = str(dict(progress.get("company_substage") or {}).get(active_company_name, "") or "")
+            active_company_triples = dict(progress.get("company_triples") or {}).get(active_company_name)
             if atlas_years_ready <= 0:
                 company_hint = str(partial_preview_note_text).replace("Waiting for the first usable yearly atlas slice from ", "").rstrip(".")
+                substage_suffix = ""
+                if active_company_name and company_hint.lower() == active_company_name.lower() and active_company_substage:
+                    if active_company_substage == "relational triples" and active_company_triples:
+                        substage_suffix = f" {active_company_name} is still recovering triples ({active_company_triples})."
+                    else:
+                        substage_suffix = f" {active_company_name} is still in {active_company_substage}."
                 suffix = (
                     f" Filings have been staged through {latest_year_hint}, but the first yearly atlas is not complete yet."
                     if latest_year_hint
                     else ""
                 )
-                partial_preview_note_text = f"Waiting for the first completed yearly atlas from {company_hint}.{suffix}".strip()
+                partial_preview_note_text = f"Waiting for the first completed yearly atlas from {company_hint}.{suffix}{substage_suffix}".strip()
             else:
                 partial_preview_note_text = (
                     f"{atlas_years_ready} yearly atlas slice"
@@ -1548,6 +1670,13 @@ class DashboardQueryLauncher:
         title = html.escape(self.config.title)
         subtitle = html.escape(self.config.subtitle)
         eyebrow = html.escape(self.config.eyebrow)
+        title_raw = str(self.config.title or "").strip()
+        cliff_expansion_markup = ""
+        if title_raw.upper() == "CLIFF":
+            cliff_expansion_markup = (
+                '<p class="hero-expansion">Conscious Layer Interface to Functor Flow</p>'
+                '<p class="hero-architecture">Architecture: the conscious interface sits on top of the Functor Flow causal engine.</p>'
+            )
         query_label = html.escape(self.config.query_label)
         placeholder = html.escape(self.config.query_placeholder)
         submit_label = html.escape(self.config.submit_label)
@@ -1574,6 +1703,10 @@ class DashboardQueryLauncher:
                 <input type="radio" name="execution_mode" value="deep" />
                 <span><strong>Deep</strong> Run the fuller causal build from the start for maximum coverage.</span>
               </label>
+              <p class="execution-mode-hint">
+                Latency guide: textbook and filing lookups are usually quickest, product evaluation can take longer,
+                and deep research routes like Democritus or company similarity may still take several minutes even in quick mode.
+              </p>
             </fieldset>
             """
         form_or_status = f"""
@@ -1647,6 +1780,9 @@ class DashboardQueryLauncher:
                 }}
                 var executionMode = String(run.execution_mode || 'quick');
                 var route = run.route_name ? '<span class="run-chip">' + escapeHtml(run.route_name) + '</span>' : '';
+                var researchProfile = run.research_profile_label
+                  ? '<span class="run-chip route-profile-' + escapeHtml(run.research_profile_class || 'route-warming-up') + '">' + escapeHtml(run.research_profile_label) + '</span>'
+                  : '';
                 var mode = executionMode ? '<span class="run-chip mode-' + escapeHtml(executionMode) + '">' + escapeHtml(executionMode) + '</span>' : '';
                 var eta = run.eta_label ? '<span class="run-chip eta-chip">' + escapeHtml(run.eta_label) + '</span>' : '';
                 var stopAction = ((run.status || '') === 'queued' || (run.status || '') === 'routing' || (run.status || '') === 'running')
@@ -1663,6 +1799,9 @@ class DashboardQueryLauncher:
                   : '';
                 var outdir = run.outdir ? '<div class="run-meta"><strong>Output:</strong> <code>' + escapeHtml(run.outdir) + '</code></div>' : '';
                 var artifact = run.artifact_path ? '<div class="run-meta"><strong>Artifact:</strong> <code>' + escapeHtml(run.artifact_path) + '</code></div>' : '';
+                var researchNote = run.research_profile_note
+                  ? '<div class="run-meta"><strong>Latency class:</strong> ' + escapeHtml(run.research_profile_note) + '</div>'
+                  : '';
                 var unconscious = (run.eta_label || run.parallelism_label || run.current_stage_label)
                   ? '<div class="run-meta"><strong>Unconscious report:</strong> '
                     + (run.eta_label ? escapeHtml(run.eta_label) : 'ETA warming up')
@@ -1674,13 +1813,14 @@ class DashboardQueryLauncher:
                   + '<article class="' + cardClass + '">'
                   + '<div class="run-topline">'
                   + '<div class="run-id">' + escapeHtml(run.run_id) + '</div>'
-                  + '<div class="run-badges"><span class="run-chip status-' + escapeHtml(run.status || 'queued') + '">' + escapeHtml(run.status || 'queued') + '</span>' + route + mode + eta + '</div>'
+                  + '<div class="run-badges"><span class="run-chip status-' + escapeHtml(run.status || 'queued') + '">' + escapeHtml(run.status || 'queued') + '</span>' + route + researchProfile + mode + eta + '</div>'
                   + '</div>'
                   + '<div class="run-query">' + escapeHtml(run.query || '') + '</div>'
                   + '<div class="run-note">' + escapeHtml(run.note || '') + '</div>'
                   + stopAction
                   + deepenAction
                   + openAction
+                  + researchNote
                   + unconscious
                   + outdir
                   + artifact
@@ -1840,6 +1980,19 @@ class DashboardQueryLauncher:
         line-height: 1.7;
         color: var(--muted);
       }}
+      .hero-expansion {{
+        margin: 14px 0 0 0;
+        font-size: 0.95rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--accent-strong);
+      }}
+      .hero-architecture {{
+        margin: 10px 0 0 0;
+        max-width: 56rem;
+        line-height: 1.6;
+        color: var(--muted);
+      }}
       .query-form {{
         display: grid;
         gap: 14px;
@@ -1895,6 +2048,12 @@ class DashboardQueryLauncher:
       }}
       .execution-mode-option input {{
         margin-top: 0.28rem;
+      }}
+      .execution-mode-hint {{
+        margin: 12px 0 0 0;
+        line-height: 1.6;
+        color: var(--muted);
+        font-size: 0.95rem;
       }}
       .demo-tour {{
         margin-top: 18px;
@@ -2075,6 +2234,22 @@ class DashboardQueryLauncher:
         background: #eef4db;
         color: #556b17;
       }}
+      .route-profile-quick-answer {{
+        background: #e7f3eb;
+        color: #2e6a47;
+      }}
+      .route-profile-longer-analysis {{
+        background: #f4ead8;
+        color: #8a5a18;
+      }}
+      .route-profile-deep-research {{
+        background: #f6e0dc;
+        color: #8a3325;
+      }}
+      .route-profile-route-warming-up {{
+        background: #ece8de;
+        color: #6b6251;
+      }}
       .status-failed {{
         background: #f8dddd;
         color: var(--error);
@@ -2190,6 +2365,7 @@ class DashboardQueryLauncher:
         <article class="panel">
           <p class="eyebrow">{eyebrow}</p>
           <h1>{title}</h1>
+          {cliff_expansion_markup}
           <p class="subtitle">{subtitle}</p>
         </article>
         <article class="panel">
@@ -2247,7 +2423,7 @@ class DashboardQueryLauncher:
             return html.escape(str(value))
 
         cards: list[str] = []
-        for run in runs:
+        for run in (self._enriched_run_state(dict(item)) for item in runs):
             card_class = "run-card"
             if run.get("status") == "complete":
                 card_class += " run-card-complete"
@@ -2256,6 +2432,11 @@ class DashboardQueryLauncher:
             route_markup = (
                 f'<span class="run-chip">{esc(run.get("route_name"))}</span>'
                 if run.get("route_name")
+                else ""
+            )
+            research_profile_markup = (
+                f'<span class="run-chip route-profile-{esc(run.get("research_profile_class") or "route-warming-up")}">{esc(run.get("research_profile_label"))}</span>'
+                if run.get("research_profile_label")
                 else ""
             )
             mode_markup = f'<span class="run-chip mode-{esc(run.get("execution_mode") or "quick")}">{esc(run.get("execution_mode") or "quick")}</span>'
@@ -2299,6 +2480,11 @@ class DashboardQueryLauncher:
                 if run.get("eta_label") or run.get("parallelism_label") or run.get("current_stage_label")
                 else ""
             )
+            research_note_markup = (
+                f'<div class="run-meta"><strong>Latency class:</strong> {esc(run.get("research_profile_note"))}</div>'
+                if run.get("research_profile_note")
+                else ""
+            )
             cards.append(
                 f'<article class="{card_class}">'
                 '<div class="run-topline">'
@@ -2306,6 +2492,7 @@ class DashboardQueryLauncher:
                 '<div class="run-badges">'
                 f'<span class="run-chip status-{esc(run.get("status") or "queued")}">{esc(run.get("status") or "queued")}</span>'
                 f"{route_markup}"
+                f"{research_profile_markup}"
                 f"{mode_markup}"
                 f"{eta_markup}"
                 "</div>"
@@ -2315,6 +2502,7 @@ class DashboardQueryLauncher:
                 f"{stop_action_markup}"
                 f"{deepen_action_markup}"
                 f"{open_action_markup}"
+                f"{research_note_markup}"
                 f"{unconscious_markup}"
                 f"{outdir_markup}"
                 f"{artifact_markup}"

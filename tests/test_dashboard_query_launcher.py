@@ -113,6 +113,45 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         self.assertIn("Explain the Geometric Transformer on the Sudoku problem", markup)
         self.assertIn("demo-tour-button", markup)
 
+    def test_render_launcher_page_includes_latency_guide_for_execution_modes(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Ask a question",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+                enable_execution_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        markup = launcher._render_launcher_page()
+
+        self.assertIn("Latency guide:", markup)
+        self.assertIn("may still take several minutes even in quick mode", markup)
+
+    def test_render_launcher_page_expands_cliff_in_hero_banner(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Ask a question",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        markup = launcher._render_launcher_page()
+
+        self.assertIn("Conscious Layer Interface to Functor Flow", markup)
+        self.assertIn("the conscious interface sits on top of the Functor Flow causal engine", markup)
+
     def test_render_session_runs_markup_highlights_completed_results(self) -> None:
         launcher = DashboardQueryLauncher(
             DashboardQueryLauncherConfig(
@@ -146,6 +185,8 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         self.assertIn("status-complete", markup)
         self.assertIn("Open result", markup)
         self.assertIn("/run-artifact?run_id=run-0001", markup)
+        self.assertIn("Longer analysis", markup)
+        self.assertIn("Structured evidence and synthesis can take a few minutes.", markup)
 
     def test_render_session_runs_markup_uses_inspect_label_for_running_artifact(self) -> None:
         launcher = DashboardQueryLauncher(
@@ -178,6 +219,8 @@ class DashboardQueryLauncherTests(unittest.TestCase):
 
         self.assertIn("Inspect run", markup)
         self.assertNotIn("Open result", markup)
+        self.assertIn("Deep research", markup)
+        self.assertIn("Even quick mode may take several minutes while CLIFF builds causal state.", markup)
 
     def test_state_payload_promotes_route_eta_back_to_session_runs(self) -> None:
         launcher = DashboardQueryLauncher(
@@ -282,6 +325,64 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         self.assertEqual(state["runs"][0]["current_stage"], "Cross-company functor comparison")
         self.assertIn("parallelism 1.0 (peak 2.0)", markup)
         self.assertIn("stage Cross-company functor comparison", markup)
+
+    def test_state_payload_promotes_company_similarity_inner_democritus_stage_from_logs(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Compare Adobe and Nike",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "cliff_worker_first_pass_stdout.log").write_text(
+                "\n".join(
+                    [
+                        "[company_similarity] resolved query to Adobe vs Nike",
+                        "[company_similarity] ensuring company analysis for Adobe",
+                        "[company_similarity][Adobe] [Module 4] Recovered 480 triples from 900 statements so far…",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            telemetry_path = root / "company_similarity" / "company_similarity_telemetry.json"
+            telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+            telemetry_path.write_text(
+                json.dumps(
+                    {
+                        "timing": {
+                            "observed_parallelism": 1.0,
+                            "peak_parallelism": 2.0,
+                            "current_stage": "Adobe build",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            run_id = launcher.submit_query("Compare Adobe and Nike")
+            launcher.wait_for_next_submission(timeout=0.01)
+            launcher.update_session_run(
+                run_id,
+                status="running",
+                route_name="company_similarity",
+                note="Running.",
+                outdir=root,
+                artifact_path=root / "company_similarity" / "company_similarity.html",
+            )
+
+            state = launcher._state_payload()
+            markup = launcher._render_session_runs_markup(state["runs"])
+
+        self.assertEqual(state["runs"][0]["current_stage"], "Adobe: recovering triples (480)")
+        self.assertIn("stage Adobe: recovering triples (480)", markup)
 
     def test_render_run_artifact_page_returns_specific_completed_artifact(self) -> None:
         launcher = DashboardQueryLauncher(
@@ -440,12 +541,14 @@ class DashboardQueryLauncherTests(unittest.TestCase):
             self.assertIn("Performance", rendered)
             self.assertIn("Recent Activity", rendered)
             self.assertIn("Current phase", rendered)
+            self.assertIn("Democritus stage", rendered)
             self.assertIn("Rough ETA", rendered)
             self.assertIn("about ", rendered)
             self.assertIn("Apple vs Tesla", rendered)
             self.assertIn("Apple build", rendered)
             self.assertIn("Tesla build", rendered)
-            self.assertIn("Building Apple and Tesla in parallel", rendered)
+            self.assertIn("Building Apple and Tesla: yearly atlas", rendered)
+            self.assertIn("Apple and Tesla: yearly atlas", rendered)
             self.assertIn("Initial Similarity Read", rendered)
             self.assertIn("Initial similarity read is ready from 1 overlapping year and 18 shared basis edges.", rendered)
             self.assertIn("Mean yearly cosine similarity: 0.62", rendered)
@@ -529,6 +632,71 @@ class DashboardQueryLauncherTests(unittest.TestCase):
             self.assertIn("Filings have been staged through 2025, but the first yearly atlas is not complete yet.", rendered)
             self.assertIn("Atlas years ready", rendered)
             self.assertIn(">0</strong>", rendered)
+
+    def test_render_run_artifact_page_surfaces_inner_democritus_substage_for_company_similarity(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="How similar is Apple to Adobe?",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "cliff_worker_first_pass_stdout.log").write_text(
+                "\n".join(
+                    [
+                        "[company_similarity] resolved query to Apple vs Adobe",
+                        "[company_similarity] ensuring company analysis for Apple",
+                        "[company_similarity][Apple] [run_brand_financial_filings] year=2025 staged_pdfs=1 rows=1",
+                        "[company_similarity][Apple] [Module 4] Recovered 480 triples from 900 statements so far…",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (root / "company_similarity").mkdir(parents=True, exist_ok=True)
+            (root / "company_similarity" / "company_similarity_telemetry.json").write_text(
+                json.dumps(
+                    {
+                        "partial_preview": {
+                            "status": "warming_up",
+                            "note": "Waiting for the first usable yearly atlas slice from Apple.",
+                        },
+                        "timing": {
+                            "elapsed_human": "4m 00s",
+                            "eta_human": "8m 00s",
+                            "observed_work_human": "4m 00s",
+                            "observed_parallelism": 1.0,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            run_id = launcher.submit_query("How similar is Apple to Adobe?")
+            launcher.update_session_run(
+                run_id,
+                status="running",
+                mind_layer="unconscious",
+                route_name="company_similarity",
+                note="Running.",
+                artifact_path=root / "company_similarity" / "company_similarity_dashboard.html",
+                outdir=root,
+            )
+
+            rendered = launcher._render_run_artifact_page(run_id)
+
+            self.assertIn("Building Apple: recovering triples (480)", rendered)
+            self.assertIn("Democritus stage", rendered)
+            self.assertIn("Apple: recovering triples (480)", rendered)
+            self.assertIn("Apple is still recovering triples (480).", rendered)
 
     def test_render_run_artifact_page_rewrites_file_links_to_launcher_endpoint(self) -> None:
         launcher = DashboardQueryLauncher(
