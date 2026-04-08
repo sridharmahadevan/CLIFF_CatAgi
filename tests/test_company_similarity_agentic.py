@@ -55,6 +55,10 @@ class CompanySimilarityAgenticTests(unittest.TestCase):
         self.assertEqual(profile["skip_visualization"], 1)
         self.assertEqual(profile["skip_branch_visuals"], 1)
 
+    def test_format_duration_preserves_subsecond_work(self) -> None:
+        self.assertEqual(module._format_duration(0.25), "<1s")
+        self.assertEqual(module._format_duration(1.0), "1s")
+
     def test_build_telemetry_payload_reports_observed_parallelism(self) -> None:
         runner = module.CompanySimilarityAgenticRunner(
             "Compare Adobe and Nike",
@@ -115,6 +119,94 @@ class CompanySimilarityAgenticTests(unittest.TestCase):
         self.assertEqual(timing["observed_parallelism"], 2.0)
         self.assertEqual(timing["peak_parallelism"], 2.0)
         self.assertEqual(timing["current_stage"], "Cross-company functor comparison")
+
+    def test_render_company_similarity_performance_html_prefers_observed_work(self) -> None:
+        html = module._render_company_similarity_performance_html(
+            {
+                "status": "running",
+                "note": "Testing observed work.",
+                "timing": {
+                    "elapsed_human": "1m 36s",
+                    "current_stage": "Walmart build",
+                    "observed_work_human": "1m 36s",
+                    "completed_work_human": "<1s",
+                    "observed_parallelism": 1.0,
+                    "peak_parallelism": 2.0,
+                    "eta_human": "6m 28s",
+                },
+                "stages": [],
+                "slowest_stages": [],
+            }
+        )
+
+        self.assertIn("Observed Work", html)
+        self.assertIn("1m 36s", html)
+        self.assertIn("Completed Stages", html)
+        self.assertIn("&lt;1s", html)
+
+    def test_refresh_partial_similarity_preview_builds_provisional_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            runner = module.CompanySimilarityAgenticRunner(
+                "Compare Adobe and Nike",
+                root / "company_similarity",
+            )
+            record_a = module._CompanyRecord(
+                brand="Adobe",
+                slug="adobe",
+                aliases=("adobe",),
+                outdir=root / "outputs" / "adobe",
+            )
+            record_b = module._CompanyRecord(
+                brand="Nike",
+                slug="nike",
+                aliases=("nike",),
+                outdir=root / "outputs" / "nike",
+            )
+            for record, years in ((record_a, (2023,)), (record_b, (2023, 2024))):
+                filings_outdir = record.outdir / f"runs_{record.slug}_financial_filings"
+                filings_outdir.mkdir(parents=True, exist_ok=True)
+                for year in years:
+                    atlas_dir = filings_outdir / f"atlas_{record.slug}_{year}"
+                    atlas_dir.mkdir(parents=True, exist_ok=True)
+                    (atlas_dir / "atlas_edges.parquet").write_text("", encoding="utf-8")
+
+            commands: list[list[str]] = []
+
+            def fake_run_command(command: list[str], *, cwd: Path, stream_label: str = "") -> None:
+                del cwd, stream_label
+                commands.append(command)
+                outdir = Path(command[command.index("--outdir") + 1])
+                outdir.mkdir(parents=True, exist_ok=True)
+                if "combine_atlas_parquets" in " ".join(command):
+                    (outdir / "atlas_edges.parquet").write_text("", encoding="utf-8")
+                    return
+                if "cross_company_functors" in " ".join(command):
+                    (outdir / "cross_company_functors_summary.md").write_text("# Partial similarity\n", encoding="utf-8")
+                    (outdir / "cross_company_functors_manifest.json").write_text(
+                        '{"overlap_years":[2023],"shared_edge_basis_size":12}',
+                        encoding="utf-8",
+                    )
+
+            partial_preview_state: dict[str, object] = {}
+            with mock.patch.object(module, "_run_command", side_effect=fake_run_command):
+                runner._refresh_partial_similarity_preview(
+                    record_a=record_a,
+                    record_b=record_b,
+                    workspace_root=root,
+                    python_executable="python3",
+                    mode_profile={"year_start": 2023, "year_end": 2025},
+                    analysis_dir=runner.outdir / "adobe_vs_nike_functors",
+                    stage_state={"functor_analysis": {"status": "pending"}},
+                    partial_preview_state=partial_preview_state,
+                )
+
+            self.assertEqual(partial_preview_state["status"], "ready")
+            self.assertIn("Initial similarity read is ready", str(partial_preview_state["note"]))
+            self.assertEqual(partial_preview_state["overlap_years"], [2023])
+            self.assertEqual(partial_preview_state["shared_edge_basis_size"], 12)
+            self.assertTrue(str(partial_preview_state["summary_path"]).endswith("partial/cross_company_functors_summary.md"))
+            self.assertEqual(len(commands), 3)
 
     def test_load_company_registry_rehomes_absolute_output_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

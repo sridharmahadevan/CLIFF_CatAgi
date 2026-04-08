@@ -120,7 +120,10 @@ class CompanySimilarityRunResult:
 
 
 def _format_duration(seconds: float) -> str:
-    seconds = max(0, int(round(seconds)))
+    raw_seconds = max(float(seconds), 0.0)
+    if 0.0 < raw_seconds < 1.0:
+        return "<1s"
+    seconds = int(round(raw_seconds))
     hours, remainder = divmod(seconds, 3600)
     minutes, secs = divmod(remainder, 60)
     if hours:
@@ -431,6 +434,39 @@ def _existing_combined_dir(record: _CompanyRecord) -> Path | None:
             if candidate.exists():
                 return candidate.resolve()
     return None
+
+
+def _financial_filings_outdir(record: _CompanyRecord) -> Path | None:
+    if record.outdir is None:
+        return None
+    return record.outdir / f"runs_{record.slug}_financial_filings"
+
+
+def _available_yearly_atlas_dirs(record: _CompanyRecord) -> tuple[Path, ...]:
+    filings_outdir = _financial_filings_outdir(record)
+    if filings_outdir is None or not filings_outdir.exists():
+        return ()
+    atlas_prefix = f"atlas_{record.slug}_"
+    combined_name = f"atlas_{record.slug}_financial_combined"
+    atlas_dirs = [
+        path.resolve()
+        for path in filings_outdir.iterdir()
+        if path.is_dir()
+        and path.name.startswith(atlas_prefix)
+        and path.name != combined_name
+        and (path / "atlas_edges.parquet").exists()
+    ]
+    return tuple(sorted(atlas_dirs))
+
+
+def _atlas_dir_years(atlas_dirs: tuple[Path, ...]) -> tuple[int, ...]:
+    years: list[int] = []
+    for atlas_dir in atlas_dirs:
+        match = re.search(r"(19\d{2}|20\d{2})", atlas_dir.name)
+        if not match:
+            continue
+        years.append(int(match.group(1)))
+    return tuple(sorted(dict.fromkeys(years)))
 
 
 def _run_command(command: list[str], *, cwd: Path, stream_label: str = "") -> None:
@@ -767,10 +803,11 @@ def _render_company_similarity_performance_html(payload: dict[str, object]) -> s
           <div class="metric"><span>Status</span><strong>{esc(payload.get("status") or "")}</strong></div>
           <div class="metric"><span>Elapsed</span><strong>{esc(timing.get("elapsed_human") or "")}</strong></div>
           <div class="metric"><span>Current Stage</span><strong>{esc(timing.get("current_stage") or "warming up")}</strong></div>
-          <div class="metric"><span>Completed Work</span><strong>{esc(timing.get("completed_work_human") or "")}</strong></div>
+          <div class="metric"><span>Observed Work</span><strong>{esc(timing.get("observed_work_human") or "")}</strong></div>
           <div class="metric"><span>Observed Parallelism</span><strong>{esc(timing.get("observed_parallelism") or 1.0)}</strong></div>
           <div class="metric"><span>Peak Parallelism</span><strong>{esc(timing.get("peak_parallelism") or 1.0)}</strong></div>
           <div class="metric"><span>ETA</span><strong>{esc(timing.get("eta_human") or "")}</strong></div>
+          <div class="metric"><span>Completed Stages</span><strong>{esc(timing.get("completed_work_human") or "")}</strong></div>
         </div>
       </section>
       <section class="card">
@@ -825,7 +862,7 @@ def _write_html_report(
         <p class="eyebrow">Performance</p>
         <div class="metrics">
           <div class="metric"><span class="muted">Elapsed</span><strong>{html.escape(str(timing.get("elapsed_human") or "n/a"))}</strong></div>
-          <div class="metric"><span class="muted">Completed work</span><strong>{html.escape(str(timing.get("completed_work_human") or "n/a"))}</strong></div>
+          <div class="metric"><span class="muted">Observed work</span><strong>{html.escape(str(timing.get("observed_work_human") or "n/a"))}</strong></div>
           <div class="metric"><span class="muted">Observed parallelism</span><strong>{html.escape(str(timing.get("observed_parallelism") or 1.0))}</strong></div>
           <div class="metric"><span class="muted">ETA</span><strong>{html.escape(str(timing.get("eta_human") or "n/a"))}</strong></div>
         </div>
@@ -991,6 +1028,7 @@ class CompanySimilarityAgenticRunner:
         stage_state: dict[str, dict[str, object]],
         status: str,
         note: str,
+        partial_preview: dict[str, object] | None = None,
     ) -> dict[str, object]:
         now = time.time()
         completed_stages = []
@@ -1062,6 +1100,7 @@ class CompanySimilarityAgenticRunner:
             "execution_mode": self.execution_mode,
             "status": status,
             "note": note,
+            "partial_preview": dict(partial_preview or {}),
             "started_at_epoch": round(started_at, 6),
             "started_at_local": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started_at)),
             "updated_at_epoch": round(now, 6),
@@ -1099,6 +1138,7 @@ class CompanySimilarityAgenticRunner:
         stage_state: dict[str, dict[str, object]],
         status: str,
         note: str,
+        partial_preview: dict[str, object] | None = None,
     ) -> dict[str, object]:
         payload = self._build_telemetry_payload(
             plan=plan,
@@ -1106,6 +1146,7 @@ class CompanySimilarityAgenticRunner:
             stage_state=stage_state,
             status=status,
             note=note,
+            partial_preview=partial_preview,
         )
         telemetry_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         performance_dashboard_path.write_text(
@@ -1123,6 +1164,8 @@ class CompanySimilarityAgenticRunner:
         started_at: float,
         stage_state: dict[str, dict[str, object]],
         heartbeat_state: dict[str, str],
+        partial_preview_state: dict[str, object],
+        on_heartbeat: Callable[[], None] | None = None,
     ) -> tuple[threading.Event, threading.Thread]:
         stop_event = threading.Event()
 
@@ -1130,6 +1173,8 @@ class CompanySimilarityAgenticRunner:
             interval = max(float(self._telemetry_heartbeat_interval_seconds), 0.1)
             while not stop_event.wait(interval):
                 try:
+                    if on_heartbeat is not None:
+                        on_heartbeat()
                     self._write_telemetry(
                         telemetry_path=telemetry_path,
                         performance_dashboard_path=performance_dashboard_path,
@@ -1138,6 +1183,7 @@ class CompanySimilarityAgenticRunner:
                         stage_state=stage_state,
                         status=heartbeat_state.get("status", "running"),
                         note=heartbeat_state.get("note", ""),
+                        partial_preview=partial_preview_state,
                     )
                 except Exception:
                     # Telemetry is diagnostic; keep the main run alive if a refresh fails.
@@ -1151,6 +1197,142 @@ class CompanySimilarityAgenticRunner:
         thread.start()
         return stop_event, thread
 
+    def _refresh_partial_similarity_preview(
+        self,
+        *,
+        record_a: _CompanyRecord,
+        record_b: _CompanyRecord,
+        workspace_root: Path,
+        python_executable: str,
+        mode_profile: dict[str, object],
+        analysis_dir: Path,
+        stage_state: dict[str, dict[str, object]],
+        partial_preview_state: dict[str, object],
+    ) -> None:
+        if str(stage_state.get("functor_analysis", {}).get("status") or "pending").lower() != "pending":
+            return
+
+        partial_root = analysis_dir / "partial_inputs"
+        partial_root.mkdir(parents=True, exist_ok=True)
+
+        def resolve_source(record: _CompanyRecord) -> tuple[Path | None, str, tuple[int, ...]]:
+            combined_dir = _existing_combined_dir(record)
+            if combined_dir is not None and (combined_dir / "atlas_edges.parquet").exists():
+                return combined_dir, f"combined:{combined_dir}", ()
+
+            yearly_atlases = _available_yearly_atlas_dirs(record)
+            if not yearly_atlases:
+                return None, "", ()
+
+            filings_outdir = _financial_filings_outdir(record)
+            if filings_outdir is None:
+                return None, "", ()
+
+            partial_combined_dir = partial_root / f"{record.slug}_partial_combined"
+            atlas_signature = ",".join(path.name for path in yearly_atlases)
+            signature_key = f"{record.slug}_source_signature"
+            if partial_preview_state.get(signature_key) != atlas_signature or not (partial_combined_dir / "atlas_edges.parquet").exists():
+                self._log(
+                    f"refreshing provisional {record.brand} atlas from {len(yearly_atlases)} yearly slice"
+                    f"{'s' if len(yearly_atlases) != 1 else ''}"
+                )
+                _run_command(
+                    [
+                        python_executable,
+                        "-m",
+                        "brand_democritus_block_denoise.combine_atlas_parquets",
+                        "--atlas-root",
+                        str(filings_outdir),
+                        "--atlas-dirs",
+                        atlas_signature,
+                        "--outdir",
+                        str(partial_combined_dir),
+                    ],
+                    cwd=workspace_root,
+                    stream_label=f"{record.brand}/partial",
+                )
+                partial_preview_state[signature_key] = atlas_signature
+            return partial_combined_dir, f"partial:{record.slug}:{atlas_signature}", _atlas_dir_years(yearly_atlases)
+
+        source_a, token_a, years_a = resolve_source(record_a)
+        source_b, token_b, years_b = resolve_source(record_b)
+        if source_a is None or source_b is None:
+            waiting_for = record_a.brand if source_a is None else record_b.brand
+            partial_preview_state.update(
+                {
+                    "status": "warming_up",
+                    "note": f"Waiting for the first usable yearly atlas slice from {waiting_for}.",
+                    "summary_path": "",
+                    "manifest_path": "",
+                }
+            )
+            return
+
+        overlap_hint = tuple(sorted(set(years_a) & set(years_b))) if years_a and years_b else ()
+        signature = (
+            token_a,
+            token_b,
+            overlap_hint,
+            int(mode_profile["year_start"]),
+            int(mode_profile["year_end"]),
+        )
+        if partial_preview_state.get("signature") == signature:
+            return
+
+        partial_analysis_dir = analysis_dir / "partial"
+        partial_analysis_dir.mkdir(parents=True, exist_ok=True)
+        self._log(
+            f"running provisional cross-company similarity preview for {record_a.brand} vs {record_b.brand}"
+        )
+        _run_command(
+            [
+                python_executable,
+                "-m",
+                "brand_democritus_block_denoise.cross_company_functors",
+                "--company-a-dir",
+                str(source_a),
+                "--company-b-dir",
+                str(source_b),
+                "--company-a-name",
+                record_a.slug,
+                "--company-b-name",
+                record_b.slug,
+                "--outdir",
+                str(partial_analysis_dir),
+                "--min-year",
+                str(mode_profile["year_start"]),
+                "--max-year",
+                str(mode_profile["year_end"]),
+            ],
+            cwd=workspace_root,
+            stream_label="partial-preview",
+        )
+        manifest_path = partial_analysis_dir / "cross_company_functors_manifest.json"
+        summary_path = partial_analysis_dir / "cross_company_functors_summary.md"
+        manifest = _safe_read_json(manifest_path)
+        overlap_years = tuple(manifest.get("overlap_years") or ())
+        basis_size = int(manifest.get("shared_edge_basis_size") or 0)
+        preview_note = (
+            f"Initial similarity read is ready from {len(overlap_years)} overlapping year"
+            f"{'s' if len(overlap_years) != 1 else ''} and {basis_size} shared basis edge"
+            f"{'s' if basis_size != 1 else ''}."
+            if summary_path.exists()
+            else "CLIFF prepared a provisional comparison shell, but the summary artifact is not ready yet."
+        )
+        partial_preview_state.update(
+            {
+                "status": "ready" if summary_path.exists() else "warming_up",
+                "note": preview_note,
+                "summary_path": str(summary_path) if summary_path.exists() else "",
+                "manifest_path": str(manifest_path) if manifest_path.exists() else "",
+                "overlap_years": list(overlap_years),
+                "shared_edge_basis_size": basis_size,
+                "signature": signature,
+                "updated_at_epoch": round(time.time(), 6),
+                "updated_at_local": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time())),
+            }
+        )
+
     def run(self) -> CompanySimilarityRunResult:
         self.outdir.mkdir(parents=True, exist_ok=True)
         brand_root = _resolve_brand_workspace_root()
@@ -1161,6 +1343,9 @@ class CompanySimilarityAgenticRunner:
         started_at = time.time()
         telemetry_path = self.outdir / "company_similarity_telemetry.json"
         performance_dashboard_path = self.outdir / "company_similarity_performance.html"
+        analysis_dir = self.outdir / f"{plan.company_a_slug}_vs_{plan.company_b_slug}_functors"
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        summary_path = self.outdir / "company_similarity_summary.json"
         stage_state: dict[str, dict[str, object]] = {
             "query": {"label": "Resolve query", "status": "complete", "started_at_epoch": started_at, "ended_at_epoch": started_at},
             "company_a_analysis": {"label": f"{plan.company_a} build", "status": "pending", "started_at_epoch": 0.0, "ended_at_epoch": 0.0},
@@ -1175,6 +1360,14 @@ class CompanySimilarityAgenticRunner:
                 f"in {self.execution_mode} mode."
             ),
         }
+        partial_preview_state: dict[str, object] = {
+            "status": "warming_up",
+            "note": "CLIFF will publish an initial similarity read as soon as both companies expose usable yearly atlas slices.",
+            "summary_path": "",
+            "manifest_path": "",
+            "overlap_years": [],
+            "shared_edge_basis_size": 0,
+        }
         self._log(f"resolved query to {plan.company_a} vs {plan.company_b}")
         self._write_telemetry(
             telemetry_path=telemetry_path,
@@ -1184,7 +1377,10 @@ class CompanySimilarityAgenticRunner:
             stage_state=stage_state,
             status=heartbeat_state["status"],
             note=heartbeat_state["note"],
+            partial_preview=partial_preview_state,
         )
+        record_a = _find_company_record(plan, brand_root, plan.company_a_slug)
+        record_b = _find_company_record(plan, brand_root, plan.company_b_slug)
         heartbeat_stop, heartbeat_thread = self._start_telemetry_heartbeat(
             telemetry_path=telemetry_path,
             performance_dashboard_path=performance_dashboard_path,
@@ -1192,10 +1388,19 @@ class CompanySimilarityAgenticRunner:
             started_at=started_at,
             stage_state=stage_state,
             heartbeat_state=heartbeat_state,
+            partial_preview_state=partial_preview_state,
+            on_heartbeat=lambda: self._refresh_partial_similarity_preview(
+                record_a=record_a,
+                record_b=record_b,
+                workspace_root=workspace_root,
+                python_executable=pipeline_python,
+                mode_profile=mode_profile,
+                analysis_dir=analysis_dir,
+                stage_state=stage_state,
+                partial_preview_state=partial_preview_state,
+            ),
         )
         try:
-            record_a = _find_company_record(plan, brand_root, plan.company_a_slug)
-            record_b = _find_company_record(plan, brand_root, plan.company_b_slug)
             _preflight_company_similarity_backend((record_a, record_b))
             self._log(f"starting parallel company analysis for {record_a.brand} and {record_b.brand}")
             stage_state["company_a_analysis"]["status"] = "active"
@@ -1211,6 +1416,7 @@ class CompanySimilarityAgenticRunner:
                 stage_state=stage_state,
                 status=heartbeat_state["status"],
                 note=heartbeat_state["note"],
+                partial_preview=partial_preview_state,
             )
             analysis_results = _ensure_company_analyses(
                 records=(record_a, record_b),
@@ -1240,19 +1446,17 @@ class CompanySimilarityAgenticRunner:
                         stage_state=stage_state,
                         status=heartbeat_state["status"],
                         note=heartbeat_state["note"],
+                        partial_preview=partial_preview_state,
                     ),
                 ),
             )
             combined_a, manifest_a = analysis_results[record_a.slug]
             combined_b, manifest_b = analysis_results[record_b.slug]
-
-            analysis_dir = self.outdir / f"{plan.company_a_slug}_vs_{plan.company_b_slug}_functors"
-            analysis_dir.mkdir(parents=True, exist_ok=True)
-            summary_path = self.outdir / "company_similarity_summary.json"
             self._log(f"running cross-company functor analysis in {analysis_dir}")
             stage_state["functor_analysis"]["status"] = "active"
             stage_state["functor_analysis"]["started_at_epoch"] = time.time()
             heartbeat_state["note"] = "Both company branches are ready; running the cross-company functor comparison."
+            partial_preview_state["note"] = "A deeper final company comparison is now running from the full company atlases."
             self._write_telemetry(
                 telemetry_path=telemetry_path,
                 performance_dashboard_path=performance_dashboard_path,
@@ -1261,6 +1465,7 @@ class CompanySimilarityAgenticRunner:
                 stage_state=stage_state,
                 status=heartbeat_state["status"],
                 note=heartbeat_state["note"],
+                partial_preview=partial_preview_state,
             )
 
             _run_command(
@@ -1305,6 +1510,7 @@ class CompanySimilarityAgenticRunner:
                     stage_state=stage_state,
                     status=heartbeat_state["status"],
                     note=heartbeat_state["note"],
+                    partial_preview=partial_preview_state,
                 )
                 _run_command(
                     [
@@ -1350,6 +1556,7 @@ class CompanySimilarityAgenticRunner:
             summary_markdown = (analysis_dir / "cross_company_functors_summary.md").read_text(encoding="utf-8")
             heartbeat_state["status"] = "complete"
             heartbeat_state["note"] = "The company similarity run completed and its performance telemetry has been finalized."
+            partial_preview_state["note"] = "The final company similarity comparison is complete."
             performance_payload = self._write_telemetry(
                 telemetry_path=telemetry_path,
                 performance_dashboard_path=performance_dashboard_path,
@@ -1358,6 +1565,7 @@ class CompanySimilarityAgenticRunner:
                 stage_state=stage_state,
                 status=heartbeat_state["status"],
                 note=heartbeat_state["note"],
+                partial_preview=partial_preview_state,
             )
             artifact_path = _write_html_report(
                 output_path=self.outdir / "company_similarity_dashboard.html",
@@ -1406,6 +1614,7 @@ class CompanySimilarityAgenticRunner:
                 stage_state=stage_state,
                 status=heartbeat_state["status"],
                 note=heartbeat_state["note"],
+                partial_preview=partial_preview_state,
             )
             raise
         finally:

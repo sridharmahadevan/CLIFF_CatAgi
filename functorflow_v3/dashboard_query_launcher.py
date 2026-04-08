@@ -555,6 +555,10 @@ class DashboardQueryLauncher:
             candidates.extend(sorted(route_root.glob("*_vs_*_functors/*.json")))
             candidates.extend(sorted(route_root.glob("*_vs_*_functors/*.csv")))
             candidates.extend(sorted(route_root.glob("*_vs_*_functors/*.png")))
+            candidates.extend(sorted(route_root.glob("*_vs_*_functors/partial/*.md")))
+            candidates.extend(sorted(route_root.glob("*_vs_*_functors/partial/*.json")))
+            candidates.extend(sorted(route_root.glob("*_vs_*_functors/partial/*.csv")))
+            candidates.extend(sorted(route_root.glob("*_vs_*_functors/partial/*.png")))
         seen: set[Path] = set()
         ordered: list[Path] = []
         for candidate in candidates:
@@ -604,6 +608,24 @@ class DashboardQueryLauncher:
             return dict(json.loads(telemetry_path.read_text(encoding="utf-8")))
         except Exception:
             return {}
+
+    def _company_similarity_partial_preview(self, run_state: dict[str, object]) -> dict[str, object]:
+        telemetry = self._company_similarity_telemetry(run_state)
+        preview = dict(telemetry.get("partial_preview") or {})
+        summary_path_raw = str(preview.get("summary_path") or "").strip()
+        manifest_path_raw = str(preview.get("manifest_path") or "").strip()
+        summary_text = ""
+        if summary_path_raw:
+            summary_path = Path(summary_path_raw).resolve()
+            if summary_path.exists():
+                try:
+                    summary_text = summary_path.read_text(encoding="utf-8", errors="replace").strip()
+                except OSError:
+                    summary_text = ""
+        preview["summary_text"] = summary_text
+        preview["summary_path"] = summary_path_raw
+        preview["manifest_path"] = manifest_path_raw
+        return preview
 
     @staticmethod
     def _company_similarity_stream_parts(line: str) -> tuple[str, str]:
@@ -884,6 +906,7 @@ class DashboardQueryLauncher:
         files = self._company_similarity_live_files(run_state)
         progress = self._company_similarity_progress(run_state)
         eta = self._company_similarity_eta(run_state, progress)
+        partial_preview = self._company_similarity_partial_preview(run_state)
         phases = progress["phases"]
         phase_markup = "".join(
             (
@@ -928,7 +951,7 @@ class DashboardQueryLauncher:
                 + "</strong></div>"
                 for label, value in (
                     ("Elapsed", str(timing.get("elapsed_human") or "n/a")),
-                    ("Completed work", str(timing.get("completed_work_human") or "n/a")),
+                    ("Observed work", str(timing.get("observed_work_human") or "n/a")),
                     ("Observed parallelism", str(timing.get("observed_parallelism") or 1.0)),
                     ("ETA", str(timing.get("eta_human") or "n/a")),
                 )
@@ -974,6 +997,45 @@ class DashboardQueryLauncher:
             "<p class=\"muted\">No partial files are available yet. The worker logs usually appear first while CLIFF is preparing company data.</p>"
             if not files
             else ""
+        )
+        partial_preview_note = html.escape(
+            str(
+                partial_preview.get("note")
+                or "CLIFF is waiting for enough overlap to assemble an initial cross-company read."
+            )
+        )
+        partial_preview_status = html.escape(str(partial_preview.get("status") or "warming_up").replace("_", " "))
+        partial_preview_overlap = list(partial_preview.get("overlap_years") or [])
+        partial_preview_basis = html.escape(str(partial_preview.get("shared_edge_basis_size") or 0))
+        partial_preview_summary = str(partial_preview.get("summary_text") or "").strip()
+        partial_preview_links = []
+        summary_path_raw = str(partial_preview.get("summary_path") or "").strip()
+        if summary_path_raw:
+            partial_preview_links.append(
+                '<a href="'
+                + html.escape(self._launcher_href_for_run_file(run_id, Path(summary_path_raw).resolve()))
+                + '" target="_blank" rel="noopener noreferrer">partial summary markdown</a>'
+            )
+        manifest_path_raw = str(partial_preview.get("manifest_path") or "").strip()
+        if manifest_path_raw:
+            partial_preview_links.append(
+                '<a href="'
+                + html.escape(self._launcher_href_for_run_file(run_id, Path(manifest_path_raw).resolve()))
+                + '" target="_blank" rel="noopener noreferrer">partial manifest</a>'
+            )
+        partial_preview_links_markup = (
+            "<p class=\"muted\">"
+            + ", ".join(partial_preview_links)
+            + ".</p>"
+            if partial_preview_links
+            else ""
+        )
+        partial_preview_summary_markup = (
+            "<pre>"
+            + html.escape(partial_preview_summary)
+            + "</pre>"
+            if partial_preview_summary
+            else '<p class="muted">No provisional summary text yet. CLIFF will surface it here as soon as the first overlap is usable.</p>'
         )
         return f"""<!doctype html>
 <html lang="en">
@@ -1139,6 +1201,17 @@ class DashboardQueryLauncher:
       <section class="panel">
         <p class="eyebrow">Progress</p>
         <div class="phases">{phase_markup}</div>
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Initial Similarity Read</p>
+        <div class="chips">
+          <span class="chip">{partial_preview_status}</span>
+          <span class="chip">{len(partial_preview_overlap)} overlap year{'s' if len(partial_preview_overlap) != 1 else ''}</span>
+          <span class="chip">{partial_preview_basis} shared basis edge{'s' if str(partial_preview.get("shared_edge_basis_size") or 0) != "1" else ''}</span>
+        </div>
+        <p>{partial_preview_note}</p>
+        {partial_preview_summary_markup}
+        {partial_preview_links_markup}
       </section>
       <section class="panel">
         <p class="eyebrow">Performance</p>

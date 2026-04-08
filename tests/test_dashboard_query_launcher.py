@@ -388,8 +388,36 @@ class DashboardQueryLauncherTests(unittest.TestCase):
             route_root = root / "company_similarity" / "apple_vs_tesla_functors"
             route_root.mkdir(parents=True, exist_ok=True)
             (route_root / "cross_company_functors_summary.md").write_text("# Partial summary\n", encoding="utf-8")
+            (route_root / "partial").mkdir(parents=True, exist_ok=True)
+            (route_root / "partial" / "cross_company_functors_summary.md").write_text(
+                "# Initial similarity read\n\n- Mean yearly cosine similarity: 0.62\n",
+                encoding="utf-8",
+            )
+            (route_root / "partial" / "cross_company_functors_manifest.json").write_text(
+                '{"overlap_years":[2002],"shared_edge_basis_size":18}',
+                encoding="utf-8",
+            )
             (root / "company_similarity" / "company_similarity_telemetry.json").write_text(
-                '{"slowest_stages":[{"label":"Apple build","duration_human":"3m 0s","duration_seconds":180.0}],"timing":{"elapsed_human":"4m 0s","eta_human":"6m 0s","completed_work_human":"3m 0s","observed_parallelism":1.75}}',
+                json.dumps(
+                    {
+                        "partial_preview": {
+                            "status": "ready",
+                            "note": "Initial similarity read is ready from 1 overlapping year and 18 shared basis edges.",
+                            "summary_path": str((route_root / "partial" / "cross_company_functors_summary.md").resolve()),
+                            "manifest_path": str((route_root / "partial" / "cross_company_functors_manifest.json").resolve()),
+                            "overlap_years": [2002],
+                            "shared_edge_basis_size": 18,
+                        },
+                        "slowest_stages": [{"label": "Apple build", "duration_human": "3m 0s", "duration_seconds": 180.0}],
+                        "timing": {
+                            "elapsed_human": "4m 0s",
+                            "eta_human": "6m 0s",
+                            "completed_work_human": "<1s",
+                            "observed_work_human": "4m 0s",
+                            "observed_parallelism": 1.75,
+                        },
+                    }
+                ),
                 encoding="utf-8",
             )
 
@@ -416,9 +444,15 @@ class DashboardQueryLauncherTests(unittest.TestCase):
             self.assertIn("Apple build", rendered)
             self.assertIn("Tesla build", rendered)
             self.assertIn("Building Apple and Tesla in parallel", rendered)
+            self.assertIn("Initial Similarity Read", rendered)
+            self.assertIn("Initial similarity read is ready from 1 overlapping year and 18 shared basis edges.", rendered)
+            self.assertIn("Mean yearly cosine similarity: 0.62", rendered)
+            self.assertIn("partial summary markdown", rendered)
             self.assertIn("Active builds", rendered)
             self.assertIn("Observed parallelism", rendered)
             self.assertIn("1.75", rendered)
+            self.assertIn("Observed work", rendered)
+            self.assertIn("4m 0s", rendered)
             self.assertIn("Apple build", rendered)
             self.assertIn("3m 0s", rendered)
             self.assertIn("Live Files", rendered)
