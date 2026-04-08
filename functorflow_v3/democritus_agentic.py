@@ -49,6 +49,7 @@ class DemocritusAgenticConfig:
     include_phase2: bool = True
     depth_limit: int = 3
     max_total_topics: int = 100
+    statements_per_question: int = 2
     manifold_mode: str = "full"
     topk: int = 200
     radii: str = "1,2,3"
@@ -83,6 +84,7 @@ class DemocritusAgenticConfig:
             include_phase2=self.include_phase2,
             depth_limit=self.depth_limit,
             max_total_topics=self.max_total_topics,
+            statements_per_question=max(1, int(self.statements_per_question)),
             manifold_mode=self.manifold_mode,
             topk=self.topk,
             radii=self.radii,
@@ -390,6 +392,7 @@ class DemocritusAgenticRunner:
         base = dict(os.environ)
         if base.get("PYTHONPATH"):
             env["PYTHONPATH"] = f"{self.repo_root}{os.pathsep}{base['PYTHONPATH']}"
+        env["PYTHONUNBUFFERED"] = "1"
         env["MPLBACKEND"] = base.get("MPLBACKEND", "Agg")
         mpl_config_dir = self.outdir / ".matplotlib"
         mpl_config_dir.mkdir(parents=True, exist_ok=True)
@@ -575,9 +578,42 @@ class DemocritusAgenticRunner:
     def _run_topic_graph_agent(self) -> tuple[str, ...]:
         topic_graph = self.outdir / "topic_graph.jsonl"
         topic_list = self.outdir / "topic_list.txt"
-        return self._run_subprocess_agent(
-            "topic_graph_agent",
-            [
+        shard_count = max(1, int(self.config.intra_document_shards))
+        if shard_count <= 1:
+            return self._run_subprocess_agent(
+                "topic_graph_agent",
+                [
+                    sys.executable,
+                    "-m",
+                    "scripts.topic_graph_builder",
+                    "--topics-file",
+                    str(self._topics_path()),
+                    "--depth-limit",
+                    str(self.config.depth_limit),
+                    "--max-total-topics",
+                    str(self.config.max_total_topics),
+                    "--topic-graph",
+                    str(topic_graph),
+                    "--topic-list",
+                    str(topic_list),
+                ],
+                cwd=self.outdir,
+                outputs=(topic_graph, topic_list),
+            )
+
+        shard_dir = self.outdir / ".intra_document_shards" / "topic_graph_agent"
+        shard_dir.mkdir(parents=True, exist_ok=True)
+        shard_graph_outputs = [
+            shard_dir / f"topic_graph_agent_shard_{index:02d}.jsonl"
+            for index in range(shard_count)
+        ]
+        shard_list_outputs = [
+            shard_dir / f"topic_graph_agent_shard_{index:02d}.txt"
+            for index in range(shard_count)
+        ]
+
+        def command_for_shard(index: int) -> list[str]:
+            return [
                 sys.executable,
                 "-m",
                 "scripts.topic_graph_builder",
@@ -588,13 +624,67 @@ class DemocritusAgenticRunner:
                 "--max-total-topics",
                 str(self.config.max_total_topics),
                 "--topic-graph",
-                str(topic_graph),
+                str(shard_graph_outputs[index]),
                 "--topic-list",
-                str(topic_list),
-            ],
-            cwd=self.outdir,
-            outputs=(topic_graph, topic_list),
+                str(shard_list_outputs[index]),
+                "--shard-index",
+                str(index),
+                "--num-shards",
+                str(shard_count),
+            ]
+
+        with ThreadPoolExecutor(max_workers=shard_count) as executor:
+            future_map = {
+                executor.submit(
+                    self._run_subprocess_agent,
+                    f"topic_graph_agent_shard_{index:02d}",
+                    command_for_shard(index),
+                    cwd=self.outdir,
+                    outputs=(shard_graph_outputs[index], shard_list_outputs[index]),
+                ): index
+                for index in range(shard_count)
+            }
+            for future in as_completed(future_map):
+                future.result()
+
+        self._merge_topic_graph_outputs(shard_graph_outputs, topic_graph, topic_list)
+        return (str(topic_graph), str(topic_list))
+
+    def _merge_topic_graph_outputs(
+        self,
+        shard_outputs: list[Path],
+        topic_graph_path: Path,
+        topic_list_path: Path,
+    ) -> None:
+        merged_by_topic: dict[str, dict[str, object]] = {}
+        for shard_output in shard_outputs:
+            if not shard_output.exists():
+                continue
+            for line in shard_output.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                record = dict(json.loads(stripped))
+                topic = str(record.get("topic") or "").strip()
+                if not topic:
+                    continue
+                depth = int(record.get("depth") or 0)
+                existing = merged_by_topic.get(topic)
+                if existing is None or depth < int(existing.get("depth") or 0):
+                    merged_by_topic[topic] = record
+
+        ordered_records = sorted(
+            merged_by_topic.values(),
+            key=lambda item: (int(item.get("depth") or 0), str(item.get("topic") or "").lower()),
         )
+        topic_graph_path.parent.mkdir(parents=True, exist_ok=True)
+        with topic_graph_path.open("w", encoding="utf-8") as handle:
+            for record in ordered_records:
+                handle.write(json.dumps(record) + "\n")
+        topic_list_path.parent.mkdir(parents=True, exist_ok=True)
+        with topic_list_path.open("w", encoding="utf-8") as handle:
+            for record in ordered_records:
+                handle.write(f"{record.get('topic', '')}\t{int(record.get('depth') or 0)}\n")
 
     def _merge_jsonl_outputs(self, shard_outputs: list[Path], destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -682,6 +772,8 @@ class DemocritusAgenticRunner:
                 str(self.outdir / "causal_questions.jsonl"),
                 "--output",
                 str(shard_output),
+                "--statements-per-question",
+                str(self.config.statements_per_question),
                 "--shard-index",
                 str(shard_index),
                 "--num-shards",

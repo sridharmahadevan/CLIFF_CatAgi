@@ -131,6 +131,7 @@ class FF2QueryRouterConfig:
 
     query: str
     outdir: Path
+    execution_mode: str = "quick"
     route_override: str = "auto"
     democritus_manifest_path: Path | None = None
     democritus_source_pdf_root: Path | None = None
@@ -164,6 +165,7 @@ class FF2QueryRouterConfig:
         return FF2QueryRouterConfig(
             query=" ".join(self.query.split()),
             outdir=self.outdir.resolve(),
+            execution_mode="deep" if str(self.execution_mode).strip().lower() == "deep" else "quick",
             route_override=self.route_override,
             democritus_manifest_path=self.democritus_manifest_path.resolve() if self.democritus_manifest_path else None,
             democritus_source_pdf_root=self.democritus_source_pdf_root.resolve() if self.democritus_source_pdf_root else None,
@@ -319,6 +321,7 @@ class FF2QueryRouter:
             json.dumps(
                 {
                     "query": self.config.query,
+                    "execution_mode": self.config.execution_mode,
                     "route_decision": asdict(result.route_decision),
                     "route_outdir": str(result.route_outdir),
                     "democritus_summary_path": (
@@ -361,6 +364,7 @@ class FF2QueryRouter:
                 enable_corpus_synthesis=not self.config.defer_final_synthesis_to_cliff,
                 discovery_only=self.config.democritus_discovery_only,
                 dry_run=self.config.democritus_dry_run,
+                execution_mode=self.config.execution_mode,
             )
         ).run()
         return FF2QueryRouterRunResult(
@@ -421,6 +425,7 @@ class FF2QueryRouter:
             self.config.query,
             route_outdir,
             sec_user_agent=self.config.sec_retrieval_user_agent,
+            execution_mode=self.config.execution_mode,
         ).run()
         return FF2QueryRouterRunResult(
             route_decision=decision,
@@ -729,6 +734,7 @@ def _build_router_from_args_with_outdir(
         FF2QueryRouterConfig(
             query=query,
             outdir=Path(outdir),
+            execution_mode=getattr(args, "execution_mode", "quick"),
             route_override=args.route,
             democritus_manifest_path=Path(args.democritus_manifest) if args.democritus_manifest else None,
             democritus_source_pdf_root=Path(args.democritus_source_pdf_root) if args.democritus_source_pdf_root else None,
@@ -870,6 +876,7 @@ def _parse_args() -> argparse.Namespace:
         help="Natural-language FF2 request. If omitted, a local dashboard will open to collect it.",
     )
     parser.add_argument("--outdir", required=True)
+    parser.add_argument("--execution-mode", choices=("quick", "deep"), default="quick")
     parser.add_argument("--route", choices=("auto", "democritus", "basket_rocket_sec", "culinary_tour", "product_feedback", "company_similarity", "course_demo"), default="auto")
     parser.add_argument("--democritus-manifest", default="")
     parser.add_argument("--democritus-source-pdf-root", default="")
@@ -942,6 +949,7 @@ def main() -> None:
                     waiting_message="BAFFLE keeps this session window open while each query retrieves its documents and runs its analysis in a separate output directory.",
                     artifact_path=launcher_artifact_path,
                     session_mode=True,
+                    enable_execution_mode=True,
                 )
             ) as launcher:
                 print(
@@ -959,10 +967,10 @@ def main() -> None:
                     submission = launcher.wait_for_next_submission(timeout=0.5)
                     if submission is None:
                         continue
-                    run_id, query = submission
+                    run_id, query, execution_mode = submission
                     threading.Thread(
                         target=_run_session_query,
-                        args=(launcher, args),
+                        args=(launcher, argparse.Namespace(**dict(vars(args), execution_mode=execution_mode))),
                         kwargs={"run_id": run_id, "query": query},
                         name=f"ff2-session-{run_id}",
                         daemon=True,

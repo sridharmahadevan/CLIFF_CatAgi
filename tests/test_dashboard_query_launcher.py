@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,7 +36,7 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         run_id = launcher.submit_query("Find me 5 studies of GLP-1")
         submission = launcher.wait_for_next_submission(timeout=0.01)
 
-        self.assertEqual(submission, (run_id, "Find me 5 studies of GLP-1"))
+        self.assertEqual(submission, (run_id, "Find me 5 studies of GLP-1", "quick"))
 
         launcher.update_session_run(
             run_id,
@@ -52,6 +53,41 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         self.assertEqual(state["runs"][0]["status"], "running")
         self.assertEqual(state["runs"][0]["route_name"], "democritus")
         self.assertEqual(state["runs"][0]["outdir"], "/tmp/ff2-run-0001")
+
+    def test_request_session_run_deepen_queues_deep_followup(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Find me 5 studies of GLP-1",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+                enable_execution_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        run_id = launcher.submit_query("Find me 5 studies of GLP-1", execution_mode="quick")
+        launcher.wait_for_next_submission(timeout=0.01)
+        launcher.update_session_run(
+            run_id,
+            status="complete",
+            route_name="democritus",
+            note="Finished.",
+            artifact_path=Path("/tmp/result.html"),
+            outdir=Path("/tmp/ff2-run-0001"),
+        )
+
+        deep_run_id = launcher.request_session_run_deepen(run_id)
+        followup = launcher.wait_for_next_submission(timeout=0.01)
+
+        self.assertIsNotNone(deep_run_id)
+        self.assertEqual(followup, (deep_run_id, "Find me 5 studies of GLP-1", "deep"))
+        state = launcher._state_payload()
+        self.assertEqual(state["runs"][0]["execution_mode"], "deep")
+        self.assertEqual(state["runs"][0]["parent_run_id"], run_id)
 
     def test_render_launcher_page_includes_demo_tour_queries(self) -> None:
         launcher = DashboardQueryLauncher(
@@ -143,6 +179,110 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         self.assertIn("Inspect run", markup)
         self.assertNotIn("Open result", markup)
 
+    def test_state_payload_promotes_route_eta_back_to_session_runs(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Find me 10 studies of red wine",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            democritus_telemetry = root / "democritus" / "democritus_runs" / "telemetry.json"
+            democritus_telemetry.parent.mkdir(parents=True, exist_ok=True)
+            democritus_telemetry.write_text(
+                json.dumps(
+                    {
+                        "timing": {
+                            "eta_ready": True,
+                            "eta_human": "12m 00s",
+                            "effective_parallelism": 4.7,
+                            "peak_parallelism": 6.0,
+                            "current_stage": "Triple Extraction Agent",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            run_id = launcher.submit_query("Find me 10 studies of red wine")
+            launcher.wait_for_next_submission(timeout=0.01)
+            launcher.update_session_run(
+                run_id,
+                status="running",
+                route_name="democritus",
+                note="Running.",
+                outdir=root,
+                artifact_path=root / "democritus" / "democritus_runs" / "democritus_gui.html",
+            )
+
+            state = launcher._state_payload()
+            markup = launcher._render_session_runs_markup(state["runs"])
+
+        self.assertEqual(state["runs"][0]["eta_label"], "about 12m 00s remaining")
+        self.assertEqual(state["runs"][0]["parallelism"], 4.7)
+        self.assertEqual(state["runs"][0]["peak_parallelism"], 6.0)
+        self.assertEqual(state["runs"][0]["current_stage"], "Triple Extraction Agent")
+        self.assertIn("about 12m 00s remaining", markup)
+        self.assertIn("parallelism 4.7 (peak 6.0)", markup)
+        self.assertIn("stage Triple Extraction Agent", markup)
+
+    def test_state_payload_promotes_company_similarity_peak_parallelism_and_stage(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Compare Adobe and Nike",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            telemetry_path = root / "company_similarity" / "company_similarity_telemetry.json"
+            telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+            telemetry_path.write_text(
+                json.dumps(
+                    {
+                        "timing": {
+                            "observed_parallelism": 1.0,
+                            "peak_parallelism": 2.0,
+                            "current_stage": "Cross-company functor comparison",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            run_id = launcher.submit_query("Compare Adobe and Nike")
+            launcher.wait_for_next_submission(timeout=0.01)
+            launcher.update_session_run(
+                run_id,
+                status="running",
+                route_name="company_similarity",
+                note="Running.",
+                outdir=root,
+                artifact_path=root / "company_similarity" / "company_similarity.html",
+            )
+
+            state = launcher._state_payload()
+            markup = launcher._render_session_runs_markup(state["runs"])
+
+        self.assertEqual(state["runs"][0]["parallelism"], 1.0)
+        self.assertEqual(state["runs"][0]["peak_parallelism"], 2.0)
+        self.assertEqual(state["runs"][0]["current_stage"], "Cross-company functor comparison")
+        self.assertIn("parallelism 1.0 (peak 2.0)", markup)
+        self.assertIn("stage Cross-company functor comparison", markup)
+
     def test_render_run_artifact_page_returns_specific_completed_artifact(self) -> None:
         launcher = DashboardQueryLauncher(
             DashboardQueryLauncherConfig(
@@ -215,6 +355,77 @@ class DashboardQueryLauncherTests(unittest.TestCase):
             self.assertIn("/state?ts=", rendered)
             self.assertIn("clearInterval(refreshTimer)", rendered)
             self.assertIn("terminalStatuses", rendered)
+
+    def test_render_run_artifact_page_shows_company_similarity_progress_dashboard_while_running(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="How similar is Apple to Tesla?",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "cliff_worker_first_pass_stdout.log").write_text(
+                "\n".join(
+                    [
+                        "[company_similarity] resolved query to Apple vs Tesla",
+                        "[company_similarity] ensuring company analysis for Apple",
+                        "[company_similarity] ensuring company analysis for Tesla",
+                        "[company_similarity][Apple] [run_brand_financial_filings] year=2002 staged_pdfs=1 rows=1",
+                        "[company_similarity][Tesla] [run_brand_financial_filings] year=2002 staged_pdfs=1 rows=1",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            route_root = root / "company_similarity" / "apple_vs_tesla_functors"
+            route_root.mkdir(parents=True, exist_ok=True)
+            (route_root / "cross_company_functors_summary.md").write_text("# Partial summary\n", encoding="utf-8")
+            (root / "company_similarity" / "company_similarity_telemetry.json").write_text(
+                '{"slowest_stages":[{"label":"Apple build","duration_human":"3m 0s","duration_seconds":180.0}],"timing":{"elapsed_human":"4m 0s","eta_human":"6m 0s","completed_work_human":"3m 0s","observed_parallelism":1.75}}',
+                encoding="utf-8",
+            )
+
+            run_id = launcher.submit_query("How similar is Apple to Tesla?")
+            launcher.update_session_run(
+                run_id,
+                status="running",
+                mind_layer="unconscious",
+                route_name="company_similarity",
+                note="Running.",
+                artifact_path=root / "company_similarity" / "company_similarity_dashboard.html",
+                outdir=root,
+            )
+
+            rendered = launcher._render_run_artifact_page(run_id)
+
+            self.assertIn("Progress", rendered)
+            self.assertIn("Performance", rendered)
+            self.assertIn("Recent Activity", rendered)
+            self.assertIn("Current phase", rendered)
+            self.assertIn("Rough ETA", rendered)
+            self.assertIn("about ", rendered)
+            self.assertIn("Apple vs Tesla", rendered)
+            self.assertIn("Apple build", rendered)
+            self.assertIn("Tesla build", rendered)
+            self.assertIn("Building Apple and Tesla in parallel", rendered)
+            self.assertIn("Active builds", rendered)
+            self.assertIn("Observed parallelism", rendered)
+            self.assertIn("1.75", rendered)
+            self.assertIn("Apple build", rendered)
+            self.assertIn("3m 0s", rendered)
+            self.assertIn("Live Files", rendered)
+            self.assertIn("cliff_worker_first_pass_stdout.log", rendered)
+            self.assertIn("cross_company_functors_summary.md", rendered)
+            self.assertIn("company_similarity_telemetry.json", rendered)
+            self.assertIn("/run-file?run_id=", rendered)
 
     def test_render_run_artifact_page_rewrites_file_links_to_launcher_endpoint(self) -> None:
         launcher = DashboardQueryLauncher(

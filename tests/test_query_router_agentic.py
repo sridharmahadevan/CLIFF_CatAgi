@@ -209,6 +209,42 @@ class QueryRouterAgenticTests(unittest.TestCase):
 
         self.assertEqual(result.route_decision.route_name, "democritus")
         self.assertEqual(FakeDemocritusRunner.instances[0].config.outdir, Path(tmpdir).resolve() / "democritus")
+        self.assertEqual(FakeDemocritusRunner.instances[0].config.execution_mode, "quick")
+
+    def test_router_passes_deep_mode_to_company_similarity_runner(self) -> None:
+        class FakeCompanySimilarityRunner:
+            instances: list["FakeCompanySimilarityRunner"] = []
+
+            def __init__(self, query, outdir, *, sec_user_agent="", execution_mode="quick"):
+                self.query = query
+                self.outdir = outdir
+                self.sec_user_agent = sec_user_agent
+                self.execution_mode = execution_mode
+                type(self).instances.append(self)
+
+            def run(self):
+                return module.CompanySimilarityRunResult(
+                    query_plan=None,
+                    route_outdir=self.outdir,
+                    analysis_dir=self.outdir / "analysis",
+                    summary_path=self.outdir / "company_similarity_summary.json",
+                    artifact_path=self.outdir / "company_similarity_dashboard.html",
+                    company_a_manifest_path=None,
+                    company_b_manifest_path=None,
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.object(module, "CompanySimilarityAgenticRunner", FakeCompanySimilarityRunner):
+                result = module.FF2QueryRouter(
+                    module.FF2QueryRouterConfig(
+                        query="How similar is Adobe to Nike?",
+                        outdir=Path(tmpdir),
+                        execution_mode="deep",
+                    )
+                ).run()
+
+        self.assertEqual(result.route_decision.route_name, "company_similarity")
+        self.assertEqual(FakeCompanySimilarityRunner.instances[0].execution_mode, "deep")
 
     def test_router_dispatches_to_sec_runner(self) -> None:
         class FakeSECRunner:

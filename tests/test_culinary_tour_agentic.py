@@ -99,6 +99,14 @@ class CulinaryTourAgenticTests(unittest.TestCase):
         self.assertEqual(plan.budget_per_meal, 50)
         self.assertEqual(plan.estimated_days, 4)
 
+    def test_interpret_culinary_query_handles_tour_for_destination_language(self) -> None:
+        plan = interpret_culinary_query("Plan a seafood tour for Boston from July 5th-10th")
+
+        self.assertEqual(plan.food_focus.lower(), "seafood")
+        self.assertEqual(plan.destination, "Boston")
+        self.assertEqual(plan.time_window, "from July 5th-10th")
+        self.assertEqual(plan.estimated_days, 6)
+
     def test_runner_emits_dashboard_itinerary_and_broadcasts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             live_stops = [

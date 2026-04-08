@@ -30,6 +30,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--query", required=True)
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--cycle-stage", choices=("first_pass", "synthesis_pass"), default="first_pass")
+    parser.add_argument("--execution-mode", choices=("quick", "deep"), default="quick")
     parser.add_argument("--cliff-defer-final-synthesis", action="store_true")
     parser.add_argument("--route", choices=("auto", "democritus", "basket_rocket_sec", "culinary_tour", "product_feedback", "company_similarity", "course_demo"), default="auto")
     parser.add_argument("--democritus-manifest", default="")

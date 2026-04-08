@@ -16,6 +16,23 @@ class BatchCSQLBundleResult:
     summary_path: Path
 
 
+def _iter_jsonl_rows(path: Path) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                rows.append(dict(json.loads(stripped)))
+            except json.JSONDecodeError:
+                # Partial incremental writes can leave a trailing truncated line
+                # while triple extraction is still in flight. Skip that fragment and
+                # pick it up on the next synthesis refresh.
+                continue
+    return rows
+
+
 def build_batch_csql_bundle(
     *,
     batch_outdir: Path,
@@ -144,10 +161,7 @@ def _populate_bundle(
             (run_name, str(pdf_path), run_name, str(triples_path)),
         )
         document_id = int(cursor.lastrowid)
-        for line in triples_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            triple = json.loads(line)
+        for triple in _iter_jsonl_rows(triples_path):
             subj_id = intern("entities", entity_ids, str(triple.get("subj") or ""))
             rel_id = intern("relations", relation_ids, str(triple.get("rel") or ""))
             obj_id = intern("entities", entity_ids, str(triple.get("obj") or ""))

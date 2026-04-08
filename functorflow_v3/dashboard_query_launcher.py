@@ -8,6 +8,7 @@ import json
 import mimetypes
 import re
 import threading
+import time
 import webbrowser
 from collections import deque
 from dataclasses import dataclass
@@ -33,6 +34,8 @@ class DashboardQueryLauncherConfig:
     artifact_path: Path | None = None
     session_mode: bool = False
     run_control_handler: Callable[[str, str], None] | None = None
+    enable_execution_mode: bool = False
+    default_execution_mode: str = "quick"
 
 
 class DashboardQueryLauncher:
@@ -49,6 +52,7 @@ class DashboardQueryLauncher:
         self._submitted_event = threading.Event()
         self._lock = threading.Lock()
         self._submitted_query = ""
+        self._submitted_execution_mode = self._normalize_execution_mode(config.default_execution_mode)
         self._query_received = False
         self._artifact_path = config.artifact_path
         self._submission_counter = 0
@@ -80,12 +84,21 @@ class DashboardQueryLauncher:
         except Exception:
             pass
 
+    @staticmethod
+    def _normalize_execution_mode(value: object) -> str:
+        return "deep" if str(value or "").strip().lower() == "deep" else "quick"
+
     def wait_for_submission(self) -> str:
         self._submitted_event.wait()
         with self._lock:
             return self._submitted_query
 
-    def wait_for_next_submission(self, timeout: float | None = None) -> tuple[str, str] | None:
+    def wait_for_submission_payload(self) -> tuple[str, str]:
+        self._submitted_event.wait()
+        with self._lock:
+            return self._submitted_query, self._submitted_execution_mode
+
+    def wait_for_next_submission(self, timeout: float | None = None) -> tuple[str, str, str] | None:
         if not self._submitted_event.wait(timeout):
             return None
         with self._lock:
@@ -110,13 +123,17 @@ class DashboardQueryLauncher:
         with self._lock:
             self._artifact_path = artifact_path
 
-    def submit_query(self, query: str) -> str:
+    def submit_query(self, query: str, *, execution_mode: str | None = None, parent_run_id: str | None = None) -> str:
         normalized_query = " ".join(str(query).split()).strip()
         if not normalized_query:
             raise ValueError("Query must be non-empty.")
+        normalized_mode = self._normalize_execution_mode(
+            execution_mode if self.config.enable_execution_mode else self.config.default_execution_mode
+        )
         with self._lock:
             if not self.config.session_mode:
                 self._submitted_query = normalized_query
+                self._submitted_execution_mode = normalized_mode
                 self._query_received = True
                 self._submitted_event.set()
                 return "run-0001"
@@ -131,8 +148,14 @@ class DashboardQueryLauncher:
                 "note": "Waiting for the router to start.",
                 "artifact_path": None,
                 "outdir": None,
+                "execution_mode": normalized_mode,
+                "parent_run_id": parent_run_id,
+                "created_at": time.time(),
+                "updated_at": time.time(),
             }
-            self._submission_queue.append((run_id, normalized_query))
+            if parent_run_id:
+                run_state["note"] = f"Queued as a deep follow-up to {parent_run_id}."
+            self._submission_queue.append((run_id, normalized_query, normalized_mode))
             self._session_runs.insert(0, run_state)
             self._session_runs_by_id[run_id] = run_state
             self._query_received = True
@@ -166,6 +189,23 @@ class DashboardQueryLauncher:
                 run_state["artifact_path"] = str(artifact_path)
             if outdir is not None:
                 run_state["outdir"] = str(outdir)
+            run_state["updated_at"] = time.time()
+
+    def request_session_run_deepen(self, run_id: str) -> str | None:
+        with self._lock:
+            run_state = self._session_runs_by_id.get(run_id)
+            if run_state is None or not self.config.session_mode or not self.config.enable_execution_mode:
+                return None
+            if str(run_state.get("status") or "") != "complete":
+                return None
+            if self._normalize_execution_mode(run_state.get("execution_mode")) != "quick":
+                return None
+            if str(run_state.get("route_name") or "") not in {"democritus", "company_similarity"}:
+                return None
+            query = str(run_state.get("query") or "").strip()
+        if not query:
+            return None
+        return self.submit_query(query, execution_mode="deep", parent_run_id=run_id)
 
     def request_session_run_stop(self, run_id: str) -> bool:
         handler = None
@@ -216,6 +256,13 @@ class DashboardQueryLauncher:
 
             def do_POST(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
+                if parsed.path == "/deepen-run":
+                    content_length = int(self.headers.get("Content-Length") or "0")
+                    payload = self.rfile.read(content_length).decode("utf-8", errors="replace")
+                    run_id = " ".join(parse_qs(payload).get("run_id", [""])[0].split()).strip()
+                    new_run_id = launcher.request_session_run_deepen(run_id)
+                    self._send_json({"ok": bool(new_run_id), "run_id": run_id, "new_run_id": new_run_id})
+                    return
                 if parsed.path == "/stop-run":
                     content_length = int(self.headers.get("Content-Length") or "0")
                     payload = self.rfile.read(content_length).decode("utf-8", errors="replace")
@@ -228,14 +275,18 @@ class DashboardQueryLauncher:
                     return
                 content_length = int(self.headers.get("Content-Length") or "0")
                 payload = self.rfile.read(content_length).decode("utf-8", errors="replace")
-                query = " ".join(parse_qs(payload).get("query", [""])[0].split()).strip()
+                parsed_payload = parse_qs(payload)
+                query = " ".join(parsed_payload.get("query", [""])[0].split()).strip()
+                execution_mode = launcher._normalize_execution_mode(
+                    parsed_payload.get("execution_mode", [launcher.config.default_execution_mode])[0]
+                )
                 if not query:
                     self._send_html(
                         launcher._render_launcher_page(error_message="Enter a query before starting the run."),
                         status=HTTPStatus.BAD_REQUEST,
                     )
                     return
-                launcher.submit_query(query)
+                launcher.submit_query(query, execution_mode=execution_mode)
                 self._send_html(launcher._render_launcher_page())
 
             def log_message(self, format: str, *args) -> None:  # noqa: A003
@@ -272,13 +323,92 @@ class DashboardQueryLauncher:
         with self._lock:
             payload = {
                 "session_mode": self.config.session_mode,
+                "execution_mode_enabled": self.config.enable_execution_mode,
                 "query_received": self._query_received,
                 "artifact_ready": bool(self._artifact_path and self._artifact_path.exists()),
                 "artifact_path": str(self._artifact_path) if self._artifact_path else None,
             }
             if self.config.session_mode:
-                payload["runs"] = [dict(item) for item in self._session_runs]
+                payload["runs"] = [self._enriched_run_state(dict(item)) for item in self._session_runs]
             return payload
+
+    def _democritus_telemetry(self, run_state: dict[str, object]) -> dict[str, object]:
+        outdir_value = str(run_state.get("outdir") or "").strip()
+        if not outdir_value:
+            return {}
+        telemetry_path = (Path(outdir_value).resolve() / "democritus" / "democritus_runs" / "telemetry.json").resolve()
+        if not telemetry_path.exists():
+            return {}
+        try:
+            return dict(json.loads(telemetry_path.read_text(encoding="utf-8")))
+        except Exception:
+            return {}
+
+    def _run_eta_summary(self, run_state: dict[str, object]) -> dict[str, object]:
+        route_name = str(run_state.get("route_name") or "").strip()
+        status = str(run_state.get("status") or "").strip().lower()
+        if status not in {"queued", "routing", "running", "stopping"}:
+            return {}
+        if route_name == "democritus":
+            telemetry = self._democritus_telemetry(run_state)
+            timing = dict(telemetry.get("timing") or {})
+            eta_ready = bool(timing.get("eta_ready"))
+            current_stage = str(timing.get("current_stage") or "").strip()
+            current_parallelism = timing.get("effective_parallelism")
+            peak_parallelism = timing.get("peak_parallelism")
+            return {
+                "eta_human": str(timing.get("eta_human") or ("warming up" if not eta_ready else "n/a")),
+                "eta_label": (
+                    f"about {timing.get('eta_human')} remaining"
+                    if eta_ready and timing.get("eta_human")
+                    else "ETA warming up"
+                ),
+                "parallelism": current_parallelism,
+                "parallelism_label": (
+                    f"parallelism {current_parallelism}"
+                    + (f" (peak {peak_parallelism})" if peak_parallelism is not None else "")
+                    if current_parallelism is not None
+                    else ""
+                ),
+                "current_stage": current_stage,
+                "current_stage_label": (f"stage {current_stage}" if current_stage else ""),
+                "peak_parallelism": peak_parallelism,
+            }
+        if route_name == "company_similarity":
+            progress = self._company_similarity_progress(run_state)
+            eta = self._company_similarity_eta(run_state, progress)
+            telemetry = dict(progress.get("telemetry") or {})
+            timing = dict(telemetry.get("timing") or {})
+            current_stage = str(timing.get("current_stage") or "").strip()
+            current_parallelism = timing.get("observed_parallelism")
+            peak_parallelism = timing.get("peak_parallelism")
+            return {
+                "eta_human": str(eta.get("eta_human") or "warming up"),
+                "eta_label": str(eta.get("eta_label") or "ETA warming up"),
+                "parallelism": current_parallelism,
+                "parallelism_label": (
+                    f"parallelism {current_parallelism}"
+                    + (f" (peak {peak_parallelism})" if peak_parallelism is not None else "")
+                    if current_parallelism is not None
+                    else ""
+                ),
+                "current_stage": current_stage,
+                "current_stage_label": (f"stage {current_stage}" if current_stage else ""),
+                "peak_parallelism": peak_parallelism,
+            }
+        return {}
+
+    def _enriched_run_state(self, run_state: dict[str, object]) -> dict[str, object]:
+        eta_summary = self._run_eta_summary(run_state)
+        if eta_summary:
+            run_state["eta_human"] = eta_summary.get("eta_human")
+            run_state["eta_label"] = eta_summary.get("eta_label")
+            run_state["parallelism"] = eta_summary.get("parallelism")
+            run_state["parallelism_label"] = eta_summary.get("parallelism_label")
+            run_state["current_stage"] = eta_summary.get("current_stage")
+            run_state["current_stage_label"] = eta_summary.get("current_stage_label")
+            run_state["peak_parallelism"] = eta_summary.get("peak_parallelism")
+        return run_state
 
     def _render_artifact_page(self) -> str:
         with self._lock:
@@ -347,8 +477,11 @@ class DashboardQueryLauncher:
         with self._lock:
             run_state = dict(self._session_runs_by_id.get(run_id) or {})
         run_status = str(run_state.get("status") or "").strip()
+        route_name = str(run_state.get("route_name") or "").strip()
         artifact_path_value = str(run_state.get("artifact_path") or "").strip()
         artifact_path = Path(artifact_path_value) if artifact_path_value else None
+        if route_name == "company_similarity" and run_status in {"queued", "routing", "running", "stopping"}:
+            return self._render_company_similarity_live_page(run_id, run_state=run_state)
         if artifact_path and run_status in {"queued", "routing", "running", "stopping"}:
             return self._render_live_run_artifact_shell(
                 run_id,
@@ -397,6 +530,648 @@ class DashboardQueryLauncher:
         <p>{message}</p>
       </section>
     </main>
+  </body>
+</html>
+"""
+
+    def _company_similarity_live_files(self, run_state: dict[str, object]) -> tuple[Path, ...]:
+        outdir_value = str(run_state.get("outdir") or "").strip()
+        if not outdir_value:
+            return ()
+        run_root = Path(outdir_value).resolve()
+        route_root = run_root / "company_similarity"
+        candidates = [
+            run_root / "cliff_worker_first_pass_stdout.log",
+            run_root / "cliff_worker_first_pass_stderr.log",
+            run_root / "cliff_worker_synthesis_pass_stdout.log",
+            run_root / "cliff_worker_synthesis_pass_stderr.log",
+            route_root / "company_similarity_summary.json",
+            route_root / "company_similarity_telemetry.json",
+            route_root / "company_similarity_performance.html",
+            route_root / "company_similarity_dashboard.html",
+        ]
+        if route_root.exists():
+            candidates.extend(sorted(route_root.glob("*_vs_*_functors/*.md")))
+            candidates.extend(sorted(route_root.glob("*_vs_*_functors/*.json")))
+            candidates.extend(sorted(route_root.glob("*_vs_*_functors/*.csv")))
+            candidates.extend(sorted(route_root.glob("*_vs_*_functors/*.png")))
+        seen: set[Path] = set()
+        ordered: list[Path] = []
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            if not resolved.exists() or resolved in seen:
+                continue
+            seen.add(resolved)
+            ordered.append(resolved)
+        return tuple(ordered)
+
+    def _company_similarity_stdout_log(self, run_state: dict[str, object]) -> Path | None:
+        outdir_value = str(run_state.get("outdir") or "").strip()
+        if not outdir_value:
+            return None
+        candidate = (Path(outdir_value).resolve() / "cliff_worker_first_pass_stdout.log").resolve()
+        return candidate if candidate.exists() else None
+
+    def _company_similarity_log_lines(self, run_state: dict[str, object]) -> tuple[str, ...]:
+        outdir_value = str(run_state.get("outdir") or "").strip()
+        if not outdir_value:
+            return ()
+        run_root = Path(outdir_value).resolve()
+        candidates = (
+            run_root / "cliff_worker_first_pass_stdout.log",
+            run_root / "cliff_worker_first_pass_stderr.log",
+            run_root / "cliff_worker_synthesis_pass_stdout.log",
+            run_root / "cliff_worker_synthesis_pass_stderr.log",
+        )
+        lines: list[str] = []
+        for candidate in candidates:
+            if not candidate.exists():
+                continue
+            try:
+                lines.extend(candidate.read_text(encoding="utf-8", errors="replace").splitlines())
+            except OSError:
+                continue
+        return tuple(lines)
+
+    def _company_similarity_telemetry(self, run_state: dict[str, object]) -> dict[str, object]:
+        outdir_value = str(run_state.get("outdir") or "").strip()
+        if not outdir_value:
+            return {}
+        telemetry_path = (Path(outdir_value).resolve() / "company_similarity" / "company_similarity_telemetry.json").resolve()
+        if not telemetry_path.exists():
+            return {}
+        try:
+            return dict(json.loads(telemetry_path.read_text(encoding="utf-8")))
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _company_similarity_stream_parts(line: str) -> tuple[str, str]:
+        stripped = line.strip()
+        match = re.match(
+            r"^\[company_similarity\](?:\[(?P<label>[^\]]+)\])?\s*(?P<body>.*)$",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return "", stripped
+        return str(match.group("label") or "").strip(), str(match.group("body") or "").strip()
+
+    @staticmethod
+    def _company_similarity_activity_label(line: str) -> str:
+        stream_label, stripped = DashboardQueryLauncher._company_similarity_stream_parts(line)
+        prefix = f"{stream_label}: " if stream_label else ""
+        if stripped.startswith("[run_brand_financial_filings] "):
+            return prefix + "filings pipeline: " + stripped[len("[run_brand_financial_filings] ") :]
+        return prefix + stripped
+
+    @staticmethod
+    def _format_eta_duration(seconds: float) -> str:
+        seconds = max(0, int(round(seconds)))
+        if seconds < 60:
+            return "under 1 min"
+        minutes, seconds = divmod(seconds, 60)
+        if minutes < 60:
+            return f"{minutes} min" if seconds < 30 else f"{minutes + 1} min"
+        hours, minutes = divmod(minutes, 60)
+        if minutes == 0:
+            return f"{hours} hr"
+        return f"{hours} hr {minutes} min"
+
+    def _company_similarity_eta(self, run_state: dict[str, object], progress: dict[str, object]) -> dict[str, object]:
+        phase_seconds = {
+            "query": 20.0,
+            "company_a": 8.0 * 60.0,
+            "company_b": 8.0 * 60.0,
+            "functors": 4.0 * 60.0,
+            "viz": 90.0,
+            "done": 15.0,
+        }
+        phase_weights = {
+            "query": 0.05,
+            "company_a": 0.30,
+            "company_b": 0.30,
+            "functors": 0.22,
+            "viz": 0.10,
+            "done": 0.03,
+        }
+        phases = tuple(progress.get("phases") or ())
+        progress_fraction = 0.0
+        fallback_remaining = 0.0
+        company_build_remaining: list[float] = []
+        active_phase_key = ""
+
+        for key, _label, state in phases:
+            progress_fraction += phase_weights.get(str(key), 0.0) * (
+                1.0 if state == "complete" else 0.35 if state == "active" else 0.0
+            )
+            if state == "active" and not active_phase_key:
+                active_phase_key = str(key)
+            if state == "complete":
+                continue
+            phase_remaining = phase_seconds.get(str(key), 0.0) * (0.55 if state == "active" else 1.0)
+            if str(key) in {"company_a", "company_b"}:
+                company_build_remaining.append(phase_remaining)
+            else:
+                fallback_remaining += phase_remaining
+        if company_build_remaining:
+            fallback_remaining += max(company_build_remaining)
+
+        created_at = float(run_state.get("created_at") or time.time())
+        elapsed_seconds = max(0.0, time.time() - created_at)
+        eta_ready = progress_fraction >= 0.15 or bool(progress.get("latest_batch")) or bool(progress.get("staged_years"))
+        if progress_fraction >= 0.08 and elapsed_seconds >= 20.0:
+            inferred_remaining = elapsed_seconds * max(0.0, (1.0 - progress_fraction) / max(progress_fraction, 0.05))
+            remaining_seconds = min(
+                max(fallback_remaining * 0.4, inferred_remaining),
+                max(fallback_remaining * 1.6, inferred_remaining),
+            )
+            eta_ready = True
+        else:
+            remaining_seconds = fallback_remaining
+
+        if any(state != "complete" for _key, _label, state in phases):
+            remaining_seconds = max(45.0 if eta_ready else 90.0, remaining_seconds)
+        else:
+            remaining_seconds = 0.0
+
+        if progress.get("staged_years") and not progress.get("latest_batch") and active_phase_key in {"company_a", "company_b"}:
+            remaining_seconds = max(60.0, remaining_seconds * 0.85)
+
+        return {
+            "eta_ready": eta_ready,
+            "remaining_seconds": round(remaining_seconds, 1),
+            "eta_human": self._format_eta_duration(remaining_seconds) if eta_ready else "warming up",
+            "eta_label": (
+                f"about {self._format_eta_duration(remaining_seconds)} remaining"
+                if eta_ready
+                else "warming up from first progress signals"
+            ),
+            "elapsed_human": self._format_eta_duration(elapsed_seconds),
+        }
+
+    def _company_similarity_progress(self, run_state: dict[str, object]) -> dict[str, object]:
+        log_path = self._company_similarity_stdout_log(run_state)
+        lines = list(self._company_similarity_log_lines(run_state))
+        telemetry = self._company_similarity_telemetry(run_state)
+        company_a = ""
+        company_b = ""
+        query_resolved = False
+        first_company_started = False
+        first_company_ready = False
+        second_company_started = False
+        second_company_ready = False
+        comparison_started = False
+        comparison_completed = False
+        visualization_started = False
+        visualization_completed = False
+        dashboard_ready = False
+        staged_year_values: set[tuple[str, str]] = set()
+        latest_year = ""
+        active_companies: list[str] = []
+        latest_batch = ""
+        recent_lines = [
+            self._company_similarity_activity_label(line)
+            for line in lines
+            if line.strip()
+        ][-8:]
+        if not recent_lines:
+            for stage in list(telemetry.get("stages") or []):
+                if not isinstance(stage, dict):
+                    continue
+                if str(stage.get("status") or "") == "complete":
+                    recent_lines.append(f"{stage.get('label')}: {stage.get('duration_human')}")
+            recent_lines = recent_lines[-8:]
+
+        for line in lines:
+            stream_label, parsed_line = self._company_similarity_stream_parts(line)
+            lowered = parsed_line.lower()
+            resolved_match = re.search(r"resolved query to\s+(.+?)\s+vs\s+(.+)$", parsed_line, flags=re.IGNORECASE)
+            if resolved_match:
+                company_a = resolved_match.group(1).strip()
+                company_b = resolved_match.group(2).strip()
+                query_resolved = True
+            start_match = re.search(r"ensuring company analysis for\s+(.+)$", parsed_line, flags=re.IGNORECASE)
+            if start_match:
+                company = start_match.group(1).strip()
+                if company_a and company.lower() == company_a.lower():
+                    first_company_started = True
+                elif company_b and company.lower() == company_b.lower():
+                    second_company_started = True
+                elif not company_a:
+                    company_a = company
+                    first_company_started = True
+                elif not company_b:
+                    company_b = company
+                    second_company_started = True
+                if company not in active_companies:
+                    active_companies.append(company)
+            ready_match = re.search(r"company analysis ready for\s+(.+?):", parsed_line, flags=re.IGNORECASE)
+            if ready_match:
+                company = ready_match.group(1).strip()
+                if company_a and company.lower() == company_a.lower():
+                    first_company_ready = True
+                elif company_b and company.lower() == company_b.lower():
+                    second_company_ready = True
+                elif not company_a:
+                    company_a = company
+                    first_company_ready = True
+                elif not company_b:
+                    company_b = company
+                    second_company_ready = True
+                active_companies = [item for item in active_companies if item.lower() != company.lower()]
+            if "running cross-company functor analysis" in lowered:
+                comparison_started = True
+                active_companies = []
+            if "cross-company functor analysis completed" in lowered:
+                comparison_started = True
+                comparison_completed = True
+            if "visualize_cross_company_functors" in lowered:
+                visualization_started = True
+            if "cross-company visualization completed" in lowered:
+                visualization_started = True
+                visualization_completed = True
+            if "company similarity dashboard ready:" in lowered:
+                dashboard_ready = True
+            if "[run_brand_financial_filings] year=" in parsed_line and "staged_pdfs=" in parsed_line:
+                year_match = re.search(r"year=(\d{4})", parsed_line)
+                if year_match:
+                    latest_year = year_match.group(1)
+                    staged_year_values.add((stream_label or "unknown", latest_year))
+            if "pipelines.batch_pipeline" in parsed_line:
+                batch_match = re.search(r"year_(\d{4})", parsed_line)
+                if batch_match:
+                    latest_batch = batch_match.group(1)
+
+        company_a = company_a or "First company"
+        company_b = company_b or "Second company"
+
+        def phase_state(*, complete: bool, active: bool) -> str:
+            if complete:
+                return "complete"
+            if active:
+                return "active"
+            return "pending"
+
+        phases = (
+            ("query", "Query resolved", phase_state(complete=query_resolved, active=bool(lines) and not query_resolved)),
+            (
+                "company_a",
+                f"{company_a} build",
+                phase_state(complete=first_company_ready, active=first_company_started and not first_company_ready),
+            ),
+            (
+                "company_b",
+                f"{company_b} build",
+                phase_state(complete=second_company_ready, active=second_company_started and not second_company_ready),
+            ),
+            (
+                "functors",
+                "Functor comparison",
+                phase_state(complete=comparison_completed, active=comparison_started and not comparison_completed),
+            ),
+            (
+                "viz",
+                "Visualization",
+                phase_state(complete=visualization_completed, active=visualization_started and not visualization_completed),
+            ),
+            (
+                "done",
+                "Dashboard ready",
+                phase_state(complete=dashboard_ready, active=visualization_completed and not dashboard_ready),
+            ),
+        )
+
+        current_phase = "Preparing company inputs"
+        if dashboard_ready:
+            current_phase = "Dashboard ready"
+        elif visualization_started:
+            current_phase = "Rendering visualization"
+        elif latest_batch:
+            current_phase = f"Comparing fiscal year {latest_batch}"
+        elif comparison_started:
+            current_phase = "Comparing yearly functors"
+        elif len(active_companies) >= 2:
+            current_phase = f"Building {company_a} and {company_b} in parallel"
+        elif active_companies:
+            current_phase = f"Building {active_companies[0]}"
+        elif query_resolved:
+            current_phase = f"Preparing {company_a} and {company_b}"
+
+        return {
+            "phases": tuple(phases),
+            "current_phase": current_phase,
+            "company_a": company_a,
+            "company_b": company_b,
+            "active_companies": tuple(active_companies),
+            "active_company": " and ".join(active_companies),
+            "staged_years": len(staged_year_values),
+            "latest_year": latest_year,
+            "latest_batch": latest_batch,
+            "recent_lines": tuple(recent_lines),
+            "log_path": log_path,
+            "telemetry": telemetry,
+        }
+
+    def _render_company_similarity_live_page(self, run_id: str, *, run_state: dict[str, object]) -> str:
+        query = html.escape(str(run_state.get("query") or ""))
+        note = html.escape(
+            str(run_state.get("note") or "CLIFF is building the cross-company comparison and will surface partial artifacts here as they appear.")
+        )
+        status = html.escape(str(run_state.get("status") or "running"))
+        route_name = html.escape(str(run_state.get("route_name") or "company_similarity"))
+        execution_mode = html.escape(str(run_state.get("execution_mode") or self.config.default_execution_mode))
+        files = self._company_similarity_live_files(run_state)
+        progress = self._company_similarity_progress(run_state)
+        eta = self._company_similarity_eta(run_state, progress)
+        phases = progress["phases"]
+        phase_markup = "".join(
+            (
+                '<div class="phase-card'
+                + f' phase-{state}'
+                + '"><span class="phase-label">'
+                + html.escape(label)
+                + "</span><span class=\"phase-state\">"
+                + html.escape(state.title())
+                + "</span></div>"
+            )
+            for _key, label, state in phases
+        )
+        metric_bits = [
+            ("Current phase", str(progress["current_phase"])),
+            ("Rough ETA", str(eta["eta_human"])),
+            ("Companies", f'{progress["company_a"]} vs {progress["company_b"]}'),
+            ("Active builds", str(progress["active_company"] or "Waiting")),
+            ("Observed parallelism", str(dict(progress.get("telemetry") or {}).get("timing", {}).get("observed_parallelism", 1.0))),
+            ("Years staged", str(progress["staged_years"])),
+            ("Latest year", str(progress["latest_batch"] or progress["latest_year"] or "n/a")),
+        ]
+        metric_markup = "".join(
+            '<div class="metric"><span class="metric-label">'
+            + html.escape(label)
+            + "</span><strong>"
+            + html.escape(value)
+            + "</strong></div>"
+            for label, value in metric_bits
+        )
+        telemetry = dict(progress.get("telemetry") or {})
+        slowest_stage_markup = ""
+        slowest_stages = list(telemetry.get("slowest_stages") or [])
+        timing = dict(telemetry.get("timing") or {})
+        performance_summary_markup = (
+            "<div class=\"metrics\">"
+            + "".join(
+                '<div class="metric"><span class="metric-label">'
+                + html.escape(label)
+                + "</span><strong>"
+                + html.escape(value)
+                + "</strong></div>"
+                for label, value in (
+                    ("Elapsed", str(timing.get("elapsed_human") or "n/a")),
+                    ("Completed work", str(timing.get("completed_work_human") or "n/a")),
+                    ("Observed parallelism", str(timing.get("observed_parallelism") or 1.0)),
+                    ("ETA", str(timing.get("eta_human") or "n/a")),
+                )
+            )
+            + "</div>"
+        )
+        if slowest_stages:
+            slowest_stage_markup = (
+                "<ul>"
+                + "".join(
+                    "<li><strong>"
+                    + html.escape(str(stage.get("label") or stage.get("stage_key") or "stage"))
+                    + "</strong><span class=\"meta\">"
+                    + html.escape(str(stage.get("duration_human") or stage.get("duration_seconds") or ""))
+                    + "</span></li>"
+                    for stage in slowest_stages[:5]
+                    if isinstance(stage, dict)
+                )
+                + "</ul>"
+            )
+        else:
+            slowest_stage_markup = '<p class="muted">No completed timing stages yet.</p>'
+        recent_log_markup = (
+            "<ul class=\"activity-feed\">"
+            + "".join(f"<li>{html.escape(line)}</li>" for line in progress["recent_lines"])
+            + "</ul>"
+            if progress["recent_lines"]
+            else '<p class="muted">No activity lines yet. The worker may still be starting.</p>'
+        )
+        file_markup = "".join(
+            (
+                '<li><a href="'
+                + html.escape(self._launcher_href_for_run_file(run_id, path))
+                + '" target="_blank" rel="noopener noreferrer">'
+                + html.escape(path.name)
+                + "</a><span class=\"meta\">"
+                + html.escape(str(path))
+                + "</span></li>"
+            )
+            for path in files
+        )
+        empty_markup = (
+            "<p class=\"muted\">No partial files are available yet. The worker logs usually appear first while CLIFF is preparing company data.</p>"
+            if not files
+            else ""
+        )
+        return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{html.escape(self.config.title)}</title>
+    <style>
+      body {{
+        margin: 0;
+        font-family: Georgia, "Iowan Old Style", serif;
+        background: #f7f1e5;
+        color: #1a1f1a;
+      }}
+      main {{
+        max-width: 1120px;
+        margin: 28px auto;
+        padding: 0 18px 24px;
+        display: grid;
+        gap: 16px;
+      }}
+      .panel {{
+        background: #fffdf6;
+        border: 1px solid #d5c8a4;
+        border-radius: 24px;
+        padding: 22px;
+      }}
+      .eyebrow {{
+        margin: 0 0 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        font-size: 12px;
+        color: #0f6d63;
+      }}
+      h1 {{
+        margin: 0;
+        font-size: 1.8rem;
+      }}
+      p {{
+        margin: 12px 0 0;
+        color: #5e675d;
+        line-height: 1.6;
+      }}
+      .chips {{
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 14px;
+      }}
+      .chip {{
+        border: 1px solid #c8b88e;
+        border-radius: 999px;
+        padding: 6px 12px;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: #6f5b2a;
+        background: #faf4e3;
+      }}
+      ul {{
+        margin: 0;
+        padding-left: 20px;
+        display: grid;
+        gap: 10px;
+      }}
+      li {{
+        line-height: 1.5;
+      }}
+      a {{
+        color: #7d4306;
+      }}
+      .meta {{
+        display: block;
+        color: #6e756c;
+        font-size: 12px;
+        word-break: break-word;
+      }}
+      .muted {{
+        color: #6e756c;
+      }}
+      .metrics {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+        margin-top: 16px;
+      }}
+      .metric {{
+        border: 1px solid #d5c8a4;
+        border-radius: 18px;
+        padding: 14px;
+        background: #fffaf0;
+      }}
+      .metric-label {{
+        display: block;
+        color: #6e756c;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }}
+      .metric strong {{
+        display: block;
+        margin-top: 6px;
+        font-size: 20px;
+      }}
+      .phases {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        gap: 12px;
+      }}
+      .phase-card {{
+        border: 1px solid #d5c8a4;
+        border-radius: 18px;
+        padding: 14px;
+        background: #fffaf2;
+      }}
+      .phase-complete {{
+        border-color: #8fb7a9;
+        background: #eef8f3;
+      }}
+      .phase-active {{
+        border-color: #d1b86e;
+        background: #fff7dc;
+      }}
+      .phase-label {{
+        display: block;
+        font-size: 14px;
+      }}
+      .phase-state {{
+        display: block;
+        margin-top: 6px;
+        color: #6e756c;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }}
+      .activity-feed {{
+        margin: 0;
+        padding-left: 20px;
+        display: grid;
+        gap: 10px;
+      }}
+      .activity-feed li {{
+        color: #344039;
+        line-height: 1.6;
+      }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="panel">
+        <p class="eyebrow">Inspecting Run</p>
+        <h1>{query}</h1>
+        <p>{note}</p>
+        <div class="chips">
+          <span class="chip">{route_name}</span>
+          <span class="chip">{execution_mode}</span>
+          <span class="chip">{status}</span>
+          <span class="chip">{html.escape(str(eta["eta_label"]))}</span>
+          <span class="chip">{len(files)} partial file{'s' if len(files) != 1 else ''}</span>
+        </div>
+        <div class="metrics">{metric_markup}</div>
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Progress</p>
+        <div class="phases">{phase_markup}</div>
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Performance</p>
+        {performance_summary_markup}
+        {slowest_stage_markup}
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Recent Activity</p>
+        {recent_log_markup}
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Live Files</p>
+        {empty_markup}
+        {"<ul>" + file_markup + "</ul>" if file_markup else ""}
+      </section>
+    </main>
+    <script>
+      var terminalStatuses = new Set(["complete", "failed", "stopped"]);
+      var refreshTimer = window.setInterval(function () {{
+        fetch("/state?ts=" + Date.now(), {{ cache: "no-store" }})
+          .then(function (response) {{ return response.json(); }})
+          .then(function (payload) {{
+            var runs = Array.isArray(payload.runs) ? payload.runs : [];
+            var runState = runs.find(function (item) {{ return item.run_id === {json.dumps(run_id)}; }});
+            if (runState && terminalStatuses.has(String(runState.status || "").toLowerCase())) {{
+              window.clearInterval(refreshTimer);
+              return;
+            }}
+            window.location.replace("/run-artifact?run_id=" + encodeURIComponent({json.dumps(run_id)}) + "&ts=" + Date.now());
+          }})
+          .catch(function () {{}});
+      }}, 3000);
+    </script>
   </body>
 </html>
 """
@@ -658,7 +1433,7 @@ class DashboardQueryLauncher:
     def _render_launcher_page(self, *, error_message: str = "") -> str:
         with self._lock:
             query_received = self._query_received
-            session_runs = [dict(item) for item in self._session_runs]
+            session_runs = [self._enriched_run_state(dict(item)) for item in self._session_runs]
         title = html.escape(self.config.title)
         subtitle = html.escape(self.config.subtitle)
         eyebrow = html.escape(self.config.eyebrow)
@@ -668,12 +1443,28 @@ class DashboardQueryLauncher:
         waiting_message = html.escape(self.config.waiting_message)
         demo_queries = tuple(query for query in self.config.demo_queries if str(query).strip())
         session_mode = self.config.session_mode
+        execution_mode_enabled = self.config.enable_execution_mode
         error_html = (
             f'<p class="error" role="alert">{html.escape(error_message)}</p>'
             if error_message
             else ""
         )
         demo_tour_markup = self._render_demo_tour_markup(demo_queries)
+        execution_mode_markup = ""
+        if execution_mode_enabled:
+            execution_mode_markup = """
+            <fieldset class="execution-mode-fieldset">
+              <legend>Execution depth</legend>
+              <label class="execution-mode-option">
+                <input type="radio" name="execution_mode" value="quick" checked />
+                <span><strong>Quick</strong> Start with a smaller sample and lighter pass so the first answer arrives sooner.</span>
+              </label>
+              <label class="execution-mode-option">
+                <input type="radio" name="execution_mode" value="deep" />
+                <span><strong>Deep</strong> Run the fuller causal build from the start for maximum coverage.</span>
+              </label>
+            </fieldset>
+            """
         form_or_status = f"""
           <form method="post" action="/submit" class="query-form">
             <label for="query">{query_label}</label>
@@ -685,6 +1476,7 @@ class DashboardQueryLauncher:
               autofocus
               required
             ></textarea>
+            {execution_mode_markup}
             {error_html}
             <button type="submit">{submit_label}</button>
           </form>
@@ -708,6 +1500,7 @@ class DashboardQueryLauncher:
                 autofocus
                 required
               ></textarea>
+              {execution_mode_markup}
               {error_html}
               <button type="submit">{submit_label}</button>
             </form>
@@ -741,9 +1534,15 @@ class DashboardQueryLauncher:
                 }} else if ((run.status || '') === 'failed') {{
                   cardClass += ' run-card-failed';
                 }}
+                var executionMode = String(run.execution_mode || 'quick');
                 var route = run.route_name ? '<span class="run-chip">' + escapeHtml(run.route_name) + '</span>' : '';
+                var mode = executionMode ? '<span class="run-chip mode-' + escapeHtml(executionMode) + '">' + escapeHtml(executionMode) + '</span>' : '';
+                var eta = run.eta_label ? '<span class="run-chip eta-chip">' + escapeHtml(run.eta_label) + '</span>' : '';
                 var stopAction = ((run.status || '') === 'queued' || (run.status || '') === 'routing' || (run.status || '') === 'running')
                   ? '<div class="run-actions"><button type="button" class="run-stop-button" onclick="requestStopRun(\\'' + escapeHtml(run.run_id || '') + '\\')">Stop query</button></div>'
+                  : '';
+                var deepenAction = ((run.status || '') === 'complete' && executionMode === 'quick' && ((run.route_name || '') === 'democritus' || (run.route_name || '') === 'company_similarity'))
+                  ? '<div class="run-actions"><button type="button" class="run-deepen-button" onclick="requestDeepRun(\\'' + escapeHtml(run.run_id || '') + '\\')">Go deeper</button></div>'
                   : '';
                 var inspectLabel = ((run.status || '') === 'queued' || (run.status || '') === 'routing' || (run.status || '') === 'running' || (run.status || '') === 'stopping')
                   ? 'Inspect run'
@@ -753,16 +1552,25 @@ class DashboardQueryLauncher:
                   : '';
                 var outdir = run.outdir ? '<div class="run-meta"><strong>Output:</strong> <code>' + escapeHtml(run.outdir) + '</code></div>' : '';
                 var artifact = run.artifact_path ? '<div class="run-meta"><strong>Artifact:</strong> <code>' + escapeHtml(run.artifact_path) + '</code></div>' : '';
+                var unconscious = (run.eta_label || run.parallelism_label || run.current_stage_label)
+                  ? '<div class="run-meta"><strong>Unconscious report:</strong> '
+                    + (run.eta_label ? escapeHtml(run.eta_label) : 'ETA warming up')
+                    + (run.parallelism_label ? ' · ' + escapeHtml(run.parallelism_label) : '')
+                    + (run.current_stage_label ? ' · ' + escapeHtml(run.current_stage_label) : '')
+                    + '</div>'
+                  : '';
                 return ''
                   + '<article class="' + cardClass + '">'
                   + '<div class="run-topline">'
                   + '<div class="run-id">' + escapeHtml(run.run_id) + '</div>'
-                  + '<div class="run-badges"><span class="run-chip status-' + escapeHtml(run.status || 'queued') + '">' + escapeHtml(run.status || 'queued') + '</span>' + route + '</div>'
+                  + '<div class="run-badges"><span class="run-chip status-' + escapeHtml(run.status || 'queued') + '">' + escapeHtml(run.status || 'queued') + '</span>' + route + mode + eta + '</div>'
                   + '</div>'
                   + '<div class="run-query">' + escapeHtml(run.query || '') + '</div>'
                   + '<div class="run-note">' + escapeHtml(run.note || '') + '</div>'
                   + stopAction
+                  + deepenAction
                   + openAction
+                  + unconscious
                   + outdir
                   + artifact
                   + '</article>';
@@ -771,6 +1579,26 @@ class DashboardQueryLauncher:
 
             function requestStopRun(runId) {{
               fetch('/stop-run', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' }},
+                body: 'run_id=' + encodeURIComponent(runId || '')
+              }})
+                .then(function () {{
+                  return fetch('/state?ts=' + Date.now(), {{ cache: 'no-store' }});
+                }})
+                .then(function (response) {{ return response.json(); }})
+                .then(function (payload) {{
+                  var container = document.getElementById('session-runs');
+                  if (!container) {{
+                    return;
+                  }}
+                  container.innerHTML = renderRuns(payload.runs || []);
+                }})
+                .catch(function () {{}});
+            }}
+
+            function requestDeepRun(runId) {{
+              fetch('/deepen-run', {{
                 method: 'POST',
                 headers: {{ 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' }},
                 body: 'run_id=' + encodeURIComponent(runId || '')
@@ -931,6 +1759,31 @@ class DashboardQueryLauncher:
         font: inherit;
         font-weight: 700;
         cursor: pointer;
+      }}
+      .execution-mode-fieldset {{
+        margin: 0;
+        padding: 14px 16px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: rgba(255, 253, 248, 0.82);
+      }}
+      .execution-mode-fieldset legend {{
+        padding: 0 8px;
+        font-size: 0.88rem;
+        color: var(--muted);
+      }}
+      .execution-mode-option {{
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        line-height: 1.6;
+        color: var(--muted);
+      }}
+      .execution-mode-option + .execution-mode-option {{
+        margin-top: 10px;
+      }}
+      .execution-mode-option input {{
+        margin-top: 0.28rem;
       }}
       .demo-tour {{
         margin-top: 18px;
@@ -1099,6 +1952,18 @@ class DashboardQueryLauncher:
         background: #e7edf0;
         color: #44525c;
       }}
+      .mode-quick {{
+        background: #e6f1ee;
+        color: var(--accent-strong);
+      }}
+      .mode-deep {{
+        background: #efe3d4;
+        color: #8a4b10;
+      }}
+      .eta-chip {{
+        background: #eef4db;
+        color: #556b17;
+      }}
       .status-failed {{
         background: #f8dddd;
         color: var(--error);
@@ -1140,6 +2005,22 @@ class DashboardQueryLauncher:
       }}
       .run-stop-button:hover {{
         background: #f7e7b8;
+      }}
+      .run-deepen-button {{
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        padding: 9px 14px;
+        background: #e7f1ef;
+        color: var(--accent-strong);
+        text-decoration: none;
+        font-size: 0.9rem;
+        font-weight: 700;
+        border: 1px solid #b8d3cb;
+        cursor: pointer;
+      }}
+      .run-deepen-button:hover {{
+        background: #d8ebe7;
       }}
       .run-note,
       .run-meta {{
@@ -1266,9 +2147,22 @@ class DashboardQueryLauncher:
                 if run.get("route_name")
                 else ""
             )
+            mode_markup = f'<span class="run-chip mode-{esc(run.get("execution_mode") or "quick")}">{esc(run.get("execution_mode") or "quick")}</span>'
+            eta_markup = (
+                f'<span class="run-chip eta-chip">{esc(run.get("eta_label") or "")}</span>'
+                if run.get("eta_label")
+                else ""
+            )
             stop_action_markup = (
                 f'<div class="run-actions"><button type="button" class="run-stop-button" onclick="requestStopRun(\'{esc(run.get("run_id") or "")}\')">Stop query</button></div>'
                 if run.get("status") in {"queued", "routing", "running"}
+                else ""
+            )
+            deepen_action_markup = (
+                f'<div class="run-actions"><button type="button" class="run-deepen-button" onclick="requestDeepRun(\'{esc(run.get("run_id") or "")}\')">Go deeper</button></div>'
+                if run.get("status") == "complete"
+                and run.get("execution_mode") == "quick"
+                and run.get("route_name") in {"democritus", "company_similarity"}
                 else ""
             )
             open_action_markup = (
@@ -1286,6 +2180,14 @@ class DashboardQueryLauncher:
                 if run.get("artifact_path")
                 else ""
             )
+            unconscious_markup = (
+                f'<div class="run-meta"><strong>Unconscious report:</strong> {esc(run.get("eta_label") or "ETA warming up")}'
+                + (f' · {esc(run.get("parallelism_label"))}' if run.get("parallelism_label") else "")
+                + (f' · {esc(run.get("current_stage_label"))}' if run.get("current_stage_label") else "")
+                + "</div>"
+                if run.get("eta_label") or run.get("parallelism_label") or run.get("current_stage_label")
+                else ""
+            )
             cards.append(
                 f'<article class="{card_class}">'
                 '<div class="run-topline">'
@@ -1293,12 +2195,16 @@ class DashboardQueryLauncher:
                 '<div class="run-badges">'
                 f'<span class="run-chip status-{esc(run.get("status") or "queued")}">{esc(run.get("status") or "queued")}</span>'
                 f"{route_markup}"
+                f"{mode_markup}"
+                f"{eta_markup}"
                 "</div>"
                 "</div>"
                 f'<div class="run-query">{esc(run.get("query") or "")}</div>'
                 f'<div class="run-note">{esc(run.get("note") or "")}</div>'
                 f"{stop_action_markup}"
+                f"{deepen_action_markup}"
                 f"{open_action_markup}"
+                f"{unconscious_markup}"
                 f"{outdir_markup}"
                 f"{artifact_markup}"
                 "</article>"

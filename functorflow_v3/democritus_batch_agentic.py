@@ -59,9 +59,17 @@ def _read_jsonl_rows(path: Path) -> list[dict[str, object]]:
     if not path.exists():
         return []
     rows: list[dict[str, object]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            rows.append(dict(json.loads(line)))
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                rows.append(dict(json.loads(stripped)))
+            except json.JSONDecodeError:
+                # A running triple extractor may leave a trailing partial line while
+                # writing incremental output. Skip it and recover on the next poll.
+                continue
     return rows
 
 
@@ -110,6 +118,10 @@ def _inline_markdown_html(text: str) -> str:
 
 def _pretty_document_title(name: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[_-]+", " ", name).strip())
+
+
+def _humanize_agent_name(name: str) -> str:
+    return re.sub(r"\s+", " ", str(name or "").replace("_", " ")).strip().title() or "Agent"
 
 
 def _summary_tiers_only(markdown_text: str) -> str:
@@ -264,6 +276,9 @@ class DemocritusBatchConfig:
     include_phase2: bool = True
     auto_topics_from_pdf: bool = True
     root_topic_strategy: str = "v0_openai"
+    depth_limit: int = 3
+    max_total_topics: int = 100
+    statements_per_question: int = 2
     discover_existing_documents: bool = True
     allow_incremental_admission: bool = False
     idle_poll_seconds: float = 0.5
@@ -284,6 +299,9 @@ class DemocritusBatchConfig:
             include_phase2=self.include_phase2,
             auto_topics_from_pdf=self.auto_topics_from_pdf,
             root_topic_strategy=self.root_topic_strategy,
+            depth_limit=max(1, int(self.depth_limit)),
+            max_total_topics=max(10, int(self.max_total_topics)),
+            statements_per_question=max(1, int(self.statements_per_question)),
             discover_existing_documents=self.discover_existing_documents,
             allow_incremental_admission=self.allow_incremental_admission,
             idle_poll_seconds=self.idle_poll_seconds,
@@ -348,6 +366,14 @@ class DemocritusBatchAgenticRunner:
         self.gui_path = self.config.outdir / "democritus_gui.html"
         self.csql_summary_path = self.config.outdir / "csql" / "democritus_csql_summary.json"
         self.csql_sqlite_path = self.config.outdir / "csql" / "democritus_csql.sqlite"
+        self.corpus_synthesis_summary_path = self.config.outdir / "corpus_synthesis" / "democritus_corpus_synthesis.json"
+        self.corpus_synthesis_dashboard_path = self.config.outdir / "corpus_synthesis" / "democritus_corpus_synthesis.html"
+        self._last_incremental_synthesis_docs = 0
+        self._last_incremental_synthesis_triples = 0
+        self._latest_incremental_corpus_synthesis: DemocritusCorpusSynthesisResult | None = None
+        self._triple_count_cache: dict[str, tuple[int, int, int]] = {}
+        self._peak_active_agents = 0
+        self._peak_effective_parallelism = 1.0
         self._bootstrap_dashboard()
 
     def _document_by_run_name(self, run_name: str) -> DemocritusBatchDocument:
@@ -403,6 +429,9 @@ class DemocritusBatchAgenticRunner:
                 auto_topics_from_pdf=self.config.auto_topics_from_pdf,
                 root_topic_strategy=self.config.root_topic_strategy,
                 include_phase2=self.config.include_phase2,
+                depth_limit=self.config.depth_limit,
+                max_total_topics=self.config.max_total_topics,
+                statements_per_question=self.config.statements_per_question,
                 intra_document_shards=self.config.intra_document_shards,
             )
         )
@@ -693,6 +722,10 @@ class DemocritusBatchAgenticRunner:
         self._write_summary(ordered)
         csql_bundle = self._build_csql_bundle(ordered)
         corpus_synthesis = self._build_corpus_synthesis(csql_bundle) if self.config.enable_corpus_synthesis else None
+        if corpus_synthesis is not None:
+            self._latest_incremental_corpus_synthesis = corpus_synthesis
+            self._last_incremental_synthesis_docs = self._count_triple_documents(ordered)
+            self._last_incremental_synthesis_triples = self._count_available_triples(ordered)
         self._write_telemetry(
             batch_started_at=batch_started_at,
             pending_frontiers=pending_frontiers,
@@ -724,12 +757,37 @@ class DemocritusBatchAgenticRunner:
             encoding="utf-8",
         )
 
-    def _build_csql_bundle(
+    def _count_triples_for_run(self, run_name: str, path: Path) -> int:
+        if not path.exists():
+            return 0
+        try:
+            stat_result = path.stat()
+        except OSError:
+            return 0
+        cache_key = (int(stat_result.st_size), int(getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))))
+        cached = self._triple_count_cache.get(run_name)
+        if cached is not None and cached[:2] == cache_key:
+            return cached[2]
+        count = 0
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        count += 1
+        except OSError:
+            return 0
+        self._triple_count_cache[run_name] = (cache_key[0], cache_key[1], count)
+        return count
+
+    def _triple_source_entries(
         self,
         records: tuple[DemocritusBatchRecord, ...],
-    ) -> BatchCSQLBundleResult | None:
-        triples_by_run: dict[str, Path] = {}
+    ) -> list[dict[str, object]]:
         pdf_by_run: dict[str, str] = {}
+        triples_by_run: dict[str, Path] = {}
+        for document in self._documents_snapshot():
+            pdf_by_run.setdefault(document.run_name, str(document.pdf_path))
+            triples_by_run.setdefault(document.run_name, document.outdir / "relational_triples.jsonl")
         for record in records:
             pdf_by_run.setdefault(record.run_name, record.pdf_path)
             if record.agent_record.agent_name != "triple_extraction_agent":
@@ -739,16 +797,28 @@ class DemocritusBatchAgenticRunner:
             triples_path = Path(record.agent_record.outputs[0])
             if triples_path.exists():
                 triples_by_run[record.run_name] = triples_path
-        if not triples_by_run:
+        entries: list[dict[str, object]] = []
+        for run_name, triples_path in sorted(triples_by_run.items()):
+            triple_count = self._count_triples_for_run(run_name, triples_path)
+            if triple_count <= 0:
+                continue
+            entries.append(
+                {
+                    "run_name": run_name,
+                    "pdf_path": pdf_by_run.get(run_name, ""),
+                    "triples_path": str(triples_path),
+                    "triple_count": triple_count,
+                }
+            )
+        return entries
+
+    def _build_csql_bundle(
+        self,
+        records: tuple[DemocritusBatchRecord, ...],
+    ) -> BatchCSQLBundleResult | None:
+        bundle_records = self._triple_source_entries(records)
+        if not bundle_records:
             return None
-        bundle_records = [
-            {
-                "run_name": run_name,
-                "pdf_path": pdf_by_run.get(run_name, ""),
-                "triples_path": str(triples_path),
-            }
-            for run_name, triples_path in sorted(triples_by_run.items())
-        ]
         return build_batch_csql_bundle(
             batch_outdir=self.config.outdir,
             records=bundle_records,
@@ -766,6 +836,74 @@ class DemocritusBatchAgenticRunner:
             batch_outdir=self.config.outdir,
             csql_sqlite_path=csql_bundle.sqlite_path,
         )
+
+    def _count_triple_documents(
+        self,
+        records: tuple[DemocritusBatchRecord, ...] | list[DemocritusBatchRecord],
+    ) -> int:
+        return len(self._triple_source_entries(tuple(records)))
+
+    def _count_available_triples(
+        self,
+        records: tuple[DemocritusBatchRecord, ...] | list[DemocritusBatchRecord],
+    ) -> int:
+        return sum(int(item.get("triple_count", 0)) for item in self._triple_source_entries(tuple(records)))
+
+    def _maybe_refresh_incremental_corpus_synthesis(
+        self,
+        records: tuple[DemocritusBatchRecord, ...] | list[DemocritusBatchRecord],
+    ) -> DemocritusCorpusSynthesisResult | None:
+        if not self.config.enable_corpus_synthesis:
+            return self._latest_incremental_corpus_synthesis
+        triple_document_count = self._count_triple_documents(records)
+        total_triples = self._count_available_triples(records)
+        if triple_document_count <= 0:
+            return self._latest_incremental_corpus_synthesis
+        if total_triples <= 0:
+            return self._latest_incremental_corpus_synthesis
+        if self._latest_incremental_corpus_synthesis:
+            grew_docs = triple_document_count > self._last_incremental_synthesis_docs
+            growth_step = max(10, self._last_incremental_synthesis_triples // 2)
+            grew_triples = total_triples >= (self._last_incremental_synthesis_triples + growth_step)
+            if not grew_docs and not grew_triples:
+                return self._latest_incremental_corpus_synthesis
+        csql_bundle = self._build_csql_bundle(tuple(records))
+        if csql_bundle is None:
+            return self._latest_incremental_corpus_synthesis
+        synthesis = self._build_corpus_synthesis(csql_bundle)
+        if synthesis is None:
+            return self._latest_incremental_corpus_synthesis
+        self._last_incremental_synthesis_docs = triple_document_count
+        self._last_incremental_synthesis_triples = total_triples
+        self._latest_incremental_corpus_synthesis = synthesis
+        return synthesis
+
+    def _corpus_synthesis_snapshot(self, *, total_documents: int) -> dict[str, object] | None:
+        if not self.corpus_synthesis_summary_path.exists():
+            return None
+        try:
+            payload = json.loads(self.corpus_synthesis_summary_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        synthesized_documents = _safe_int(payload.get("n_documents"))
+        if synthesized_documents >= max(1, total_documents):
+            maturity = "near_final"
+        elif synthesized_documents > 0:
+            maturity = "improving"
+        else:
+            maturity = "warming_up"
+        return {
+            "available": True,
+            "n_documents": synthesized_documents,
+            "maturity": maturity,
+            "dashboard_path": str(self.corpus_synthesis_dashboard_path) if self.corpus_synthesis_dashboard_path.exists() else "",
+            "summary_path": str(self.corpus_synthesis_summary_path),
+            "strongly_supported": list(payload.get("strongly_supported") or []),
+            "weakly_supported": list(payload.get("weakly_supported") or []),
+            "disagreements": list(payload.get("disagreements") or []),
+        }
 
     def _build_telemetry_snapshot(
         self,
@@ -925,6 +1063,8 @@ class DemocritusBatchAgenticRunner:
                 1.0,
                 min(float(self.config.max_workers), total_completed_work_seconds / elapsed_seconds),
             )
+        self._peak_active_agents = max(self._peak_active_agents, len(active_futures))
+        self._peak_effective_parallelism = max(self._peak_effective_parallelism, effective_parallelism)
         eta_seconds = remaining_work_seconds / effective_parallelism if remaining_work_seconds > 0 else 0.0
         slowest_stages = [
             {
@@ -946,6 +1086,26 @@ class DemocritusBatchAgenticRunner:
             reverse=True,
         )
         slowest_stages = slowest_stages[:5]
+
+        corpus_synthesis = self._corpus_synthesis_snapshot(total_documents=len(documents))
+        active_stage_labels = [
+            _humanize_agent_name(agent_name)
+            for agent_name, count in sorted(active_agent_counts.items(), key=lambda item: (-item[1], item[0]))
+            for _ in range(1)
+        ]
+        queued_stage_labels = [
+            _humanize_agent_name(agent_name)
+            for agent_name, count in sorted(queue_counts.items(), key=lambda item: (-item[1], item[0]))
+            for _ in range(1)
+        ]
+        if active_stage_labels:
+            current_stage = " + ".join(active_stage_labels[:2])
+        elif queued_stage_labels:
+            current_stage = f"Queued: {queued_stage_labels[0]}"
+        elif status == "complete":
+            current_stage = "Complete"
+        else:
+            current_stage = "Warming up"
 
         return {
             "status": status,
@@ -977,6 +1137,9 @@ class DemocritusBatchAgenticRunner:
             },
             "timing": {
                 "effective_parallelism": round(effective_parallelism, 3),
+                "peak_parallelism": round(self._peak_effective_parallelism, 3),
+                "peak_active_agents": int(self._peak_active_agents),
+                "current_stage": current_stage,
                 "remaining_agents_estimate": remaining_agents,
                 "remaining_work_seconds_estimate": round(remaining_work_seconds, 3),
                 "remaining_work_human": _format_duration(remaining_work_seconds),
@@ -991,6 +1154,7 @@ class DemocritusBatchAgenticRunner:
             "agent_metrics": dict(sorted(agent_metrics.items())),
             "slowest_stages": slowest_stages,
             "documents": documents_payload,
+            "corpus_synthesis": corpus_synthesis,
         }
 
     def _render_dashboard_html(self, snapshot: dict[str, object]) -> str:
@@ -1224,6 +1388,8 @@ class DemocritusBatchAgenticRunner:
     ) -> dict[str, object]:
         run_dir = document.outdir
         root_topics = _read_lines(run_dir / "configs" / "root_topics.txt")[:8]
+        question_rows = _read_jsonl_rows(run_dir / "causal_questions.jsonl")
+        statement_rows = _read_jsonl_rows(run_dir / "causal_statements.jsonl")
         triples = _read_jsonl_rows(run_dir / "relational_triples.jsonl")
         top_triples = [
             {
@@ -1282,6 +1448,8 @@ class DemocritusBatchAgenticRunner:
             "root_topics": root_topics,
             "top_triples": top_triples,
             "top_lcms": top_lcms,
+            "question_count": len(question_rows),
+            "statement_count": len(statement_rows),
             "triple_count": len(triples),
             "lcm_count": len(score_rows),
             "summary_href": self._bundle_relative_href(summary_viewer_path),
@@ -1612,6 +1780,9 @@ class DemocritusBatchAgenticRunner:
         completed_docs = sum(1 for card in cards if card["status"] == "complete")
         total_triples = sum(int(card["triple_count"]) for card in cards)
         total_lcms = sum(int(card["lcm_count"]) for card in cards)
+        timing = snapshot.get("timing", {})
+        slowest_stages = list(snapshot.get("slowest_stages") or [])
+        corpus_synthesis = dict(snapshot.get("corpus_synthesis") or {})
         query_banner = self.config.request_query
         hero_title = query_banner or "Recovered Causal Structure Across the Current Batch"
         hero_note = (
@@ -1641,6 +1812,65 @@ class DemocritusBatchAgenticRunner:
                 f'<div class="metric-value">{esc(value)}</div>'
                 "</div>"
             )
+
+        performance_links = (
+            f'<a href="{esc(self.dashboard_path.name)}" target="_blank" rel="noreferrer">Batch performance dashboard</a>'
+            f' · <a href="{esc(self.telemetry_path.name)}" target="_blank" rel="noreferrer">Telemetry JSON</a>'
+        )
+        slowest_stage_markup = "".join(
+            '<article class="mini-card">'
+            f'<div class="mini-kicker">{esc(stage.get("completed", 0))} completions</div>'
+            f'<div class="mini-title">{esc(stage.get("agent_name", "agent"))}</div>'
+            f'<p>avg {esc(stage.get("avg_duration_seconds", 0))}s · max {esc(stage.get("max_duration_seconds", 0))}s · total {esc(stage.get("total_duration_seconds", 0))}s</p>'
+            "</article>"
+            for stage in slowest_stages[:3]
+            if isinstance(stage, dict)
+        ) or '<div class="empty">Slowest stages will appear after the first agent completions.</div>'
+
+        def claim_preview(item: dict[str, object]) -> str:
+            supporting_runs = ", ".join(str(value) for value in list(item.get("supporting_runs") or [])[:3])
+            trace = f'{item.get("document_support", 0)} study(s)'
+            if supporting_runs:
+                trace += f" · {supporting_runs}"
+            return (
+                '<article class="mini-card">'
+                f'<div class="mini-kicker">{esc(item.get("truth_value", "support")).replace("_", " ")}</div>'
+                f'<div class="mini-title">{esc(item.get("subj", ""))} <span class="arrow">→</span> {esc(item.get("obj", ""))}</div>'
+                f'<p>{esc(item.get("statement") or item.get("domain") or item.get("rel") or "")}</p>'
+                f'<p>{esc(trace)}</p>'
+                "</article>"
+            )
+
+        synthesis_links: list[str] = []
+        dashboard_href = str(corpus_synthesis.get("dashboard_path") or "")
+        summary_href = str(corpus_synthesis.get("summary_path") or "")
+        if dashboard_href:
+            synthesis_links.append(
+                f'<a href="{esc(self._bundle_relative_href(Path(dashboard_href)))}" target="_blank" rel="noreferrer">Open rolling synthesis</a>'
+            )
+        if summary_href:
+            synthesis_links.append(
+                f'<a href="{esc(self._bundle_relative_href(Path(summary_href)))}" target="_blank" rel="noreferrer">Synthesis JSON</a>'
+            )
+        synthesis_link_markup = (
+            " · ".join(synthesis_links)
+            if synthesis_links
+            else "A rolling corpus synthesis will appear once the first usable triples land, even before the earliest document finishes."
+        )
+        preview_claims = list(corpus_synthesis.get("strongly_supported") or [])[:2]
+        if not preview_claims:
+            preview_claims = list(corpus_synthesis.get("weakly_supported") or [])[:2]
+        synthesis_markup = (
+            "".join(claim_preview(item) for item in preview_claims if isinstance(item, dict))
+            if preview_claims
+            else '<div class="empty">CLIFF is still assembling the first cross-study answer. The first provisional claims should appear as soon as the earliest document triples are recovered.</div>'
+        )
+        maturity_copy = {
+            "near_final": "near-final",
+            "improving": "improving",
+            "warming_up": "warming up",
+        }.get(str(corpus_synthesis.get("maturity") or ""), "warming up")
+        disagreement_count = len(list(corpus_synthesis.get("disagreements") or []))
 
         document_cards: list[str] = []
         for card in cards:
@@ -1672,37 +1902,50 @@ class DemocritusBatchAgenticRunner:
             link_markup = " · ".join(links) if links else "Artifacts will appear as this run completes."
             status_chip = chip(str(card["status"]).replace("_", " "), tone_for_status(str(card["status"])))
             progress_chip = chip(str(card["progress_text"]), "neutral")
+            question_chip = chip(f'{card["question_count"]} questions', "neutral")
+            statement_chip = chip(f'{card["statement_count"]} statements', "neutral")
             triple_chip = chip(f'{card["triple_count"]} triples', "neutral")
             lcm_chip = chip(f'{card["lcm_count"]} LCMs', "neutral")
+            evidence_note = (
+                f'{card["question_count"]} causal questions and {card["statement_count"]} causal statements are already in play; '
+                "relational triples appear once extraction begins."
+                if int(card["triple_count"]) == 0 and (int(card["question_count"]) > 0 or int(card["statement_count"]) > 0)
+                else ""
+            )
             document_cards.append(
-                '<section class="doc-card">'
-                '<div class="doc-header">'
-                '<div>'
-                f'<div class="doc-eyebrow">{esc(card["pdf_name"])}</div>'
-                f'<h2>{esc(card["title"])}</h2>'
-                "</div>"
-                '<div class="doc-status">'
-                f"{status_chip}"
-                f"{progress_chip}"
-                f"{triple_chip}"
-                f"{lcm_chip}"
-                "</div>"
-                "</div>"
-                f'<p class="summary">{esc(card["summary_excerpt"] or "Document summary is still being prepared. Once the report stage finishes, this card will surface the recovered argument structure.")}</p>'
-                '<div class="section-label">Root Topics</div>'
-                f'<div class="chip-row">{root_topic_markup}</div>'
-                '<div class="two-up">'
-                '<div>'
-                '<div class="section-label">Evidence Preview</div>'
-                f'<div class="mini-grid">{triple_markup}</div>'
-                "</div>"
-                '<div>'
-                '<div class="section-label">Recovered Local Causal Models</div>'
-                f'<div class="lcm-list">{lcm_markup}</div>'
-                "</div>"
-                "</div>"
-                f'<div class="links">{link_markup}</div>'
-                "</section>"
+                (
+                    '<section class="doc-card">'
+                    '<div class="doc-header">'
+                    '<div>'
+                    f'<div class="doc-eyebrow">{esc(card["pdf_name"])}</div>'
+                    f'<h2>{esc(card["title"])}</h2>'
+                    "</div>"
+                    '<div class="doc-status">'
+                    f"{status_chip}"
+                    f"{progress_chip}"
+                    f"{question_chip}"
+                    f"{statement_chip}"
+                    f"{triple_chip}"
+                    f"{lcm_chip}"
+                    "</div>"
+                    "</div>"
+                    f'<p class="summary">{esc(card["summary_excerpt"] or "Document summary is still being prepared. Once the report stage finishes, this card will surface the recovered argument structure.")}</p>'
+                    + (f'<p class="summary">{esc(evidence_note)}</p>' if evidence_note else "")
+                    + '<div class="section-label">Root Topics</div>'
+                    + f'<div class="chip-row">{root_topic_markup}</div>'
+                    + '<div class="two-up">'
+                    + '<div>'
+                    + '<div class="section-label">Evidence Preview</div>'
+                    + f'<div class="mini-grid">{triple_markup}</div>'
+                    + "</div>"
+                    + '<div>'
+                    + '<div class="section-label">Recovered Local Causal Models</div>'
+                    + f'<div class="lcm-list">{lcm_markup}</div>'
+                    + "</div>"
+                    + "</div>"
+                    + f'<div class="links">{link_markup}</div>'
+                    + "</section>"
+                )
             )
 
         refresh_meta = '<meta http-equiv="refresh" content="5">' if snapshot.get("status") != "complete" else ""
@@ -1828,7 +2071,7 @@ class DemocritusBatchAgenticRunner:
     }}
     .arrow {{ color: var(--accent); }}
     @media (max-width: 980px) {{
-      .metrics {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+    .metrics {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       .two-up, .mini-grid {{ grid-template-columns: 1fr; }}
       .doc-header {{ flex-direction: column; }}
     }}
@@ -1854,9 +2097,40 @@ class DemocritusBatchAgenticRunner:
       <div class="metrics">
         {metric("Documents", len(cards))}
         {metric("Completed Agent Records", snapshot.get("summary", {}).get("n_completed_records", 0))}
-        {metric("ETA", snapshot.get("timing", {}).get("eta_human", "n/a") if snapshot.get("timing", {}).get("eta_ready") else "warming up")}
-        {metric("Observed Parallelism", snapshot.get("timing", {}).get("effective_parallelism", 1.0))}
+        {metric("ETA", timing.get("eta_human", "n/a") if timing.get("eta_ready") else "warming up")}
+        {metric("Observed Parallelism", timing.get("effective_parallelism", 1.0))}
       </div>
+      <div class="links">{performance_links}</div>
+      <div class="section-label">Performance Snapshot</div>
+      <div class="mini-grid">
+        <article class="mini-card">
+          <div class="mini-kicker">Timing forecast</div>
+          <div class="mini-title">Remaining work</div>
+          <p>{esc(timing.get("remaining_work_human", "warming up"))} across {esc(timing.get("remaining_agents_estimate", 0))} remaining agents.</p>
+        </article>
+        <article class="mini-card">
+          <div class="mini-kicker">Completed work</div>
+          <div class="mini-title">Elapsed {esc(snapshot.get("elapsed_human", "0s"))}</div>
+          <p>{esc(timing.get("total_completed_work_human", "0s"))} observed with parallelism {esc(timing.get("effective_parallelism", 1.0))}.</p>
+        </article>
+      </div>
+      <div class="section-label">Slowest Stages</div>
+      <div class="mini-grid">{slowest_stage_markup}</div>
+      <div class="section-label">Initial Corpus Answer</div>
+      <div class="mini-grid">
+        <article class="mini-card">
+          <div class="mini-kicker">Answer maturity</div>
+          <div class="mini-title">{esc(maturity_copy)}</div>
+          <p>{esc(corpus_synthesis.get("n_documents", 0))} synthesized document(s) contributing to the rolling answer · {esc(disagreement_count)} disagreement surfaces.</p>
+        </article>
+        <article class="mini-card">
+          <div class="mini-kicker">Live synthesis</div>
+          <div class="mini-title">Partial answer updates as documents land</div>
+          <p>{synthesis_link_markup}</p>
+        </article>
+      </div>
+      <div class="section-label">Current Cross-Study Claims</div>
+      <div class="mini-grid">{synthesis_markup}</div>
     </section>
     <section class="docs">
       {"".join(document_cards) if document_cards else '<div class="empty">No documents have been admitted to this batch yet.</div>'}
@@ -1876,6 +2150,7 @@ class DemocritusBatchAgenticRunner:
         completed_records: list[DemocritusBatchRecord],
         status: str,
     ) -> None:
+        self._maybe_refresh_incremental_corpus_synthesis(tuple(completed_records))
         snapshot = self._build_telemetry_snapshot(
             batch_started_at=batch_started_at,
             pending_frontiers=pending_frontiers,

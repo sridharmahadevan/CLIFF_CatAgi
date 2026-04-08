@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import csv
 import html
+import io
 import json
 import math
 import os
 import re
 import subprocess
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Callable
 
 from .democritus_query_agentic import _resolve_sec_user_agent
 from .repo_layout import repo_root, resolve_brand_panel_root
@@ -41,6 +45,13 @@ def _infer_ticker_from_aliases(brand: str, slug: str, aliases: list[str]) -> str
         if re.fullmatch(r"[a-z]{1,5}", token):
             return token
     return ""
+
+
+def _is_matchable_company_alias(alias: str) -> bool:
+    normalized = str(alias or "").strip().lower()
+    if len(normalized) >= 3:
+        return True
+    return any(char.isdigit() for char in normalized)
 
 
 def _safe_read_json(path: Path) -> dict[str, object]:
@@ -105,6 +116,99 @@ class CompanySimilarityRunResult:
     artifact_path: Path | None
     company_a_manifest_path: Path | None
     company_b_manifest_path: Path | None
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _company_similarity_parallelism_capacity(stage_state: dict[str, dict[str, object]]) -> float:
+    company_builds_seen = 0
+    for stage_key, stage in stage_state.items():
+        if not stage_key.endswith("_analysis") or stage_key == "functor_analysis":
+            continue
+        status = str(stage.get("status") or "").lower()
+        if status in {"active", "complete"}:
+            company_builds_seen += 1
+    return 2.0 if company_builds_seen >= 2 else 1.0
+
+
+def _company_similarity_stage_concurrency(stage_state: dict[str, dict[str, object]], *, at_time: float) -> float:
+    concurrent = 0.0
+    for stage in stage_state.values():
+        started = float(stage.get("started_at_epoch") or 0.0)
+        ended = float(stage.get("ended_at_epoch") or 0.0)
+        if started <= 0.0:
+            continue
+        if started <= at_time and (ended <= 0.0 or at_time < ended):
+            concurrent += 1.0
+    return max(1.0, concurrent) if concurrent > 0 else 1.0
+
+
+def _company_similarity_peak_parallelism(stage_state: dict[str, dict[str, object]], *, now: float) -> float:
+    event_times: set[float] = set()
+    for stage in stage_state.values():
+        started = float(stage.get("started_at_epoch") or 0.0)
+        ended = float(stage.get("ended_at_epoch") or 0.0)
+        if started > 0.0:
+            event_times.add(started)
+        if ended > 0.0:
+            event_times.add(max(started, ended - 1e-6))
+    if not event_times:
+        return 1.0
+    peak = 1.0
+    for event_time in sorted(event_times):
+        peak = max(peak, _company_similarity_stage_concurrency(stage_state, at_time=min(event_time, now)))
+    return peak
+
+
+def _company_similarity_current_stage_label(
+    active_stages: list[dict[str, object]],
+    pending_stages: list[dict[str, object]],
+    *,
+    status: str,
+) -> str:
+    if active_stages:
+        labels = [str(stage.get("label") or stage.get("stage_key") or "stage") for stage in active_stages]
+        return " + ".join(labels[:2])
+    if pending_stages:
+        return str(pending_stages[0].get("label") or pending_stages[0].get("stage_key") or "warming up")
+    if str(status).lower() == "complete":
+        return "Complete"
+    return "Warming up"
+
+
+def _company_similarity_mode_profile(execution_mode: str) -> dict[str, int | str]:
+    normalized_mode = "deep" if str(execution_mode).strip().lower() == "deep" else "quick"
+    current_year = time.localtime().tm_year
+    if normalized_mode == "deep":
+        return {
+            "execution_mode": normalized_mode,
+            "year_start": 2002,
+            "year_end": current_year,
+            "jobs": 1,
+            "llm_jobs": 1,
+            "filings_profile": "fast",
+            "epochs": 3,
+            "batch_size": 4,
+        }
+    return {
+        "execution_mode": normalized_mode,
+        "year_start": max(2002, current_year - 4),
+        "year_end": current_year,
+        "jobs": 2,
+        "llm_jobs": 2,
+        "filings_profile": "fast",
+        "epochs": 2,
+        "batch_size": 4,
+    }
 
 
 def looks_like_company_similarity_query(query: str) -> bool:
@@ -229,7 +333,7 @@ def _extract_companies_from_query(query: str, records: dict[str, _CompanyRecord]
         best_length = -1
         for alias in record.aliases:
             alias = alias.strip()
-            if not alias or len(alias) < 3:
+            if not alias or not _is_matchable_company_alias(alias):
                 continue
             pattern = f" {alias} "
             position = normalized.find(pattern)
@@ -326,30 +430,42 @@ def _existing_combined_dir(record: _CompanyRecord) -> Path | None:
     return None
 
 
-def _run_command(command: list[str], *, cwd: Path) -> None:
+def _run_command(command: list[str], *, cwd: Path, stream_label: str = "") -> None:
     env = os.environ.copy()
     env.setdefault("MPLBACKEND", "Agg")
     env.setdefault("MPLCONFIGDIR", "/tmp/mplconfig")
-    try:
-        subprocess.run(
-            command,
-            cwd=str(cwd),
-            check=True,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        stderr_tail = "\n".join((exc.stderr or "").splitlines()[-20:]).strip()
-        stdout_tail = "\n".join((exc.stdout or "").splitlines()[-20:]).strip()
-        details = stderr_tail or stdout_tail or "No stdout/stderr was captured."
+    log_prefix = f"[company_similarity][{stream_label}]" if stream_label else "[company_similarity]"
+    print(f"{log_prefix} command: {' '.join(command)}", flush=True)
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    tail: list[str] = []
+    stdout_stream = process.stdout or io.StringIO("")
+    with stdout_stream:
+        for raw_line in stdout_stream:
+            line = raw_line.rstrip("\n")
+            print(f"{log_prefix} {line}" if stream_label else line, flush=True)
+            if not line.strip():
+                continue
+            tail.append(f"{log_prefix} {line}" if stream_label else line)
+            if len(tail) > 20:
+                tail.pop(0)
+    return_code = process.wait()
+    if return_code != 0:
+        details = "\n".join(tail).strip() or "No stdout/stderr was captured."
         raise RuntimeError(
             "Company similarity backend command failed.\n"
             f"Command: {' '.join(command)}\n"
             f"CWD: {cwd}\n"
-            f"Exit code: {exc.returncode}\n"
+            f"Exit code: {return_code}\n"
             f"Last output:\n{details}"
-        ) from exc
+        )
 
 
 def _python_has_modules(python_executable: str, modules: tuple[str, ...], *, cwd: Path | None = None) -> bool:
@@ -413,6 +529,7 @@ def _ensure_company_analysis(
     sec_user_agent: str,
     workspace_root: Path,
     python_executable: str,
+    execution_mode: str,
 ) -> tuple[Path, Path | None]:
     combined_dir = _existing_combined_dir(record)
     manifest_path = _manifest_path(record)
@@ -426,6 +543,7 @@ def _ensure_company_analysis(
             "Add an index URL or EDGAR ticker to the company registry before requesting this comparison."
         )
     existing_filing_manifest = _existing_local_filing_manifest(record)
+    profile = _company_similarity_mode_profile(execution_mode)
     command = [
         python_executable,
         "-m",
@@ -437,21 +555,25 @@ def _ensure_company_analysis(
         "--outdir",
         str(record.outdir),
         "--jobs",
-        "1",
+        str(profile["jobs"]),
         "--llm-jobs",
-        "1",
+        str(profile["llm_jobs"]),
         "--filings-profile",
-        "fast",
+        str(profile["filings_profile"]),
         "--basis-mode",
         "motif",
         "--block-size",
         "3",
         "--epochs",
-        "3",
+        str(profile["epochs"]),
         "--batch-size",
-        "4",
+        str(profile["batch_size"]),
         "--device",
         "cpu",
+        "--year-start",
+        str(profile["year_start"]),
+        "--year-end",
+        str(profile["year_end"]),
     ]
     if existing_filing_manifest is not None:
         command.extend(["--manifest", str(existing_filing_manifest)])
@@ -461,11 +583,209 @@ def _ensure_company_analysis(
         command.extend(["--sec-user-agent", resolved_sec_user_agent])
     elif record.index_url:
         command.extend(["--index-url", record.index_url])
-    _run_command(command, cwd=workspace_root)
+    _run_command(command, cwd=workspace_root, stream_label=record.brand)
     combined_dir = _existing_combined_dir(record)
     if combined_dir is None:
         raise FileNotFoundError(f"Expected combined atlas output for {record.brand} after company analysis completed.")
     return combined_dir, manifest_path if manifest_path.exists() else None
+
+
+def _ensure_company_analyses(
+    *,
+    records: tuple[_CompanyRecord, ...],
+    sec_user_agent: str,
+    workspace_root: Path,
+    python_executable: str,
+    execution_mode: str,
+    log: Callable[[str], None] | None = None,
+    on_record_complete: Callable[[_CompanyRecord, Path], None] | None = None,
+) -> dict[str, tuple[Path, Path | None]]:
+    results: dict[str, tuple[Path, Path | None]] = {}
+    with ThreadPoolExecutor(max_workers=max(1, len(records)), thread_name_prefix="company-similarity") as executor:
+        futures = {}
+        for record in records:
+            if log is not None:
+                log(f"ensuring company analysis for {record.brand}")
+            future = executor.submit(
+                _ensure_company_analysis,
+                record=record,
+                sec_user_agent=sec_user_agent,
+                workspace_root=workspace_root,
+                python_executable=python_executable,
+                execution_mode=execution_mode,
+            )
+            futures[future] = record
+        for future in as_completed(futures):
+            record = futures[future]
+            combined_dir, manifest_path = future.result()
+            results[record.slug] = (combined_dir, manifest_path)
+            if on_record_complete is not None:
+                on_record_complete(record, combined_dir)
+            if log is not None:
+                log(f"company analysis ready for {record.brand}: {combined_dir}")
+    return results
+
+
+def _preflight_company_similarity_backend(records: tuple[_CompanyRecord, ...]) -> None:
+    missing_cached_outputs = [record for record in records if _existing_combined_dir(record) is None]
+    if not missing_cached_outputs:
+        return
+    if os.environ.get("OPENAI_API_KEY", "").strip():
+        return
+    brands = ", ".join(record.brand for record in missing_cached_outputs)
+    expected_dirs = ", ".join(
+        str((record.outdir or (_resolve_brand_workspace_root() / "outputs" / record.slug)) / f"runs_{record.slug}_financial_filings" / f"atlas_{record.slug}_financial_combined")
+        for record in missing_cached_outputs
+    )
+    raise RuntimeError(
+        "Company similarity needs either cached combined atlases or an OpenAI-compatible API key for a fresh Democritus build. "
+        f"No cached combined atlas was found for: {brands}. "
+        "Set OPENAI_API_KEY in the environment, or place the prebuilt atlas directories at: "
+        f"{expected_dirs}."
+    )
+
+
+def _render_company_similarity_performance_html(payload: dict[str, object]) -> str:
+    def esc(value: object) -> str:
+        return html.escape(str(value))
+
+    timing = dict(payload.get("timing") or {})
+    stage_rows = []
+    for stage in list(payload.get("stages") or []):
+        if not isinstance(stage, dict):
+            continue
+        stage_rows.append(
+            "<tr>"
+            f"<td>{esc(stage.get('label') or stage.get('stage_key') or '')}</td>"
+            f"<td>{esc(stage.get('status') or '')}</td>"
+            f"<td>{esc(stage.get('duration_human') or '')}</td>"
+            f"<td>{esc(stage.get('started_at_local') or '')}</td>"
+            f"<td>{esc(stage.get('ended_at_local') or '')}</td>"
+            "</tr>"
+        )
+    slowest_rows = []
+    for stage in list(payload.get("slowest_stages") or []):
+        if not isinstance(stage, dict):
+            continue
+        slowest_rows.append(
+            "<tr>"
+            f"<td>{esc(stage.get('label') or stage.get('stage_key') or '')}</td>"
+            f"<td>{esc(stage.get('duration_human') or '')}</td>"
+            f"<td>{esc(stage.get('duration_seconds') or '')}</td>"
+            "</tr>"
+        )
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Company Similarity Performance</title>
+    <style>
+      body {{
+        margin: 0;
+        font-family: Georgia, "Iowan Old Style", serif;
+        background: #f7f1e5;
+        color: #1f2320;
+      }}
+      main {{
+        max-width: 1080px;
+        margin: 36px auto;
+        padding: 0 18px 40px;
+      }}
+      .card {{
+        background: rgba(255, 252, 246, 0.96);
+        border: 1px solid #d5c8af;
+        border-radius: 24px;
+        padding: 22px;
+        box-shadow: 0 18px 48px rgba(42, 31, 12, 0.10);
+        margin-bottom: 18px;
+      }}
+      .eyebrow {{
+        margin: 0 0 8px 0;
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        font-size: 12px;
+        color: #9a5a12;
+      }}
+      h1, h2 {{
+        margin: 0 0 12px 0;
+      }}
+      .metrics {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+      }}
+      .metric {{
+        border: 1px solid #d5c8af;
+        border-radius: 18px;
+        padding: 14px;
+        background: #fffaf0;
+      }}
+      .metric span {{
+        display: block;
+        color: #5d685f;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }}
+      .metric strong {{
+        display: block;
+        margin-top: 6px;
+        font-size: 22px;
+      }}
+      table {{
+        width: 100%;
+        border-collapse: collapse;
+        background: white;
+      }}
+      th, td {{
+        border: 1px solid #e5dcc9;
+        padding: 8px 10px;
+        text-align: left;
+        font-size: 14px;
+      }}
+      th {{
+        background: #f8f1e4;
+      }}
+      .muted {{
+        color: #5d685f;
+      }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="card">
+        <p class="eyebrow">CLIFF Company Similarity</p>
+        <h1>Performance Telemetry</h1>
+        <p class="muted">{esc(payload.get("note") or "")}</p>
+        <div class="metrics">
+          <div class="metric"><span>Status</span><strong>{esc(payload.get("status") or "")}</strong></div>
+          <div class="metric"><span>Elapsed</span><strong>{esc(timing.get("elapsed_human") or "")}</strong></div>
+          <div class="metric"><span>Current Stage</span><strong>{esc(timing.get("current_stage") or "warming up")}</strong></div>
+          <div class="metric"><span>Completed Work</span><strong>{esc(timing.get("completed_work_human") or "")}</strong></div>
+          <div class="metric"><span>Observed Parallelism</span><strong>{esc(timing.get("observed_parallelism") or 1.0)}</strong></div>
+          <div class="metric"><span>Peak Parallelism</span><strong>{esc(timing.get("peak_parallelism") or 1.0)}</strong></div>
+          <div class="metric"><span>ETA</span><strong>{esc(timing.get("eta_human") or "")}</strong></div>
+        </div>
+      </section>
+      <section class="card">
+        <p class="eyebrow">Stage Timing</p>
+        <table>
+          <thead><tr><th>Stage</th><th>Status</th><th>Duration</th><th>Started</th><th>Ended</th></tr></thead>
+          <tbody>{''.join(stage_rows) if stage_rows else "<tr><td colspan='5'>No stage data yet.</td></tr>"}</tbody>
+        </table>
+      </section>
+      <section class="card">
+        <p class="eyebrow">Slowest Stages</p>
+        <table>
+          <thead><tr><th>Stage</th><th>Duration</th><th>Seconds</th></tr></thead>
+          <tbody>{''.join(slowest_rows) if slowest_rows else "<tr><td colspan='3'>No completed stages yet.</td></tr>"}</tbody>
+        </table>
+      </section>
+    </main>
+  </body>
+</html>
+"""
 
 
 def _write_html_report(
@@ -475,6 +795,7 @@ def _write_html_report(
     plan: CompanySimilarityQueryPlan,
     summary_markdown: str,
     manifest: dict[str, object],
+    performance_payload: dict[str, object] | None = None,
 ) -> Path:
     artifact_path = output_path
     textbook_html = render_textbook_backstop_html(
@@ -491,6 +812,25 @@ def _write_html_report(
     mean_cosine = manifest.get("mean_yearly_cosine_similarity", "n/a")
     mean_js = manifest.get("mean_yearly_js_divergence", "n/a")
     mean_defect = manifest.get("mean_relative_naturality_defect", "n/a")
+    performance_markup = ""
+    if performance_payload:
+        timing = dict(performance_payload.get("timing") or {})
+        performance_markup = f"""
+      <section class="card">
+        <p class="eyebrow">Performance</p>
+        <div class="metrics">
+          <div class="metric"><span class="muted">Elapsed</span><strong>{html.escape(str(timing.get("elapsed_human") or "n/a"))}</strong></div>
+          <div class="metric"><span class="muted">Completed work</span><strong>{html.escape(str(timing.get("completed_work_human") or "n/a"))}</strong></div>
+          <div class="metric"><span class="muted">Observed parallelism</span><strong>{html.escape(str(timing.get("observed_parallelism") or 1.0))}</strong></div>
+          <div class="metric"><span class="muted">ETA</span><strong>{html.escape(str(timing.get("eta_human") or "n/a"))}</strong></div>
+        </div>
+        <p class="muted">
+          Performance details:
+          <a href="company_similarity_performance.html">performance dashboard</a>,
+          <a href="company_similarity_telemetry.json">telemetry json</a>.
+        </p>
+      </section>
+"""
     artifact_path.write_text(
         f"""<!doctype html>
 <html lang="en">
@@ -604,6 +944,7 @@ def _write_html_report(
         <p class="eyebrow">Dashboard</p>
         {image_markup}
       </section>
+      {performance_markup}
       <section class="card">
         <p class="eyebrow">Summary</p>
         <pre>{summary_html}</pre>
@@ -624,12 +965,147 @@ def _write_html_report(
 
 
 class CompanySimilarityAgenticRunner:
-    def __init__(self, query: str, outdir: Path, *, sec_user_agent: str = "") -> None:
+    def __init__(self, query: str, outdir: Path, *, sec_user_agent: str = "", execution_mode: str = "quick") -> None:
         self.query = " ".join(query.split())
         self.outdir = outdir.resolve()
         self.sec_user_agent = sec_user_agent
+        self.execution_mode = "deep" if str(execution_mode).strip().lower() == "deep" else "quick"
         if not self.query:
             raise ValueError("A non-empty company similarity query is required.")
+
+    def _log(self, message: str) -> None:
+        print(f"[company_similarity] {message}", flush=True)
+
+    def _build_telemetry_payload(
+        self,
+        *,
+        plan: CompanySimilarityQueryPlan,
+        started_at: float,
+        stage_state: dict[str, dict[str, object]],
+        status: str,
+        note: str,
+    ) -> dict[str, object]:
+        now = time.time()
+        completed_stages = []
+        active_stages = []
+        pending_stages = []
+        for stage_key, stage in stage_state.items():
+            started = float(stage.get("started_at_epoch") or 0.0)
+            ended = float(stage.get("ended_at_epoch") or 0.0)
+            duration_seconds = max((ended or now) - started, 0.0) if started else 0.0
+            stage_payload = {
+                "stage_key": stage_key,
+                "label": stage.get("label") or stage_key,
+                "status": stage.get("status") or "pending",
+                "started_at_epoch": round(started, 6) if started else 0.0,
+                "ended_at_epoch": round(ended, 6) if ended else 0.0,
+                "started_at_local": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started)) if started else "",
+                "ended_at_local": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ended)) if ended else "",
+                "duration_seconds": round(duration_seconds, 3),
+                "duration_human": _format_duration(duration_seconds),
+            }
+            if stage_payload["status"] == "complete":
+                completed_stages.append(stage_payload)
+            elif stage_payload["status"] == "active":
+                active_stages.append(stage_payload)
+            else:
+                pending_stages.append(stage_payload)
+        slowest_stages = sorted(
+            completed_stages,
+            key=lambda item: float(item.get("duration_seconds") or 0.0),
+            reverse=True,
+        )[:5]
+        remaining_seconds = 0.0
+        for stage in active_stages:
+            remaining_seconds += max(float(stage.get("duration_seconds") or 0.0) * 0.6, 30.0)
+        for stage in pending_stages:
+            label = str(stage.get("label") or "").lower()
+            if "build" in label:
+                remaining_seconds += 8.0 * 60.0
+            elif "functor" in label:
+                remaining_seconds += 4.0 * 60.0
+            elif "visual" in label:
+                remaining_seconds += 90.0
+            else:
+                remaining_seconds += 30.0
+        completed_work_seconds = sum(float(stage.get("duration_seconds") or 0.0) for stage in completed_stages)
+        active_work_seconds = sum(float(stage.get("duration_seconds") or 0.0) for stage in active_stages)
+        elapsed_seconds = max(now - started_at, 0.0)
+        observed_work_seconds = completed_work_seconds + active_work_seconds
+        observed_parallelism = 1.0
+        if elapsed_seconds > 0:
+            observed_parallelism = max(
+                1.0,
+                min(
+                    _company_similarity_parallelism_capacity(stage_state),
+                    observed_work_seconds / elapsed_seconds,
+                ),
+            )
+        current_stage_label = _company_similarity_current_stage_label(
+            active_stages,
+            pending_stages,
+            status=status,
+        )
+        peak_parallelism = max(
+            observed_parallelism,
+            _company_similarity_peak_parallelism(stage_state, now=now),
+        )
+        return {
+            "query_plan": asdict(plan),
+            "execution_mode": self.execution_mode,
+            "status": status,
+            "note": note,
+            "started_at_epoch": round(started_at, 6),
+            "started_at_local": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started_at)),
+            "updated_at_epoch": round(now, 6),
+            "elapsed_seconds": round(elapsed_seconds, 3),
+            "elapsed_human": _format_duration(elapsed_seconds),
+            "timing": {
+                "elapsed_seconds": round(elapsed_seconds, 3),
+                "elapsed_human": _format_duration(elapsed_seconds),
+                "completed_work_seconds": round(completed_work_seconds, 3),
+                "completed_work_human": _format_duration(completed_work_seconds),
+                "observed_work_seconds": round(observed_work_seconds, 3),
+                "observed_work_human": _format_duration(observed_work_seconds),
+                "observed_parallelism": round(observed_parallelism, 3),
+                "peak_parallelism": round(peak_parallelism, 3),
+                "current_stage": current_stage_label,
+                "eta_seconds": round(remaining_seconds, 3),
+                "eta_human": _format_duration(remaining_seconds) if remaining_seconds > 0 else "complete",
+                "eta_ready": bool(completed_stages or active_stages),
+            },
+            "stages": [
+                *completed_stages,
+                *active_stages,
+                *pending_stages,
+            ],
+            "slowest_stages": slowest_stages,
+        }
+
+    def _write_telemetry(
+        self,
+        *,
+        telemetry_path: Path,
+        performance_dashboard_path: Path,
+        plan: CompanySimilarityQueryPlan,
+        started_at: float,
+        stage_state: dict[str, dict[str, object]],
+        status: str,
+        note: str,
+    ) -> dict[str, object]:
+        payload = self._build_telemetry_payload(
+            plan=plan,
+            started_at=started_at,
+            stage_state=stage_state,
+            status=status,
+            note=note,
+        )
+        telemetry_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        performance_dashboard_path.write_text(
+            _render_company_similarity_performance_html(payload),
+            encoding="utf-8",
+        )
+        return payload
 
     def run(self) -> CompanySimilarityRunResult:
         self.outdir.mkdir(parents=True, exist_ok=True)
@@ -637,24 +1113,92 @@ class CompanySimilarityAgenticRunner:
         workspace_root = repo_root().parents[0]
         pipeline_python = _select_python_for_brand_pipeline()
         plan = interpret_company_similarity_query(self.query)
+        mode_profile = _company_similarity_mode_profile(self.execution_mode)
+        started_at = time.time()
+        telemetry_path = self.outdir / "company_similarity_telemetry.json"
+        performance_dashboard_path = self.outdir / "company_similarity_performance.html"
+        stage_state: dict[str, dict[str, object]] = {
+            "query": {"label": "Resolve query", "status": "complete", "started_at_epoch": started_at, "ended_at_epoch": started_at},
+            "company_a_analysis": {"label": f"{plan.company_a} build", "status": "pending", "started_at_epoch": 0.0, "ended_at_epoch": 0.0},
+            "company_b_analysis": {"label": f"{plan.company_b} build", "status": "pending", "started_at_epoch": 0.0, "ended_at_epoch": 0.0},
+            "functor_analysis": {"label": "Cross-company functor comparison", "status": "pending", "started_at_epoch": 0.0, "ended_at_epoch": 0.0},
+            "visualization": {"label": "Visualization", "status": "pending", "started_at_epoch": 0.0, "ended_at_epoch": 0.0},
+        }
+        self._log(f"resolved query to {plan.company_a} vs {plan.company_b}")
+        self._write_telemetry(
+            telemetry_path=telemetry_path,
+            performance_dashboard_path=performance_dashboard_path,
+            plan=plan,
+            started_at=started_at,
+            stage_state=stage_state,
+            status="running",
+            note=(
+                "CLIFF is resolving the two company branches and preparing the cross-company comparison "
+                f"in {self.execution_mode} mode."
+            ),
+        )
         record_a = _find_company_record(plan, brand_root, plan.company_a_slug)
         record_b = _find_company_record(plan, brand_root, plan.company_b_slug)
-        combined_a, manifest_a = _ensure_company_analysis(
-            record=record_a,
+        _preflight_company_similarity_backend((record_a, record_b))
+        self._log(f"starting parallel company analysis for {record_a.brand} and {record_b.brand}")
+        stage_state["company_a_analysis"]["status"] = "active"
+        stage_state["company_a_analysis"]["started_at_epoch"] = time.time()
+        stage_state["company_b_analysis"]["status"] = "active"
+        stage_state["company_b_analysis"]["started_at_epoch"] = time.time()
+        self._write_telemetry(
+            telemetry_path=telemetry_path,
+            performance_dashboard_path=performance_dashboard_path,
+            plan=plan,
+            started_at=started_at,
+            stage_state=stage_state,
+            status="running",
+            note=f"Running {record_a.brand} and {record_b.brand} analysis in parallel.",
+        )
+        analysis_results = _ensure_company_analyses(
+            records=(record_a, record_b),
             sec_user_agent=self.sec_user_agent,
             workspace_root=workspace_root,
             python_executable=pipeline_python,
+            execution_mode=self.execution_mode,
+            log=self._log,
+            on_record_complete=lambda record, combined_dir: (
+                stage_state.__setitem__(
+                    "company_a_analysis" if record.slug == record_a.slug else "company_b_analysis",
+                    {
+                        **stage_state["company_a_analysis" if record.slug == record_a.slug else "company_b_analysis"],
+                        "status": "complete",
+                        "ended_at_epoch": time.time(),
+                    },
+                ),
+                self._write_telemetry(
+                    telemetry_path=telemetry_path,
+                    performance_dashboard_path=performance_dashboard_path,
+                    plan=plan,
+                    started_at=started_at,
+                    stage_state=stage_state,
+                    status="running",
+                    note=f"{record.brand} analysis finished; waiting for the remaining branch and comparison steps.",
+                ),
+            ),
         )
-        combined_b, manifest_b = _ensure_company_analysis(
-            record=record_b,
-            sec_user_agent=self.sec_user_agent,
-            workspace_root=workspace_root,
-            python_executable=pipeline_python,
-        )
+        combined_a, manifest_a = analysis_results[record_a.slug]
+        combined_b, manifest_b = analysis_results[record_b.slug]
 
         analysis_dir = self.outdir / f"{plan.company_a_slug}_vs_{plan.company_b_slug}_functors"
         analysis_dir.mkdir(parents=True, exist_ok=True)
         summary_path = self.outdir / "company_similarity_summary.json"
+        self._log(f"running cross-company functor analysis in {analysis_dir}")
+        stage_state["functor_analysis"]["status"] = "active"
+        stage_state["functor_analysis"]["started_at_epoch"] = time.time()
+        self._write_telemetry(
+            telemetry_path=telemetry_path,
+            performance_dashboard_path=performance_dashboard_path,
+            plan=plan,
+            started_at=started_at,
+            stage_state=stage_state,
+            status="running",
+            note="Both company branches are ready; running the cross-company functor comparison.",
+        )
 
         _run_command(
             [
@@ -671,8 +1215,26 @@ class CompanySimilarityAgenticRunner:
                 plan.company_b_slug,
                 "--outdir",
                 str(analysis_dir),
+                "--min-year",
+                str(mode_profile["year_start"]),
+                "--max-year",
+                str(mode_profile["year_end"]),
             ],
             cwd=workspace_root,
+        )
+        self._log("cross-company functor analysis completed")
+        stage_state["functor_analysis"]["status"] = "complete"
+        stage_state["functor_analysis"]["ended_at_epoch"] = time.time()
+        stage_state["visualization"]["status"] = "active"
+        stage_state["visualization"]["started_at_epoch"] = time.time()
+        self._write_telemetry(
+            telemetry_path=telemetry_path,
+            performance_dashboard_path=performance_dashboard_path,
+            plan=plan,
+            started_at=started_at,
+            stage_state=stage_state,
+            status="running",
+            note="Functor comparison is complete; rendering the visualization and summary outputs.",
         )
         _run_command(
             [
@@ -686,6 +1248,9 @@ class CompanySimilarityAgenticRunner:
             ],
             cwd=workspace_root,
         )
+        self._log("cross-company visualization completed")
+        stage_state["visualization"]["status"] = "complete"
+        stage_state["visualization"]["ended_at_epoch"] = time.time()
 
         manifest = _safe_read_json(analysis_dir / "cross_company_functors_manifest.json")
         year_metrics_path = analysis_dir / "cross_company_year_metrics.csv"
@@ -713,15 +1278,30 @@ class CompanySimilarityAgenticRunner:
                 round(sum(defect_values) / len(defect_values), 4) if defect_values else math.nan
             )
         summary_markdown = (analysis_dir / "cross_company_functors_summary.md").read_text(encoding="utf-8")
+        performance_payload = self._write_telemetry(
+            telemetry_path=telemetry_path,
+            performance_dashboard_path=performance_dashboard_path,
+            plan=plan,
+            started_at=started_at,
+            stage_state=stage_state,
+            status="complete",
+            note="The company similarity run completed and its performance telemetry has been finalized.",
+        )
         artifact_path = _write_html_report(
             output_path=self.outdir / "company_similarity_dashboard.html",
             analysis_dir=analysis_dir,
             plan=plan,
             summary_markdown=summary_markdown,
             manifest=manifest,
+            performance_payload=performance_payload,
         )
         payload = {
             "query_plan": asdict(plan),
+            "execution_mode": self.execution_mode,
+            "year_window": {
+                "start": mode_profile["year_start"],
+                "end": mode_profile["year_end"],
+            },
             "analysis_dir": str(analysis_dir),
             "artifact_path": str(artifact_path),
             "company_a_manifest_path": str(manifest_a) if manifest_a else None,
@@ -729,8 +1309,11 @@ class CompanySimilarityAgenticRunner:
             "cross_company_manifest_path": str(analysis_dir / "cross_company_functors_manifest.json"),
             "summary_markdown_path": str(analysis_dir / "cross_company_functors_summary.md"),
             "dashboard_png_path": str(analysis_dir / "cross_company_functors_dashboard.png"),
+            "performance_dashboard_path": str(performance_dashboard_path),
+            "telemetry_path": str(telemetry_path),
         }
         summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self._log(f"company similarity dashboard ready: {artifact_path}")
         return CompanySimilarityRunResult(
             query_plan=plan,
             route_outdir=self.outdir,

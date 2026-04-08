@@ -52,6 +52,7 @@ _STOPWORDS = {
     "interested",
     "is",
     "it",
+    "jointly",
     "know",
     "learn",
     "like",
@@ -64,18 +65,29 @@ _STOPWORDS = {
     "report",
     "reports",
     "show",
+    "support",
+    "supports",
+    "synthesize",
+    "synthesizes",
+    "synthesized",
+    "synthesis",
     "studies",
     "study",
     "that",
     "the",
     "these",
     "those",
+    "they",
     "tell",
     "to",
     "understand",
     "want",
+    "what",
     "with",
     "would",
+    "analyze",
+    "analyzed",
+    "analysis",
 }
 
 _SEC_COMPANY_QUERY_STOPWORDS = {
@@ -231,7 +243,7 @@ def _tokenize(text: str) -> tuple[str, ...]:
     normalized = " ".join(text.lower().split())
     return tuple(
         token
-        for token in re.findall(r"[a-z0-9]+", normalized)
+        for token in re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", normalized)
         if token not in _STOPWORDS and len(token) > 1
     )
 
@@ -323,6 +335,15 @@ def _derive_retrieval_query(query: str) -> str:
         r"^what\s+do\s+we\s+know\s+about\s+",
         r"^what\s+are\s+the\s+",
         r"^what\s+is\s+the\s+",
+        rf"^(?:analyze|summarize|review|find)\s+(?:\d+|{'|'.join(_NUMBER_WORDS)}){_COUNT_FILLER_PATTERN}\s+(?:study|studies|paper|papers|article|articles|document|documents)\s+(?:of|on|about)\s+",
+        rf"^(?:analyze|summarize|review|find)\s+{_COUNT_FILLER_PATTERN}\s*(?:study|studies|paper|papers|article|articles|document|documents)\s+(?:of|on|about)\s+",
+        r"^(?:analyze|summarize|review|find)\s+",
+    ):
+        stripped = re.sub(pattern, "", stripped)
+    for pattern in (
+        r"\s+and\s+synthesize\s+what\s+they\s+jointly\s+support\b.*$",
+        r"\s+and\s+summari[sz]e\b.*$",
+        r"\s+and\s+extract\b.*$",
     ):
         stripped = re.sub(pattern, "", stripped)
     retrieval_tokens = _tokenize(stripped)
@@ -531,6 +552,7 @@ class DemocritusQueryAgenticConfig:
 
     query: str
     outdir: Path
+    execution_mode: str = "quick"
     target_documents: int = 10
     manifest_path: Path | None = None
     source_pdf_root: Path | None = None
@@ -548,6 +570,9 @@ class DemocritusQueryAgenticConfig:
     include_phase2: bool = True
     auto_topics_from_pdf: bool = True
     root_topic_strategy: str = "v0_openai"
+    depth_limit: int = 3
+    max_total_topics: int = 100
+    statements_per_question: int = 2
     intra_document_shards: int = 1
     discovery_only: bool = False
     dry_run: bool = False
@@ -556,27 +581,48 @@ class DemocritusQueryAgenticConfig:
     sec_company_limit: int = 3
 
     def resolved(self) -> "DemocritusQueryAgenticConfig":
+        execution_mode = "deep" if str(self.execution_mode).strip().lower() == "deep" else "quick"
+        target_documents = max(1, int(self.target_documents))
+        if execution_mode == "quick":
+            target_documents = min(target_documents, 3)
+        max_docs = int(self.max_docs)
+        if execution_mode == "quick":
+            quick_max_docs = target_documents + 2
+            max_docs = min(max_docs, quick_max_docs) if max_docs > 0 else quick_max_docs
+        depth_limit = max(1, int(self.depth_limit))
+        max_total_topics = max(10, int(self.max_total_topics))
+        statements_per_question = max(1, int(self.statements_per_question))
+        intra_document_shards = max(1, int(self.intra_document_shards))
+        if execution_mode == "quick":
+            depth_limit = min(depth_limit, 2)
+            max_total_topics = min(max_total_topics, 40)
+            statements_per_question = 1
+            intra_document_shards = max(2, intra_document_shards)
         return DemocritusQueryAgenticConfig(
             query=self.query.strip(),
             outdir=self.outdir.resolve(),
-            target_documents=self.target_documents,
+            execution_mode=execution_mode,
+            target_documents=target_documents,
             manifest_path=self.manifest_path.resolve() if self.manifest_path else None,
             source_pdf_root=self.source_pdf_root.resolve() if self.source_pdf_root else None,
             retrieval_backend=self.retrieval_backend,
             retrieval_user_agent=self.retrieval_user_agent,
             retrieval_timeout_seconds=self.retrieval_timeout_seconds,
             corpus_name=self.corpus_name,
-            max_docs=self.max_docs,
+            max_docs=max_docs,
             consensus_enabled=self.consensus_enabled,
             consensus_batch_size=self.consensus_batch_size,
             consensus_similarity_threshold=self.consensus_similarity_threshold,
             consensus_required_stable_passes=self.consensus_required_stable_passes,
             max_workers=self.max_workers,
             agent_concurrency_limits=tuple(self.agent_concurrency_limits),
-            include_phase2=self.include_phase2,
+            include_phase2=(False if execution_mode == "quick" else self.include_phase2),
             auto_topics_from_pdf=self.auto_topics_from_pdf,
             root_topic_strategy=self.root_topic_strategy,
-            intra_document_shards=max(1, int(self.intra_document_shards)),
+            depth_limit=depth_limit,
+            max_total_topics=max_total_topics,
+            statements_per_question=statements_per_question,
+            intra_document_shards=intra_document_shards,
             discovery_only=self.discovery_only,
             dry_run=self.dry_run,
             enable_corpus_synthesis=self.enable_corpus_synthesis,
@@ -1223,6 +1269,7 @@ class DemocritusQueryAgenticRunner:
             self.summary_path,
             {
                 "query_plan": asdict(plan),
+                "execution_mode": self.config.execution_mode,
                 "selected_documents": [asdict(item) for item in selected_documents],
                 "acquired_documents": [asdict(item) for item in acquired],
                 "pdf_dir": str(self.pdf_dir),
@@ -1261,6 +1308,9 @@ class DemocritusQueryAgenticRunner:
                 include_phase2=self.config.include_phase2,
                 auto_topics_from_pdf=self.config.auto_topics_from_pdf,
                 root_topic_strategy=self.config.root_topic_strategy,
+                depth_limit=self.config.depth_limit,
+                max_total_topics=self.config.max_total_topics,
+                statements_per_question=self.config.statements_per_question,
                 intra_document_shards=self.config.intra_document_shards,
                 enable_corpus_synthesis=self.config.enable_corpus_synthesis,
                 discover_existing_documents=not streaming,
@@ -1289,6 +1339,8 @@ class DemocritusQueryAgenticRunner:
             target_documents = len(sec_company_targets)
         else:
             target_documents = max(1, self.config.target_documents)
+        if self.config.execution_mode == "quick" and sec_cohort_mode != "latest_per_company":
+            target_documents = min(target_documents, 3)
         plan = QueryPlan(
             query=self.config.query,
             retrieval_query=retrieval_query,
@@ -1307,6 +1359,7 @@ class DemocritusQueryAgenticRunner:
                 f"[RETRIEVAL_QUERY] {plan.retrieval_query}",
                 f"[NORMALIZED] {plan.normalized_query}",
                 f"[KEYWORDS] {', '.join(plan.keyword_tokens) if plan.keyword_tokens else '(none)'}",
+                f"[EXECUTION_MODE] {self.config.execution_mode}",
                 f"[TARGET_DOCUMENTS] {plan.target_documents}",
                 f"[REQUESTED_FORMS] {', '.join(plan.requested_forms) if plan.requested_forms else '(none)'}",
                 f"[SEC_COMPANY_TARGETS] {' | '.join('/'.join(target) for target in plan.sec_company_targets) if plan.sec_company_targets else '(none)'}",
@@ -1874,6 +1927,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-phase2", action="store_true")
     parser.add_argument("--root-topic-strategy", default="v0_openai", choices=["v0_openai", "heuristic"])
     parser.add_argument("--no-auto-topics", action="store_true")
+    parser.add_argument("--depth-limit", type=int, default=3)
+    parser.add_argument("--max-total-topics", type=int, default=100)
+    parser.add_argument("--statements-per-question", type=int, default=2)
     parser.add_argument("--intra-document-shards", type=int, default=1)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -1971,6 +2027,9 @@ def main() -> None:
             include_phase2=not args.skip_phase2,
             auto_topics_from_pdf=not args.no_auto_topics,
             root_topic_strategy=args.root_topic_strategy,
+            depth_limit=args.depth_limit,
+            max_total_topics=args.max_total_topics,
+            statements_per_question=args.statements_per_question,
             intra_document_shards=args.intra_document_shards,
             dry_run=args.dry_run,
         )

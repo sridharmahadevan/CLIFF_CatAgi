@@ -24,6 +24,7 @@ try:
         QueryPlan,
         SECFilingRetrievalBackend,
         ScholarlyRetrievalBackend,
+        _derive_retrieval_query,
         infer_requested_result_count,
         _resolve_sec_user_agent,
     )
@@ -39,6 +40,7 @@ except ModuleNotFoundError:
         QueryPlan,
         SECFilingRetrievalBackend,
         ScholarlyRetrievalBackend,
+        _derive_retrieval_query,
         infer_requested_result_count,
         _resolve_sec_user_agent,
     )
@@ -52,6 +54,24 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
         )
 
         self.assertEqual(config.max_workers, 8)
+
+    def test_query_config_quick_mode_caps_document_count_and_disables_phase2(self) -> None:
+        config = DemocritusQueryAgenticConfig(
+            query="find me 10 recent studies on climate change",
+            outdir=Path("/tmp/democritus-query"),
+            execution_mode="quick",
+            target_documents=10,
+            max_docs=12,
+        ).resolved()
+
+        self.assertEqual(config.execution_mode, "quick")
+        self.assertEqual(config.target_documents, 3)
+        self.assertEqual(config.max_docs, 5)
+        self.assertFalse(config.include_phase2)
+        self.assertEqual(config.depth_limit, 2)
+        self.assertEqual(config.max_total_topics, 40)
+        self.assertEqual(config.statements_per_question, 1)
+        self.assertEqual(config.intra_document_shards, 2)
 
     def test_resolve_query_for_main_uses_cli_query_when_present(self) -> None:
         try:
@@ -168,6 +188,13 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
         )
 
         self.assertEqual(count, 5)
+
+    def test_derive_retrieval_query_preserves_glp1_and_drops_synthesis_boilerplate(self) -> None:
+        query = "Analyze 5 recent studies of the weight loss drug GLP-1 and synthesize what they jointly support"
+
+        retrieval_query = _derive_retrieval_query(query)
+
+        self.assertEqual(retrieval_query, "weight loss drug glp-1")
 
     def test_default_download_headers_use_browser_user_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

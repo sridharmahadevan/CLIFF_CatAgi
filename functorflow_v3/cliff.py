@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -200,6 +201,8 @@ def _build_worker_command(
         str(run_outdir),
         "--cycle-stage",
         cycle_stage,
+        "--execution-mode",
+        str(getattr(args, "execution_mode", "quick")),
         "--route",
         str(args.route),
         "--democritus-retrieval-backend",
@@ -271,11 +274,14 @@ def _launch_cliff_worker(
     stderr_path = run_outdir / f"cliff_worker_{cycle_stage}_stderr.log"
     stdout_handle = stdout_path.open("w", encoding="utf-8")
     stderr_handle = stderr_path.open("w", encoding="utf-8")
+    env = dict(os.environ)
+    env["PYTHONUNBUFFERED"] = "1"
     process = subprocess.Popen(
         _build_worker_command(args, run_outdir=run_outdir, query=query, cycle_stage=cycle_stage),
         stdout=stdout_handle,
         stderr=stderr_handle,
         text=True,
+        env=env,
     )
     return _ActiveCLIFFWorker(
         process=process,
@@ -642,6 +648,7 @@ def _parse_args() -> argparse.Namespace:
         help="Natural-language request for CLIFF. If omitted, CLIFF opens its GUI conscious interface.",
     )
     parser.add_argument("--outdir", required=True)
+    parser.add_argument("--execution-mode", choices=("quick", "deep"), default="quick")
     parser.add_argument("--route", choices=("auto", "democritus", "basket_rocket_sec", "culinary_tour", "product_feedback", "company_similarity", "course_demo"), default="auto")
     parser.add_argument("--democritus-manifest", default="")
     parser.add_argument("--democritus-source-pdf-root", default="")
@@ -726,6 +733,7 @@ def main() -> None:
                     ),
                     artifact_path=launcher_artifact_path,
                     session_mode=True,
+                    enable_execution_mode=True,
                     run_control_handler=lambda action, run_id: _handle_cliff_run_control(
                         action,
                         run_id,
@@ -750,10 +758,10 @@ def main() -> None:
                     submission = launcher.wait_for_next_submission(timeout=0.5)
                     if submission is None:
                         continue
-                    run_id, query = submission
+                    run_id, query, execution_mode = submission
                     _start_cliff_session_query(
                         launcher,
-                        args,
+                        argparse.Namespace(**dict(vars(args), execution_mode=execution_mode)),
                         run_id=run_id,
                         query=query,
                         active_runs=active_runs,

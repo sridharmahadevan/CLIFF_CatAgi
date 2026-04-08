@@ -44,6 +44,11 @@ class CLIFFTests(unittest.TestCase):
 
         self.assertEqual(decision.route_name, "culinary_tour")
 
+    def test_route_cliff_query_routes_seafood_tour_for_destination_request(self) -> None:
+        decision = module.route_cliff_query("Plan a seafood tour for Boston from July 5th-10th")
+
+        self.assertEqual(decision.route_name, "culinary_tour")
+
     def test_route_cliff_query_routes_course_demo_request(self) -> None:
         decision = module.route_cliff_query("Explain the Geometric Transformer on the Sudoku problem")
 
@@ -389,6 +394,62 @@ class CLIFFTests(unittest.TestCase):
                 "democritus/democritus_runs/democritus_gui.html"
             )
         )
+
+    def test_launch_cliff_worker_sets_unbuffered_python(self) -> None:
+        args = argparse.Namespace(
+            route="auto",
+            democritus_manifest="",
+            democritus_source_pdf_root="",
+            democritus_target_docs=None,
+            democritus_retrieval_backend="auto",
+            democritus_max_docs=None,
+            democritus_intra_document_shards=1,
+            democritus_discovery_only=False,
+            democritus_dry_run=False,
+            product_manifest="",
+            culinary_manifest="",
+            product_target_docs=None,
+            product_max_docs=None,
+            product_name="",
+            brand_name="",
+            analysis_question="",
+            product_discovery_only=False,
+            sec_target_filings=None,
+            sec_retrieval_user_agent="",
+            sec_form=[],
+            sec_company_limit=3,
+            sec_discovery_only=False,
+            sec_dry_run=False,
+            course_repo_root="",
+            course_book_pdf_path="",
+            course_no_execute=False,
+            course_timeout_sec=900,
+        )
+
+        captured: dict[str, object] = {}
+
+        class FakeProcess:
+            pass
+
+        def fake_popen(*popen_args, **popen_kwargs):
+            captured["args"] = popen_args
+            captured["kwargs"] = popen_kwargs
+            return FakeProcess()
+
+        with patch.object(module.subprocess, "Popen", side_effect=fake_popen):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                worker = module._launch_cliff_worker(
+                    args,
+                    run_outdir=Path(tmpdir),
+                    query="How similar is Adobe to Nike?",
+                    cycle_stage="first_pass",
+                )
+                if getattr(worker, "stdout_handle", None):
+                    worker.stdout_handle.close()
+                if getattr(worker, "stderr_handle", None):
+                    worker.stderr_handle.close()
+
+        self.assertEqual(captured["kwargs"]["env"]["PYTHONUNBUFFERED"], "1")
 
 
 if __name__ == "__main__":

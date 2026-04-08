@@ -136,7 +136,7 @@ def _extract_time_window(query: str) -> str:
 
 
 def _estimate_day_count(time_window: str) -> int:
-    match = re.search(r"(\d{1,2})\s*(?:[-–]|to)\s*(\d{1,2})", time_window)
+    match = re.search(r"(\d{1,2})(?:st|nd|rd|th)?\s*(?:[-–]|to)\s*(\d{1,2})(?:st|nd|rd|th)?", time_window)
     if not match:
         return 3
     start_day = int(match.group(1))
@@ -148,7 +148,7 @@ def _estimate_day_count(time_window: str) -> int:
 
 def _extract_destination(query: str) -> str:
     match = re.search(
-        rf"\b(?:in|to|around|of)\s+([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+)*?)(?=\s+(?:from\s+)?{_MONTH_PATTERN}\b|\s+\d{{1,2}}(?:st|nd|rd|th)?(?:\s*(?:[-–]|to)\s*\d{{1,2}}(?:st|nd|rd|th)?)?\b|\s+for\b|$)",
+        rf"\b(?:in|to|around|of|for)\s+([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+)*?)(?=\s+(?:from\s+)?{_MONTH_PATTERN}\b|\s+\d{{1,2}}(?:st|nd|rd|th)?(?:\s*(?:[-–]|to)\s*\d{{1,2}}(?:st|nd|rd|th)?)?\b|\s+for\b|$)",
         query,
         flags=re.I,
     )

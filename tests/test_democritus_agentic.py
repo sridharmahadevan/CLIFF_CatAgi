@@ -172,6 +172,20 @@ class DemocritusAgenticTests(unittest.TestCase):
             self.assertIn("topic_graph_agent.log", message)
             self.assertIn("topic graph exploded", message)
 
+    def test_stage_env_forces_python_unbuffered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = DemocritusAgenticRunner(
+                DemocritusAgenticConfig(
+                    outdir=Path(tmpdir),
+                    root_topics=("root topic",),
+                    include_phase2=False,
+                )
+            )
+
+            env = runner._stage_env()
+
+            self.assertEqual(env.get("PYTHONUNBUFFERED"), "1")
+
     def test_causal_question_agent_can_shard_within_one_document_and_merge_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             outdir = Path(tmpdir)
@@ -221,6 +235,106 @@ class DemocritusAgenticTests(unittest.TestCase):
             merged_lines = merged_path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(merged_lines), 3)
             self.assertTrue(all("--num-shards" in " ".join(cmd) for _, cmd in calls))
+
+    def test_topic_graph_agent_can_shard_within_one_document_and_merge_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir)
+            runner = DemocritusAgenticRunner(
+                DemocritusAgenticConfig(
+                    outdir=outdir,
+                    root_topics=("root topic one", "root topic two"),
+                    include_phase2=False,
+                    intra_document_shards=2,
+                )
+            )
+            runner.run_agent("root_topic_discovery_agent")
+
+            calls: list[tuple[str, list[str]]] = []
+            original = runner._run_subprocess_agent
+
+            def fake_run(agent_name, cmd, *, cwd, outputs):
+                del cwd
+                calls.append((agent_name, cmd))
+                graph_output = Path(outputs[0])
+                list_output = Path(outputs[1])
+                graph_output.parent.mkdir(parents=True, exist_ok=True)
+                list_output.parent.mkdir(parents=True, exist_ok=True)
+                shard_index = cmd[cmd.index("--shard-index") + 1]
+                topic = f"topic_{shard_index}"
+                graph_output.write_text(
+                    json.dumps({"topic": topic, "parent": None, "depth": 0}) + "\n",
+                    encoding="utf-8",
+                )
+                list_output.write_text(f"{topic}\t0\n", encoding="utf-8")
+                return tuple(str(path) for path in outputs)
+
+            runner._run_subprocess_agent = fake_run  # type: ignore[assignment]
+            try:
+                outputs = runner._run_topic_graph_agent()
+            finally:
+                runner._run_subprocess_agent = original  # type: ignore[assignment]
+
+            merged_graph = outdir / "topic_graph.jsonl"
+            merged_list = outdir / "topic_list.txt"
+            self.assertEqual(Path(outputs[0]).resolve(), merged_graph.resolve())
+            self.assertEqual(Path(outputs[1]).resolve(), merged_list.resolve())
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(all("--num-shards" in " ".join(cmd) for _, cmd in calls))
+            merged_topics = {json.loads(line)["topic"] for line in merged_graph.read_text(encoding="utf-8").splitlines()}
+            self.assertEqual(merged_topics, {"topic_0", "topic_1"})
+
+    def test_causal_statement_agent_passes_statement_budget_to_shards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir)
+            runner = DemocritusAgenticRunner(
+                DemocritusAgenticConfig(
+                    outdir=outdir,
+                    root_topics=("root topic",),
+                    include_phase2=False,
+                    intra_document_shards=2,
+                    statements_per_question=1,
+                )
+            )
+            (outdir / "causal_questions.jsonl").write_text(
+                json.dumps({"topic": "root topic", "path": ["root topic"], "questions": ["What increases warming?"]}) + "\n",
+                encoding="utf-8",
+            )
+
+            calls: list[tuple[str, list[str]]] = []
+            original = runner._run_subprocess_agent
+
+            def fake_run(agent_name, cmd, *, cwd, outputs):
+                del cwd
+                calls.append((agent_name, cmd))
+                output = Path(outputs[0])
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(
+                    json.dumps(
+                        {
+                            "topic": "root topic",
+                            "path": ["root topic"],
+                            "question": "What increases warming?",
+                            "statements": ["Emissions increase warming."],
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return tuple(str(path) for path in outputs)
+
+            runner._run_subprocess_agent = fake_run  # type: ignore[assignment]
+            try:
+                outputs = runner._run_causal_statement_agent()
+            finally:
+                runner._run_subprocess_agent = original  # type: ignore[assignment]
+
+            merged_path = outdir / "causal_statements.jsonl"
+            self.assertEqual(Path(outputs[0]).resolve(), merged_path.resolve())
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(all("--statements-per-question" in " ".join(cmd) for _, cmd in calls))
+            for _, cmd in calls:
+                arg_index = cmd.index("--statements-per-question")
+                self.assertEqual(cmd[arg_index + 1], "1")
 
     def test_manifold_visualization_agent_serializes_matplotlib_rendering(self) -> None:
         fake_matplotlib = ModuleType("matplotlib")
