@@ -333,8 +333,12 @@ class DemocritusAgenticTests(unittest.TestCase):
             self.assertEqual(len(calls), 2)
             self.assertTrue(all("--statements-per-question" in " ".join(cmd) for _, cmd in calls))
             for _, cmd in calls:
-                arg_index = cmd.index("--statements-per-question")
-                self.assertEqual(cmd[arg_index + 1], "1")
+                statements_arg_index = cmd.index("--statements-per-question")
+                batch_arg_index = cmd.index("--batch-size")
+                tokens_arg_index = cmd.index("--max-tokens")
+                self.assertEqual(cmd[statements_arg_index + 1], "1")
+                self.assertEqual(cmd[batch_arg_index + 1], "16")
+                self.assertEqual(cmd[tokens_arg_index + 1], "192")
 
     def test_manifold_visualization_agent_serializes_matplotlib_rendering(self) -> None:
         fake_matplotlib = ModuleType("matplotlib")

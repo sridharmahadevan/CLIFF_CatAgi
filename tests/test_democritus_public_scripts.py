@@ -16,7 +16,11 @@ from types import ModuleType
 
 class DemocritusPublicScriptTests(unittest.TestCase):
     def _with_public_script_module(self, module_name: str):
-        repo_root = Path("/Users/sridharmahadevan/Documents/Playground/Democritus_OpenAI")
+        candidates = (
+            Path("/Users/sridharmahadevan/Documents/GitHub/Democritus_OpenAI"),
+            Path("/Users/sridharmahadevan/Documents/Playground/Democritus_OpenAI"),
+        )
+        repo_root = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
         if str(repo_root) not in sys.path:
             sys.path.insert(0, str(repo_root))
             added = True
@@ -103,6 +107,58 @@ class DemocritusPublicScriptTests(unittest.TestCase):
             record = json.loads(output[0])
             self.assertEqual(record["question"], "good question")
             self.assertEqual(record["statements"], ["Rising temperature causes glacier melt."])
+        finally:
+            self._cleanup_public_script_module(
+                repo_root=repo_root,
+                added=added,
+                original_tqdm=original_tqdm,
+                original_requests=original_requests,
+            )
+
+    def test_causal_statement_builder_honors_batch_and_token_budget(self) -> None:
+        module, repo_root, added, original_tqdm, original_requests = self._with_public_script_module(
+            "scripts.causal_statement_builder"
+        )
+        try:
+            captured: dict[str, object] = {}
+
+            class FakeLLM:
+                def ask_batch(self, prompts):
+                    return ["Warming increases drought risk." for _ in prompts]
+
+                def ask(self, prompt):
+                    return "Warming increases drought risk."
+
+            original_factory = module.make_llm_client
+
+            def fake_factory(**kwargs):
+                captured.update(kwargs)
+                return FakeLLM()
+
+            module.make_llm_client = fake_factory
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cwd = os.getcwd()
+                os.chdir(tmpdir)
+                try:
+                    Path("causal_questions.jsonl").write_text(
+                        json.dumps(
+                            {
+                                "topic": "climate",
+                                "path": ["climate"],
+                                "questions": ["How does warming affect drought?"],
+                            }
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    module.main(statements_per_question=1, batch_size=32, max_tokens=72)
+                finally:
+                    os.chdir(cwd)
+                    module.make_llm_client = original_factory
+
+            self.assertEqual(captured["max_tokens"], 72)
+            self.assertEqual(captured["max_batch_size"], 32)
         finally:
             self._cleanup_public_script_module(
                 repo_root=repo_root,

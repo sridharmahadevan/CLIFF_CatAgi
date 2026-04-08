@@ -573,6 +573,8 @@ class DemocritusQueryAgenticConfig:
     depth_limit: int = 3
     max_total_topics: int = 100
     statements_per_question: int = 2
+    statement_batch_size: int = 16
+    statement_max_tokens: int = 192
     intra_document_shards: int = 1
     discovery_only: bool = False
     dry_run: bool = False
@@ -592,11 +594,18 @@ class DemocritusQueryAgenticConfig:
         depth_limit = max(1, int(self.depth_limit))
         max_total_topics = max(10, int(self.max_total_topics))
         statements_per_question = max(1, int(self.statements_per_question))
+        statement_batch_size = max(1, int(self.statement_batch_size))
+        statement_max_tokens = max(48, int(self.statement_max_tokens))
+        root_topic_strategy = str(self.root_topic_strategy)
         intra_document_shards = max(1, int(self.intra_document_shards))
         if execution_mode == "quick":
+            if root_topic_strategy == "v0_openai":
+                root_topic_strategy = "heuristic"
             depth_limit = min(depth_limit, 2)
             max_total_topics = min(max_total_topics, 40)
             statements_per_question = 1
+            statement_batch_size = max(statement_batch_size, 32)
+            statement_max_tokens = min(statement_max_tokens, 72)
             intra_document_shards = max(2, intra_document_shards)
         return DemocritusQueryAgenticConfig(
             query=self.query.strip(),
@@ -618,10 +627,12 @@ class DemocritusQueryAgenticConfig:
             agent_concurrency_limits=tuple(self.agent_concurrency_limits),
             include_phase2=(False if execution_mode == "quick" else self.include_phase2),
             auto_topics_from_pdf=self.auto_topics_from_pdf,
-            root_topic_strategy=self.root_topic_strategy,
+            root_topic_strategy=root_topic_strategy,
             depth_limit=depth_limit,
             max_total_topics=max_total_topics,
             statements_per_question=statements_per_question,
+            statement_batch_size=statement_batch_size,
+            statement_max_tokens=statement_max_tokens,
             intra_document_shards=intra_document_shards,
             discovery_only=self.discovery_only,
             dry_run=self.dry_run,
@@ -1311,6 +1322,8 @@ class DemocritusQueryAgenticRunner:
                 depth_limit=self.config.depth_limit,
                 max_total_topics=self.config.max_total_topics,
                 statements_per_question=self.config.statements_per_question,
+                statement_batch_size=self.config.statement_batch_size,
+                statement_max_tokens=self.config.statement_max_tokens,
                 intra_document_shards=self.config.intra_document_shards,
                 enable_corpus_synthesis=self.config.enable_corpus_synthesis,
                 discover_existing_documents=not streaming,
@@ -1930,6 +1943,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-limit", type=int, default=3)
     parser.add_argument("--max-total-topics", type=int, default=100)
     parser.add_argument("--statements-per-question", type=int, default=2)
+    parser.add_argument("--statement-batch-size", type=int, default=16)
+    parser.add_argument("--statement-max-tokens", type=int, default=192)
     parser.add_argument("--intra-document-shards", type=int, default=1)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -2030,6 +2045,8 @@ def main() -> None:
             depth_limit=args.depth_limit,
             max_total_topics=args.max_total_topics,
             statements_per_question=args.statements_per_question,
+            statement_batch_size=args.statement_batch_size,
+            statement_max_tokens=args.statement_max_tokens,
             intra_document_shards=args.intra_document_shards,
             dry_run=args.dry_run,
         )

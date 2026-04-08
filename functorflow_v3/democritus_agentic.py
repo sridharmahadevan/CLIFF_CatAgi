@@ -50,6 +50,8 @@ class DemocritusAgenticConfig:
     depth_limit: int = 3
     max_total_topics: int = 100
     statements_per_question: int = 2
+    statement_batch_size: int = 16
+    statement_max_tokens: int = 192
     manifold_mode: str = "full"
     topk: int = 200
     radii: str = "1,2,3"
@@ -85,6 +87,8 @@ class DemocritusAgenticConfig:
             depth_limit=self.depth_limit,
             max_total_topics=self.max_total_topics,
             statements_per_question=max(1, int(self.statements_per_question)),
+            statement_batch_size=max(1, int(self.statement_batch_size)),
+            statement_max_tokens=max(48, int(self.statement_max_tokens)),
             manifold_mode=self.manifold_mode,
             topk=self.topk,
             radii=self.radii,
@@ -774,6 +778,10 @@ class DemocritusAgenticRunner:
                 str(shard_output),
                 "--statements-per-question",
                 str(self.config.statements_per_question),
+                "--batch-size",
+                str(self.config.statement_batch_size),
+                "--max-tokens",
+                str(self.config.statement_max_tokens),
                 "--shard-index",
                 str(shard_index),
                 "--num-shards",

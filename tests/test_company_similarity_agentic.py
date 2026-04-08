@@ -6,6 +6,7 @@ import csv
 import io
 import threading
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -46,8 +47,13 @@ class CompanySimilarityAgenticTests(unittest.TestCase):
 
         self.assertEqual(profile["execution_mode"], "quick")
         self.assertGreaterEqual(int(profile["year_end"]) - int(profile["year_start"]), 0)
-        self.assertLessEqual(int(profile["year_end"]) - int(profile["year_start"]), 5)
-        self.assertEqual(profile["jobs"], 2)
+        self.assertLessEqual(int(profile["year_end"]) - int(profile["year_start"]), 3)
+        self.assertEqual(profile["jobs"], 3)
+        self.assertEqual(profile["llm_jobs"], 3)
+        self.assertEqual(profile["epochs"], 1)
+        self.assertEqual(profile["batch_size"], 6)
+        self.assertEqual(profile["skip_visualization"], 1)
+        self.assertEqual(profile["skip_branch_visuals"], 1)
 
     def test_build_telemetry_payload_reports_observed_parallelism(self) -> None:
         runner = module.CompanySimilarityAgenticRunner(
@@ -187,6 +193,7 @@ class CompanySimilarityAgenticTests(unittest.TestCase):
             self.assertIn("--edgar-ticker", command)
             self.assertIn("adbe", command)
             self.assertNotIn("--index-url", command)
+            self.assertIn("--skip-visuals", command)
             self.assertEqual(stream_label, "Adobe")
             self.assertEqual(combined_dir, (outdir / "runs_adobe_financial_filings" / "atlas_adobe_financial_combined").resolve())
             self.assertEqual(manifest_path.resolve(), (outdir / "add_company_analysis_manifest.json").resolve())
@@ -294,6 +301,142 @@ class CompanySimilarityAgenticTests(unittest.TestCase):
         self.assertIn("ensuring company analysis for Nike", joined)
         self.assertIn("company analysis ready for Adobe", joined)
         self.assertIn("company analysis ready for Nike", joined)
+
+    def test_quick_run_skips_visualization_subprocess(self) -> None:
+        runner = module.CompanySimilarityAgenticRunner(
+            "Compare Adobe and Nike",
+            Path("/tmp/company_similarity_quick"),
+            execution_mode="quick",
+        )
+        plan = module.CompanySimilarityQueryPlan(
+            query="Compare Adobe and Nike",
+            company_a="Adobe",
+            company_b="Nike",
+            company_a_slug="adobe",
+            company_b_slug="nike",
+        )
+        analysis_dir = runner.outdir / "adobe_vs_nike_functors"
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        (analysis_dir / "cross_company_functors_summary.md").write_text("summary", encoding="utf-8")
+        (analysis_dir / "cross_company_functors_manifest.json").write_text("{}", encoding="utf-8")
+        (analysis_dir / "cross_company_year_metrics.csv").write_text("cosine_similarity,js_divergence\n0.5,0.1\n", encoding="utf-8")
+        (analysis_dir / "naturality_defects.csv").write_text("naturality_defect_rel\n0.2\n", encoding="utf-8")
+
+        commands: list[list[str]] = []
+
+        def fake_run_command(command: list[str], *, cwd: Path, stream_label: str = "") -> None:
+            del cwd, stream_label
+            commands.append(command)
+
+        with mock.patch.object(module, "interpret_company_similarity_query", return_value=plan):
+            with mock.patch.object(module, "_resolve_brand_workspace_root", return_value=Path("/tmp/brand_root")):
+                with mock.patch.object(module, "repo_root", return_value=Path("/tmp/repo_root/subdir")):
+                    with mock.patch.object(module, "_select_python_for_brand_pipeline", return_value="python3"):
+                        with mock.patch.object(module, "_find_company_record") as find_mock:
+                            with mock.patch.object(module, "_preflight_company_similarity_backend"):
+                                with mock.patch.object(module, "_ensure_company_analyses", return_value={
+                                    "adobe": (Path("/tmp/adobe_combined"), None),
+                                    "nike": (Path("/tmp/nike_combined"), None),
+                                }):
+                                    with mock.patch.object(module, "_run_command", side_effect=fake_run_command):
+                                        with mock.patch.object(module, "_write_html_report", return_value=runner.outdir / "company_similarity.html"):
+                                            find_mock.side_effect = [
+                                                module._CompanyRecord("Adobe", "adobe", ("adobe",), outdir=Path("/tmp/adobe")),
+                                                module._CompanyRecord("Nike", "nike", ("nike",), outdir=Path("/tmp/nike")),
+                                            ]
+                                            result = runner.run()
+
+        self.assertIsNotNone(result.artifact_path)
+        self.assertEqual(len(commands), 1)
+        self.assertIn("brand_democritus_block_denoise.cross_company_functors", " ".join(commands[0]))
+
+    def test_run_heartbeat_refreshes_active_stage_telemetry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "company_similarity"
+            runner = module.CompanySimilarityAgenticRunner(
+                "How similar is Nike to Walmart?",
+                outdir,
+                execution_mode="quick",
+            )
+            runner._telemetry_heartbeat_interval_seconds = 0.01
+            plan = module.CompanySimilarityQueryPlan(
+                query="How similar is Nike to Walmart?",
+                company_a="Nike",
+                company_b="Walmart",
+                company_a_slug="nike",
+                company_b_slug="walmart",
+            )
+            nike = module._CompanyRecord("Nike", "nike", ("nike",), outdir=Path(tmpdir) / "nike")
+            walmart = module._CompanyRecord("Walmart", "walmart", ("walmart",), outdir=Path(tmpdir) / "walmart")
+            write_payloads: list[dict[str, object]] = []
+            original_write = runner._write_telemetry
+
+            def wrapped_write(**kwargs):
+                payload = original_write(**kwargs)
+                write_payloads.append(payload)
+                return payload
+
+            def fake_ensure_company_analyses(**kwargs):
+                on_record_complete = kwargs["on_record_complete"]
+                time.sleep(0.04)
+                on_record_complete(nike, Path(tmpdir) / "nike_combined")
+                time.sleep(0.05)
+                on_record_complete(walmart, Path(tmpdir) / "walmart_combined")
+                return {
+                    "nike": (Path(tmpdir) / "nike_combined", None),
+                    "walmart": (Path(tmpdir) / "walmart_combined", None),
+                }
+
+            def fake_run_command(command: list[str], *, cwd: Path, stream_label: str = "") -> None:
+                del cwd, stream_label
+                if "cross_company_functors" in " ".join(command):
+                    analysis_dir = outdir / "nike_vs_walmart_functors"
+                    analysis_dir.mkdir(parents=True, exist_ok=True)
+                    (analysis_dir / "cross_company_functors_summary.md").write_text("summary", encoding="utf-8")
+                    (analysis_dir / "cross_company_functors_manifest.json").write_text("{}", encoding="utf-8")
+                    (analysis_dir / "cross_company_year_metrics.csv").write_text(
+                        "cosine_similarity,js_divergence\n0.5,0.1\n",
+                        encoding="utf-8",
+                    )
+                    (analysis_dir / "naturality_defects.csv").write_text(
+                        "naturality_defect_rel\n0.2\n",
+                        encoding="utf-8",
+                    )
+
+            with mock.patch.object(module, "interpret_company_similarity_query", return_value=plan):
+                with mock.patch.object(module, "_resolve_brand_workspace_root", return_value=Path(tmpdir) / "brand_root"):
+                    with mock.patch.object(module, "repo_root", return_value=Path(tmpdir) / "repo_root" / "subdir"):
+                        with mock.patch.object(module, "_select_python_for_brand_pipeline", return_value="python3"):
+                            with mock.patch.object(module, "_find_company_record", side_effect=[nike, walmart]):
+                                with mock.patch.object(module, "_preflight_company_similarity_backend"):
+                                    with mock.patch.object(module, "_ensure_company_analyses", side_effect=fake_ensure_company_analyses):
+                                        with mock.patch.object(module, "_run_command", side_effect=fake_run_command):
+                                            with mock.patch.object(runner, "_write_telemetry", side_effect=wrapped_write):
+                                                with mock.patch.object(
+                                                    module,
+                                                    "_write_html_report",
+                                                    return_value=outdir / "company_similarity_dashboard.html",
+                                                ):
+                                                    result = runner.run()
+
+            self.assertIsNotNone(result.artifact_path)
+            running_payloads = [payload for payload in write_payloads if payload.get("status") == "running"]
+            self.assertGreaterEqual(len(running_payloads), 3)
+            self.assertTrue(
+                any(float(payload.get("elapsed_seconds") or 0.0) > 0.0 for payload in running_payloads),
+                "expected a heartbeat telemetry refresh with nonzero elapsed time",
+            )
+            self.assertTrue(
+                any(
+                    any(
+                        stage.get("status") == "active" and float(stage.get("duration_seconds") or 0.0) > 0.0
+                        for stage in payload.get("stages", [])
+                        if isinstance(stage, dict)
+                    )
+                    for payload in running_payloads
+                ),
+                "expected a heartbeat telemetry refresh with a ticking active stage duration",
+            )
 
 
 if __name__ == "__main__":

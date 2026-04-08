@@ -90,6 +90,8 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             self.assertEqual(document_runner.config.depth_limit, 2)
             self.assertEqual(document_runner.config.max_total_topics, 40)
             self.assertEqual(document_runner.config.statements_per_question, 2)
+            self.assertEqual(document_runner.config.statement_batch_size, 16)
+            self.assertEqual(document_runner.config.statement_max_tokens, 192)
 
     def test_batch_dry_run_produces_records_for_all_documents(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

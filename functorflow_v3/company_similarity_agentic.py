@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
@@ -201,13 +202,15 @@ def _company_similarity_mode_profile(execution_mode: str) -> dict[str, int | str
         }
     return {
         "execution_mode": normalized_mode,
-        "year_start": max(2002, current_year - 4),
+        "year_start": max(2002, current_year - 2),
         "year_end": current_year,
-        "jobs": 2,
-        "llm_jobs": 2,
+        "jobs": 3,
+        "llm_jobs": 3,
         "filings_profile": "fast",
-        "epochs": 2,
-        "batch_size": 4,
+        "epochs": 1,
+        "batch_size": 6,
+        "skip_visualization": 1,
+        "skip_branch_visuals": 1,
     }
 
 
@@ -583,6 +586,8 @@ def _ensure_company_analysis(
         command.extend(["--sec-user-agent", resolved_sec_user_agent])
     elif record.index_url:
         command.extend(["--index-url", record.index_url])
+    if int(profile.get("skip_branch_visuals", 0)):
+        command.append("--skip-visuals")
     _run_command(command, cwd=workspace_root, stream_label=record.brand)
     combined_dir = _existing_combined_dir(record)
     if combined_dir is None:
@@ -965,6 +970,8 @@ def _write_html_report(
 
 
 class CompanySimilarityAgenticRunner:
+    _telemetry_heartbeat_interval_seconds = 2.0
+
     def __init__(self, query: str, outdir: Path, *, sec_user_agent: str = "", execution_mode: str = "quick") -> None:
         self.query = " ".join(query.split())
         self.outdir = outdir.resolve()
@@ -1107,6 +1114,43 @@ class CompanySimilarityAgenticRunner:
         )
         return payload
 
+    def _start_telemetry_heartbeat(
+        self,
+        *,
+        telemetry_path: Path,
+        performance_dashboard_path: Path,
+        plan: CompanySimilarityQueryPlan,
+        started_at: float,
+        stage_state: dict[str, dict[str, object]],
+        heartbeat_state: dict[str, str],
+    ) -> tuple[threading.Event, threading.Thread]:
+        stop_event = threading.Event()
+
+        def _pump() -> None:
+            interval = max(float(self._telemetry_heartbeat_interval_seconds), 0.1)
+            while not stop_event.wait(interval):
+                try:
+                    self._write_telemetry(
+                        telemetry_path=telemetry_path,
+                        performance_dashboard_path=performance_dashboard_path,
+                        plan=plan,
+                        started_at=started_at,
+                        stage_state=stage_state,
+                        status=heartbeat_state.get("status", "running"),
+                        note=heartbeat_state.get("note", ""),
+                    )
+                except Exception:
+                    # Telemetry is diagnostic; keep the main run alive if a refresh fails.
+                    pass
+
+        thread = threading.Thread(
+            target=_pump,
+            name="company-similarity-telemetry-heartbeat",
+            daemon=True,
+        )
+        thread.start()
+        return stop_event, thread
+
     def run(self) -> CompanySimilarityRunResult:
         self.outdir.mkdir(parents=True, exist_ok=True)
         brand_root = _resolve_brand_workspace_root()
@@ -1124,6 +1168,13 @@ class CompanySimilarityAgenticRunner:
             "functor_analysis": {"label": "Cross-company functor comparison", "status": "pending", "started_at_epoch": 0.0, "ended_at_epoch": 0.0},
             "visualization": {"label": "Visualization", "status": "pending", "started_at_epoch": 0.0, "ended_at_epoch": 0.0},
         }
+        heartbeat_state = {
+            "status": "running",
+            "note": (
+                "CLIFF is resolving the two company branches and preparing the cross-company comparison "
+                f"in {self.execution_mode} mode."
+            ),
+        }
         self._log(f"resolved query to {plan.company_a} vs {plan.company_b}")
         self._write_telemetry(
             telemetry_path=telemetry_path,
@@ -1131,195 +1182,232 @@ class CompanySimilarityAgenticRunner:
             plan=plan,
             started_at=started_at,
             stage_state=stage_state,
-            status="running",
-            note=(
-                "CLIFF is resolving the two company branches and preparing the cross-company comparison "
-                f"in {self.execution_mode} mode."
-            ),
+            status=heartbeat_state["status"],
+            note=heartbeat_state["note"],
         )
-        record_a = _find_company_record(plan, brand_root, plan.company_a_slug)
-        record_b = _find_company_record(plan, brand_root, plan.company_b_slug)
-        _preflight_company_similarity_backend((record_a, record_b))
-        self._log(f"starting parallel company analysis for {record_a.brand} and {record_b.brand}")
-        stage_state["company_a_analysis"]["status"] = "active"
-        stage_state["company_a_analysis"]["started_at_epoch"] = time.time()
-        stage_state["company_b_analysis"]["status"] = "active"
-        stage_state["company_b_analysis"]["started_at_epoch"] = time.time()
-        self._write_telemetry(
+        heartbeat_stop, heartbeat_thread = self._start_telemetry_heartbeat(
             telemetry_path=telemetry_path,
             performance_dashboard_path=performance_dashboard_path,
             plan=plan,
             started_at=started_at,
             stage_state=stage_state,
-            status="running",
-            note=f"Running {record_a.brand} and {record_b.brand} analysis in parallel.",
+            heartbeat_state=heartbeat_state,
         )
-        analysis_results = _ensure_company_analyses(
-            records=(record_a, record_b),
-            sec_user_agent=self.sec_user_agent,
-            workspace_root=workspace_root,
-            python_executable=pipeline_python,
-            execution_mode=self.execution_mode,
-            log=self._log,
-            on_record_complete=lambda record, combined_dir: (
-                stage_state.__setitem__(
-                    "company_a_analysis" if record.slug == record_a.slug else "company_b_analysis",
-                    {
-                        **stage_state["company_a_analysis" if record.slug == record_a.slug else "company_b_analysis"],
-                        "status": "complete",
-                        "ended_at_epoch": time.time(),
-                    },
+        try:
+            record_a = _find_company_record(plan, brand_root, plan.company_a_slug)
+            record_b = _find_company_record(plan, brand_root, plan.company_b_slug)
+            _preflight_company_similarity_backend((record_a, record_b))
+            self._log(f"starting parallel company analysis for {record_a.brand} and {record_b.brand}")
+            stage_state["company_a_analysis"]["status"] = "active"
+            stage_state["company_a_analysis"]["started_at_epoch"] = time.time()
+            stage_state["company_b_analysis"]["status"] = "active"
+            stage_state["company_b_analysis"]["started_at_epoch"] = time.time()
+            heartbeat_state["note"] = f"Running {record_a.brand} and {record_b.brand} analysis in parallel."
+            self._write_telemetry(
+                telemetry_path=telemetry_path,
+                performance_dashboard_path=performance_dashboard_path,
+                plan=plan,
+                started_at=started_at,
+                stage_state=stage_state,
+                status=heartbeat_state["status"],
+                note=heartbeat_state["note"],
+            )
+            analysis_results = _ensure_company_analyses(
+                records=(record_a, record_b),
+                sec_user_agent=self.sec_user_agent,
+                workspace_root=workspace_root,
+                python_executable=pipeline_python,
+                execution_mode=self.execution_mode,
+                log=self._log,
+                on_record_complete=lambda record, combined_dir: (
+                    stage_state.__setitem__(
+                        "company_a_analysis" if record.slug == record_a.slug else "company_b_analysis",
+                        {
+                            **stage_state["company_a_analysis" if record.slug == record_a.slug else "company_b_analysis"],
+                            "status": "complete",
+                            "ended_at_epoch": time.time(),
+                        },
+                    ),
+                    heartbeat_state.__setitem__(
+                        "note",
+                        f"{record.brand} analysis finished; waiting for the remaining branch and comparison steps.",
+                    ),
+                    self._write_telemetry(
+                        telemetry_path=telemetry_path,
+                        performance_dashboard_path=performance_dashboard_path,
+                        plan=plan,
+                        started_at=started_at,
+                        stage_state=stage_state,
+                        status=heartbeat_state["status"],
+                        note=heartbeat_state["note"],
+                    ),
                 ),
+            )
+            combined_a, manifest_a = analysis_results[record_a.slug]
+            combined_b, manifest_b = analysis_results[record_b.slug]
+
+            analysis_dir = self.outdir / f"{plan.company_a_slug}_vs_{plan.company_b_slug}_functors"
+            analysis_dir.mkdir(parents=True, exist_ok=True)
+            summary_path = self.outdir / "company_similarity_summary.json"
+            self._log(f"running cross-company functor analysis in {analysis_dir}")
+            stage_state["functor_analysis"]["status"] = "active"
+            stage_state["functor_analysis"]["started_at_epoch"] = time.time()
+            heartbeat_state["note"] = "Both company branches are ready; running the cross-company functor comparison."
+            self._write_telemetry(
+                telemetry_path=telemetry_path,
+                performance_dashboard_path=performance_dashboard_path,
+                plan=plan,
+                started_at=started_at,
+                stage_state=stage_state,
+                status=heartbeat_state["status"],
+                note=heartbeat_state["note"],
+            )
+
+            _run_command(
+                [
+                    pipeline_python,
+                    "-m",
+                    "brand_democritus_block_denoise.cross_company_functors",
+                    "--company-a-dir",
+                    str(combined_a),
+                    "--company-b-dir",
+                    str(combined_b),
+                    "--company-a-name",
+                    plan.company_a_slug,
+                    "--company-b-name",
+                    plan.company_b_slug,
+                    "--outdir",
+                    str(analysis_dir),
+                    "--min-year",
+                    str(mode_profile["year_start"]),
+                    "--max-year",
+                    str(mode_profile["year_end"]),
+                ],
+                cwd=workspace_root,
+            )
+            self._log("cross-company functor analysis completed")
+            stage_state["functor_analysis"]["status"] = "complete"
+            stage_state["functor_analysis"]["ended_at_epoch"] = time.time()
+            if int(mode_profile.get("skip_visualization", 0)):
+                stage_state["visualization"]["status"] = "complete"
+                stage_state["visualization"]["started_at_epoch"] = time.time()
+                stage_state["visualization"]["ended_at_epoch"] = stage_state["visualization"]["started_at_epoch"]
+                self._log("quick mode: skipping cross-company visualization subprocess")
+            else:
+                stage_state["visualization"]["status"] = "active"
+                stage_state["visualization"]["started_at_epoch"] = time.time()
+                heartbeat_state["note"] = "Functor comparison is complete; rendering the visualization and summary outputs."
                 self._write_telemetry(
                     telemetry_path=telemetry_path,
                     performance_dashboard_path=performance_dashboard_path,
                     plan=plan,
                     started_at=started_at,
                     stage_state=stage_state,
-                    status="running",
-                    note=f"{record.brand} analysis finished; waiting for the remaining branch and comparison steps.",
-                ),
-            ),
-        )
-        combined_a, manifest_a = analysis_results[record_a.slug]
-        combined_b, manifest_b = analysis_results[record_b.slug]
+                    status=heartbeat_state["status"],
+                    note=heartbeat_state["note"],
+                )
+                _run_command(
+                    [
+                        pipeline_python,
+                        "-m",
+                        "brand_democritus_block_denoise.visualize_cross_company_functors",
+                        "--analysis-dir",
+                        str(analysis_dir),
+                        "--outdir",
+                        str(analysis_dir),
+                    ],
+                    cwd=workspace_root,
+                )
+                self._log("cross-company visualization completed")
+                stage_state["visualization"]["status"] = "complete"
+                stage_state["visualization"]["ended_at_epoch"] = time.time()
 
-        analysis_dir = self.outdir / f"{plan.company_a_slug}_vs_{plan.company_b_slug}_functors"
-        analysis_dir.mkdir(parents=True, exist_ok=True)
-        summary_path = self.outdir / "company_similarity_summary.json"
-        self._log(f"running cross-company functor analysis in {analysis_dir}")
-        stage_state["functor_analysis"]["status"] = "active"
-        stage_state["functor_analysis"]["started_at_epoch"] = time.time()
-        self._write_telemetry(
-            telemetry_path=telemetry_path,
-            performance_dashboard_path=performance_dashboard_path,
-            plan=plan,
-            started_at=started_at,
-            stage_state=stage_state,
-            status="running",
-            note="Both company branches are ready; running the cross-company functor comparison.",
-        )
-
-        _run_command(
-            [
-                pipeline_python,
-                "-m",
-                "brand_democritus_block_denoise.cross_company_functors",
-                "--company-a-dir",
-                str(combined_a),
-                "--company-b-dir",
-                str(combined_b),
-                "--company-a-name",
-                plan.company_a_slug,
-                "--company-b-name",
-                plan.company_b_slug,
-                "--outdir",
-                str(analysis_dir),
-                "--min-year",
-                str(mode_profile["year_start"]),
-                "--max-year",
-                str(mode_profile["year_end"]),
-            ],
-            cwd=workspace_root,
-        )
-        self._log("cross-company functor analysis completed")
-        stage_state["functor_analysis"]["status"] = "complete"
-        stage_state["functor_analysis"]["ended_at_epoch"] = time.time()
-        stage_state["visualization"]["status"] = "active"
-        stage_state["visualization"]["started_at_epoch"] = time.time()
-        self._write_telemetry(
-            telemetry_path=telemetry_path,
-            performance_dashboard_path=performance_dashboard_path,
-            plan=plan,
-            started_at=started_at,
-            stage_state=stage_state,
-            status="running",
-            note="Functor comparison is complete; rendering the visualization and summary outputs.",
-        )
-        _run_command(
-            [
-                pipeline_python,
-                "-m",
-                "brand_democritus_block_denoise.visualize_cross_company_functors",
-                "--analysis-dir",
-                str(analysis_dir),
-                "--outdir",
-                str(analysis_dir),
-            ],
-            cwd=workspace_root,
-        )
-        self._log("cross-company visualization completed")
-        stage_state["visualization"]["status"] = "complete"
-        stage_state["visualization"]["ended_at_epoch"] = time.time()
-
-        manifest = _safe_read_json(analysis_dir / "cross_company_functors_manifest.json")
-        year_metrics_path = analysis_dir / "cross_company_year_metrics.csv"
-        naturality_path = analysis_dir / "naturality_defects.csv"
-        if year_metrics_path.exists():
-            with year_metrics_path.open("r", encoding="utf-8", newline="") as handle:
-                year_rows = [dict(row) for row in csv.DictReader(handle)]
-            cosine_values = [float(row["cosine_similarity"]) for row in year_rows if str(row.get("cosine_similarity", "")).strip()]
-            js_values = [float(row["js_divergence"]) for row in year_rows if str(row.get("js_divergence", "")).strip()]
-            manifest["mean_yearly_cosine_similarity"] = (
-                round(sum(cosine_values) / len(cosine_values), 4) if cosine_values else math.nan
+            manifest = _safe_read_json(analysis_dir / "cross_company_functors_manifest.json")
+            year_metrics_path = analysis_dir / "cross_company_year_metrics.csv"
+            naturality_path = analysis_dir / "naturality_defects.csv"
+            if year_metrics_path.exists():
+                with year_metrics_path.open("r", encoding="utf-8", newline="") as handle:
+                    year_rows = [dict(row) for row in csv.DictReader(handle)]
+                cosine_values = [float(row["cosine_similarity"]) for row in year_rows if str(row.get("cosine_similarity", "")).strip()]
+                js_values = [float(row["js_divergence"]) for row in year_rows if str(row.get("js_divergence", "")).strip()]
+                manifest["mean_yearly_cosine_similarity"] = (
+                    round(sum(cosine_values) / len(cosine_values), 4) if cosine_values else math.nan
+                )
+                manifest["mean_yearly_js_divergence"] = (
+                    round(sum(js_values) / len(js_values), 4) if js_values else math.nan
+                )
+            if naturality_path.exists():
+                with naturality_path.open("r", encoding="utf-8", newline="") as handle:
+                    defect_rows = [dict(row) for row in csv.DictReader(handle)]
+                defect_values = [
+                    float(row["naturality_defect_rel"])
+                    for row in defect_rows
+                    if str(row.get("naturality_defect_rel", "")).strip()
+                ]
+                manifest["mean_relative_naturality_defect"] = (
+                    round(sum(defect_values) / len(defect_values), 4) if defect_values else math.nan
+                )
+            summary_markdown = (analysis_dir / "cross_company_functors_summary.md").read_text(encoding="utf-8")
+            heartbeat_state["status"] = "complete"
+            heartbeat_state["note"] = "The company similarity run completed and its performance telemetry has been finalized."
+            performance_payload = self._write_telemetry(
+                telemetry_path=telemetry_path,
+                performance_dashboard_path=performance_dashboard_path,
+                plan=plan,
+                started_at=started_at,
+                stage_state=stage_state,
+                status=heartbeat_state["status"],
+                note=heartbeat_state["note"],
             )
-            manifest["mean_yearly_js_divergence"] = (
-                round(sum(js_values) / len(js_values), 4) if js_values else math.nan
+            artifact_path = _write_html_report(
+                output_path=self.outdir / "company_similarity_dashboard.html",
+                analysis_dir=analysis_dir,
+                plan=plan,
+                summary_markdown=summary_markdown,
+                manifest=manifest,
+                performance_payload=performance_payload,
             )
-        if naturality_path.exists():
-            with naturality_path.open("r", encoding="utf-8", newline="") as handle:
-                defect_rows = [dict(row) for row in csv.DictReader(handle)]
-            defect_values = [
-                float(row["naturality_defect_rel"])
-                for row in defect_rows
-                if str(row.get("naturality_defect_rel", "")).strip()
-            ]
-            manifest["mean_relative_naturality_defect"] = (
-                round(sum(defect_values) / len(defect_values), 4) if defect_values else math.nan
+            payload = {
+                "query_plan": asdict(plan),
+                "execution_mode": self.execution_mode,
+                "year_window": {
+                    "start": mode_profile["year_start"],
+                    "end": mode_profile["year_end"],
+                },
+                "analysis_dir": str(analysis_dir),
+                "artifact_path": str(artifact_path),
+                "company_a_manifest_path": str(manifest_a) if manifest_a else None,
+                "company_b_manifest_path": str(manifest_b) if manifest_b else None,
+                "cross_company_manifest_path": str(analysis_dir / "cross_company_functors_manifest.json"),
+                "summary_markdown_path": str(analysis_dir / "cross_company_functors_summary.md"),
+                "dashboard_png_path": str(analysis_dir / "cross_company_functors_dashboard.png"),
+                "performance_dashboard_path": str(performance_dashboard_path),
+                "telemetry_path": str(telemetry_path),
+            }
+            summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            self._log(f"company similarity dashboard ready: {artifact_path}")
+            return CompanySimilarityRunResult(
+                query_plan=plan,
+                route_outdir=self.outdir,
+                analysis_dir=analysis_dir,
+                summary_path=summary_path,
+                artifact_path=artifact_path,
+                company_a_manifest_path=manifest_a,
+                company_b_manifest_path=manifest_b,
             )
-        summary_markdown = (analysis_dir / "cross_company_functors_summary.md").read_text(encoding="utf-8")
-        performance_payload = self._write_telemetry(
-            telemetry_path=telemetry_path,
-            performance_dashboard_path=performance_dashboard_path,
-            plan=plan,
-            started_at=started_at,
-            stage_state=stage_state,
-            status="complete",
-            note="The company similarity run completed and its performance telemetry has been finalized.",
-        )
-        artifact_path = _write_html_report(
-            output_path=self.outdir / "company_similarity_dashboard.html",
-            analysis_dir=analysis_dir,
-            plan=plan,
-            summary_markdown=summary_markdown,
-            manifest=manifest,
-            performance_payload=performance_payload,
-        )
-        payload = {
-            "query_plan": asdict(plan),
-            "execution_mode": self.execution_mode,
-            "year_window": {
-                "start": mode_profile["year_start"],
-                "end": mode_profile["year_end"],
-            },
-            "analysis_dir": str(analysis_dir),
-            "artifact_path": str(artifact_path),
-            "company_a_manifest_path": str(manifest_a) if manifest_a else None,
-            "company_b_manifest_path": str(manifest_b) if manifest_b else None,
-            "cross_company_manifest_path": str(analysis_dir / "cross_company_functors_manifest.json"),
-            "summary_markdown_path": str(analysis_dir / "cross_company_functors_summary.md"),
-            "dashboard_png_path": str(analysis_dir / "cross_company_functors_dashboard.png"),
-            "performance_dashboard_path": str(performance_dashboard_path),
-            "telemetry_path": str(telemetry_path),
-        }
-        summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        self._log(f"company similarity dashboard ready: {artifact_path}")
-        return CompanySimilarityRunResult(
-            query_plan=plan,
-            route_outdir=self.outdir,
-            analysis_dir=analysis_dir,
-            summary_path=summary_path,
-            artifact_path=artifact_path,
-            company_a_manifest_path=manifest_a,
-            company_b_manifest_path=manifest_b,
-        )
+        except Exception as exc:
+            heartbeat_state["status"] = "failed"
+            heartbeat_state["note"] = f"Company similarity run failed: {exc}"
+            self._write_telemetry(
+                telemetry_path=telemetry_path,
+                performance_dashboard_path=performance_dashboard_path,
+                plan=plan,
+                started_at=started_at,
+                stage_state=stage_state,
+                status=heartbeat_state["status"],
+                note=heartbeat_state["note"],
+            )
+            raise
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1.0)

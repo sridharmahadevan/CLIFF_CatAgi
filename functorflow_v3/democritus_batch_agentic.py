@@ -279,6 +279,8 @@ class DemocritusBatchConfig:
     depth_limit: int = 3
     max_total_topics: int = 100
     statements_per_question: int = 2
+    statement_batch_size: int = 16
+    statement_max_tokens: int = 192
     discover_existing_documents: bool = True
     allow_incremental_admission: bool = False
     idle_poll_seconds: float = 0.5
@@ -302,6 +304,8 @@ class DemocritusBatchConfig:
             depth_limit=max(1, int(self.depth_limit)),
             max_total_topics=max(10, int(self.max_total_topics)),
             statements_per_question=max(1, int(self.statements_per_question)),
+            statement_batch_size=max(1, int(self.statement_batch_size)),
+            statement_max_tokens=max(48, int(self.statement_max_tokens)),
             discover_existing_documents=self.discover_existing_documents,
             allow_incremental_admission=self.allow_incremental_admission,
             idle_poll_seconds=self.idle_poll_seconds,
@@ -432,6 +436,8 @@ class DemocritusBatchAgenticRunner:
                 depth_limit=self.config.depth_limit,
                 max_total_topics=self.config.max_total_topics,
                 statements_per_question=self.config.statements_per_question,
+                statement_batch_size=self.config.statement_batch_size,
+                statement_max_tokens=self.config.statement_max_tokens,
                 intra_document_shards=self.config.intra_document_shards,
             )
         )

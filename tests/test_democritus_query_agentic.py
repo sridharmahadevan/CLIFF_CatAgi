@@ -68,9 +68,12 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
         self.assertEqual(config.target_documents, 3)
         self.assertEqual(config.max_docs, 5)
         self.assertFalse(config.include_phase2)
+        self.assertEqual(config.root_topic_strategy, "heuristic")
         self.assertEqual(config.depth_limit, 2)
         self.assertEqual(config.max_total_topics, 40)
         self.assertEqual(config.statements_per_question, 1)
+        self.assertEqual(config.statement_batch_size, 32)
+        self.assertEqual(config.statement_max_tokens, 72)
         self.assertEqual(config.intra_document_shards, 2)
 
     def test_resolve_query_for_main_uses_cli_query_when_present(self) -> None:
