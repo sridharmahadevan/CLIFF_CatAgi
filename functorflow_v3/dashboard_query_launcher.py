@@ -749,8 +749,11 @@ class DashboardQueryLauncher:
         visualization_completed = False
         dashboard_ready = False
         staged_year_values: set[tuple[str, str]] = set()
+        atlas_year_values: set[tuple[str, str]] = set()
         latest_year = ""
+        latest_atlas_year = ""
         active_companies: list[str] = []
+        active_atlas_companies: list[str] = []
         latest_batch = ""
         recent_lines = [
             self._company_similarity_activity_label(line)
@@ -824,6 +827,19 @@ class DashboardQueryLauncher:
                 batch_match = re.search(r"year_(\d{4})", parsed_line)
                 if batch_match:
                     latest_batch = batch_match.group(1)
+            if "launching atlas build outdir=" in lowered:
+                year_match = re.search(r"year=(\d{4})", parsed_line)
+                if year_match:
+                    latest_atlas_year = year_match.group(1)
+                if stream_label and stream_label not in active_atlas_companies:
+                    active_atlas_companies.append(stream_label)
+            if "atlas build completed" in lowered:
+                year_match = re.search(r"year=(\d{4})", parsed_line)
+                if year_match:
+                    latest_atlas_year = year_match.group(1)
+                    atlas_year_values.add((stream_label or "unknown", latest_atlas_year))
+                if stream_label:
+                    active_atlas_companies = [item for item in active_atlas_companies if item.lower() != stream_label.lower()]
 
         company_a = company_a or "First company"
         company_b = company_b or "Second company"
@@ -869,10 +885,12 @@ class DashboardQueryLauncher:
             current_phase = "Dashboard ready"
         elif visualization_started:
             current_phase = "Rendering visualization"
-        elif latest_batch:
+        elif comparison_started and latest_batch:
             current_phase = f"Comparing fiscal year {latest_batch}"
         elif comparison_started:
             current_phase = "Comparing yearly functors"
+        elif active_atlas_companies:
+            current_phase = f"Building yearly atlas for {active_atlas_companies[0]}"
         elif len(active_companies) >= 2:
             current_phase = f"Building {company_a} and {company_b} in parallel"
         elif active_companies:
@@ -888,8 +906,11 @@ class DashboardQueryLauncher:
             "active_companies": tuple(active_companies),
             "active_company": " and ".join(active_companies),
             "staged_years": len(staged_year_values),
+            "atlas_years_ready": len(atlas_year_values),
             "latest_year": latest_year,
+            "latest_atlas_year": latest_atlas_year,
             "latest_batch": latest_batch,
+            "active_atlas_companies": tuple(active_atlas_companies),
             "recent_lines": tuple(recent_lines),
             "log_path": log_path,
             "telemetry": telemetry,
@@ -927,7 +948,8 @@ class DashboardQueryLauncher:
             ("Active builds", str(progress["active_company"] or "Waiting")),
             ("Observed parallelism", str(dict(progress.get("telemetry") or {}).get("timing", {}).get("observed_parallelism", 1.0))),
             ("Years staged", str(progress["staged_years"])),
-            ("Latest year", str(progress["latest_batch"] or progress["latest_year"] or "n/a")),
+            ("Atlas years ready", str(progress["atlas_years_ready"])),
+            ("Latest year", str(progress["latest_atlas_year"] or progress["latest_batch"] or progress["latest_year"] or "n/a")),
         ]
         metric_markup = "".join(
             '<div class="metric"><span class="metric-label">'
@@ -998,12 +1020,28 @@ class DashboardQueryLauncher:
             if not files
             else ""
         )
-        partial_preview_note = html.escape(
-            str(
-                partial_preview.get("note")
-                or "CLIFF is waiting for enough overlap to assemble an initial cross-company read."
-            )
+        partial_preview_note_text = str(
+            partial_preview.get("note")
+            or "CLIFF is waiting for enough overlap to assemble an initial cross-company read."
         )
+        if str(partial_preview.get("status") or "") == "warming_up":
+            atlas_years_ready = int(progress.get("atlas_years_ready") or 0)
+            latest_year_hint = str(progress.get("latest_atlas_year") or progress.get("latest_year") or "").strip()
+            if atlas_years_ready <= 0:
+                company_hint = str(partial_preview_note_text).replace("Waiting for the first usable yearly atlas slice from ", "").rstrip(".")
+                suffix = (
+                    f" Filings have been staged through {latest_year_hint}, but the first yearly atlas is not complete yet."
+                    if latest_year_hint
+                    else ""
+                )
+                partial_preview_note_text = f"Waiting for the first completed yearly atlas from {company_hint}.{suffix}".strip()
+            else:
+                partial_preview_note_text = (
+                    f"{atlas_years_ready} yearly atlas slice"
+                    f"{'s are' if atlas_years_ready != 1 else ' is'} ready, but CLIFF still needs overlap from both companies "
+                    "before it can assemble the initial similarity read."
+                )
+        partial_preview_note = html.escape(partial_preview_note_text)
         partial_preview_status = html.escape(str(partial_preview.get("status") or "warming_up").replace("_", " "))
         partial_preview_overlap = list(partial_preview.get("overlap_years") or [])
         partial_preview_basis = html.escape(str(partial_preview.get("shared_edge_basis_size") or 0))

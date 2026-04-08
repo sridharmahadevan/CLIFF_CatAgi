@@ -380,6 +380,8 @@ class DashboardQueryLauncherTests(unittest.TestCase):
                         "[company_similarity] ensuring company analysis for Tesla",
                         "[company_similarity][Apple] [run_brand_financial_filings] year=2002 staged_pdfs=1 rows=1",
                         "[company_similarity][Tesla] [run_brand_financial_filings] year=2002 staged_pdfs=1 rows=1",
+                        "[company_similarity][Apple] [run_brand_financial_filings] year=2002 launching atlas build outdir=/tmp/apple/atlas_apple_2002",
+                        "[company_similarity][Apple] [run_brand_financial_filings] year=2002 atlas build completed outdir=/tmp/apple/atlas_apple_2002",
                     ]
                 )
                 + "\n",
@@ -449,6 +451,8 @@ class DashboardQueryLauncherTests(unittest.TestCase):
             self.assertIn("Mean yearly cosine similarity: 0.62", rendered)
             self.assertIn("partial summary markdown", rendered)
             self.assertIn("Active builds", rendered)
+            self.assertIn("Atlas years ready", rendered)
+            self.assertIn(">1</strong>", rendered)
             self.assertIn("Observed parallelism", rendered)
             self.assertIn("1.75", rendered)
             self.assertIn("Observed work", rendered)
@@ -460,6 +464,71 @@ class DashboardQueryLauncherTests(unittest.TestCase):
             self.assertIn("cross_company_functors_summary.md", rendered)
             self.assertIn("company_similarity_telemetry.json", rendered)
             self.assertIn("/run-file?run_id=", rendered)
+
+    def test_render_run_artifact_page_clarifies_waiting_for_completed_yearly_atlas(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="How similar is Adobe to Walmart?",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "cliff_worker_first_pass_stdout.log").write_text(
+                "\n".join(
+                    [
+                        "[company_similarity] resolved query to Adobe vs Walmart",
+                        "[company_similarity] ensuring company analysis for Adobe",
+                        "[company_similarity] ensuring company analysis for Walmart",
+                        "[company_similarity][Adobe] [run_brand_financial_filings] year=2025 staged_pdfs=1 rows=1",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (root / "company_similarity").mkdir(parents=True, exist_ok=True)
+            (root / "company_similarity" / "company_similarity_telemetry.json").write_text(
+                json.dumps(
+                    {
+                        "partial_preview": {
+                            "status": "warming_up",
+                            "note": "Waiting for the first usable yearly atlas slice from Adobe.",
+                        },
+                        "timing": {
+                            "elapsed_human": "3m 29s",
+                            "eta_human": "9m 40s",
+                            "observed_work_human": "6m 57s",
+                            "observed_parallelism": 2.0,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            run_id = launcher.submit_query("How similar is Adobe to Walmart?")
+            launcher.update_session_run(
+                run_id,
+                status="running",
+                mind_layer="unconscious",
+                route_name="company_similarity",
+                note="Running.",
+                artifact_path=root / "company_similarity" / "company_similarity_dashboard.html",
+                outdir=root,
+            )
+
+            rendered = launcher._render_run_artifact_page(run_id)
+
+            self.assertIn("Waiting for the first completed yearly atlas from Adobe.", rendered)
+            self.assertIn("Filings have been staged through 2025, but the first yearly atlas is not complete yet.", rendered)
+            self.assertIn("Atlas years ready", rendered)
+            self.assertIn(">0</strong>", rendered)
 
     def test_render_run_artifact_page_rewrites_file_links_to_launcher_endpoint(self) -> None:
         launcher = DashboardQueryLauncher(
