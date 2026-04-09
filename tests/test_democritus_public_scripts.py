@@ -17,6 +17,7 @@ from types import ModuleType
 class DemocritusPublicScriptTests(unittest.TestCase):
     def _with_public_script_module(self, module_name: str):
         candidates = (
+            Path(__file__).resolve().parents[2] / "Democritus_OpenAI",
             Path("/Users/sridharmahadevan/Documents/GitHub/Democritus_OpenAI"),
             Path("/Users/sridharmahadevan/Documents/Playground/Democritus_OpenAI"),
         )
@@ -211,6 +212,54 @@ class DemocritusPublicScriptTests(unittest.TestCase):
                 record["questions"],
                 ["How does warming affect coral bleaching?", "What increases climate migration?"],
             )
+        finally:
+            self._cleanup_public_script_module(
+                repo_root=repo_root,
+                added=added,
+                original_tqdm=original_tqdm,
+                original_requests=original_requests,
+            )
+
+    def test_topic_graph_builder_falls_back_to_single_prompt_calls(self) -> None:
+        module, repo_root, added, original_tqdm, original_requests = self._with_public_script_module(
+            "scripts.topic_graph_builder"
+        )
+        try:
+            class FakeLLM:
+                def ask_batch(self, prompts):
+                    raise RuntimeError("400 Client Error: Bad Request")
+
+                def ask(self, prompt):
+                    if "bad root" in prompt:
+                        raise RuntimeError("still bad")
+                    return "ice sheet loss\nsea level rise"
+
+            original_factory = module.make_llm_client
+            module.make_llm_client = lambda **kwargs: FakeLLM()
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cwd = os.getcwd()
+                os.chdir(tmpdir)
+                try:
+                    Path("root_topics.txt").write_text("good root\nbad root\n", encoding="utf-8")
+                    module.main(
+                        topics_file="root_topics.txt",
+                        depth_limit=1,
+                        max_total_topics=10,
+                        topic_graph_path="topic_graph.jsonl",
+                        topic_list_path="topic_list.txt",
+                    )
+                    output = Path("topic_graph.jsonl").read_text(encoding="utf-8").splitlines()
+                finally:
+                    os.chdir(cwd)
+                    module.make_llm_client = original_factory
+
+            records = [json.loads(line) for line in output]
+            topics = {record["topic"] for record in records}
+            self.assertIn("good root", topics)
+            self.assertIn("bad root", topics)
+            self.assertIn("ice sheet loss", topics)
+            self.assertIn("sea level rise", topics)
         finally:
             self._cleanup_public_script_module(
                 repo_root=repo_root,
