@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 import sqlite3
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -53,6 +54,79 @@ class CorpusDisagreement:
         }
 
 
+@dataclass(frozen=True)
+class DiagnosticCorpusClaim:
+    subj: str
+    rel: str
+    obj: str
+    domain: str
+    statement: str
+    canonical_subj: str
+    canonical_rel: str
+    canonical_obj: str
+    document_support: int
+    claim_count: int
+    support_ratio: float
+    truth_value: str
+    supporting_runs: tuple[str, ...]
+    surface_form_count: int
+    exact_document_support_max: int
+    surface_forms: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+_LEADING_PHRASE_PREFIXES = (
+    "the use of ",
+    "use of ",
+    "treatment with ",
+    "treatment using ",
+    "administration of ",
+    "exposure to ",
+    "an increase in ",
+    "increase in ",
+    "a rise in ",
+    "rise in ",
+    "the effect of ",
+    "effect of ",
+)
+
+_CLAUSE_MARKERS = (
+    ", which ",
+    " which ",
+    " by ",
+    " due to ",
+    " through ",
+    " allowing ",
+    " because ",
+    " while ",
+    " when ",
+)
+
+_PHRASE_REWRITES: tuple[tuple[str, str], ...] = (
+    (r"\bglucagon[\s-]+like[\s-]+peptide[\s-]+1\b", "glp1"),
+    (r"\bglp[\s-]*1\b", "glp1"),
+    (r"\bglp1ras?\b", "glp1 receptor agonist"),
+    (r"\bglp1 receptor agonists\b", "glp1 receptor agonist"),
+    (r"\bglp1 medicines\b", "glp1 receptor agonist"),
+    (r"\bglp1 drugs\b", "glp1 receptor agonist"),
+    (r"\bindividuals\b", "people"),
+    (r"\bpatients\b", "people"),
+    (r"\bsubjects\b", "people"),
+    (r"\bpersons\b", "people"),
+)
+
+_RELATION_REWRITES = {
+    "leads_to": "causes",
+    "leads to": "causes",
+    "drives": "causes",
+    "results_in": "causes",
+    "results in": "causes",
+    "influences": "affects",
+}
+
+
 def build_democritus_corpus_synthesis(
     *,
     query: str,
@@ -70,6 +144,7 @@ def build_democritus_corpus_synthesis(
         total_documents = _scalar(connection, "SELECT COUNT(*) FROM documents")
         claims = _load_claims(connection, total_documents=total_documents)
         disagreements = _load_disagreements(connection, total_documents=total_documents)
+        diagnostic_claims = _load_diagnostic_claims(claims, total_documents=total_documents)
         contested_keys = {
             (item.subj, item.obj, item.domain)
             for item in disagreements
@@ -92,6 +167,7 @@ def build_democritus_corpus_synthesis(
         "n_documents": total_documents,
         "strongly_supported": [item.as_dict() for item in strong_claims[:12]],
         "weakly_supported": [item.as_dict() for item in weak_claims[:12]],
+        "diagnostic_supported": [item.as_dict() for item in diagnostic_claims[:12]],
         "disagreements": [item.as_dict() for item in disagreements[:8]],
         "study_cards": study_cards,
     }
@@ -127,6 +203,113 @@ def _support_truth_value(*, document_support: int, total_documents: int) -> str:
 def _split_runs(raw_runs: str) -> tuple[str, ...]:
     runs = [item.strip() for item in str(raw_runs or "").split(",") if item.strip()]
     return tuple(dict.fromkeys(runs))
+
+
+def _normalize_relation(value: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(value or "").strip().lower())
+    normalized = normalized.replace("-", "_")
+    return _RELATION_REWRITES.get(normalized, normalized)
+
+
+def _normalize_claim_text(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    for marker in _CLAUSE_MARKERS:
+        if marker in text:
+            prefix, _, _ = text.partition(marker)
+            if prefix.strip():
+                text = prefix.strip()
+                break
+    text = text.replace("_", " ")
+    text = re.sub(r"[\-/]+", " ", text)
+    text = re.sub(r"[^\w\s]", " ", text)
+    for pattern, replacement in _PHRASE_REWRITES:
+        text = re.sub(pattern, replacement, text)
+    text = re.sub(r"\s+", " ", text).strip()
+    changed = True
+    while changed and text:
+        changed = False
+        for prefix in _LEADING_PHRASE_PREFIXES:
+            if text.startswith(prefix):
+                text = text[len(prefix) :].strip()
+                changed = True
+    text = re.sub(r"^(?:the|a|an)\s+", "", text).strip()
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _load_diagnostic_claims(
+    claims: list[CorpusClaim],
+    *,
+    total_documents: int,
+) -> list[DiagnosticCorpusClaim]:
+    grouped: dict[tuple[str, str, str], list[CorpusClaim]] = {}
+    for item in claims:
+        key = (
+            _normalize_claim_text(item.subj),
+            _normalize_relation(item.rel),
+            _normalize_claim_text(item.obj),
+        )
+        if not all(key):
+            continue
+        grouped.setdefault(key, []).append(item)
+
+    diagnostic_claims: list[DiagnosticCorpusClaim] = []
+    for (canonical_subj, canonical_rel, canonical_obj), items in grouped.items():
+        supporting_runs: list[str] = []
+        seen_runs: set[str] = set()
+        for item in items:
+            for run_name in item.supporting_runs:
+                if run_name in seen_runs:
+                    continue
+                seen_runs.add(run_name)
+                supporting_runs.append(run_name)
+        document_support = len(supporting_runs)
+        if document_support < 2:
+            continue
+        surface_forms = tuple(
+            dict.fromkeys(f"{item.subj} {item.rel} {item.obj}" for item in items)
+        )
+        exact_document_support_max = max(int(item.document_support) for item in items)
+        if document_support <= exact_document_support_max and len(surface_forms) <= 1:
+            continue
+        representative = max(
+            items,
+            key=lambda item: (int(item.document_support), int(item.claim_count), len(item.statement)),
+        )
+        diagnostic_claims.append(
+            DiagnosticCorpusClaim(
+                subj=representative.subj,
+                rel=representative.rel,
+                obj=representative.obj,
+                domain=representative.domain,
+                statement=representative.statement,
+                canonical_subj=canonical_subj,
+                canonical_rel=canonical_rel,
+                canonical_obj=canonical_obj,
+                document_support=document_support,
+                claim_count=sum(int(item.claim_count) for item in items),
+                support_ratio=round(document_support / total_documents, 3) if total_documents else 0.0,
+                truth_value=_support_truth_value(
+                    document_support=document_support,
+                    total_documents=total_documents,
+                ),
+                supporting_runs=tuple(supporting_runs),
+                surface_form_count=len(surface_forms),
+                exact_document_support_max=exact_document_support_max,
+                surface_forms=surface_forms[:4],
+            )
+        )
+    diagnostic_claims.sort(
+        key=lambda item: (
+            -item.document_support,
+            -item.surface_form_count,
+            -item.claim_count,
+            item.subj.lower(),
+            item.obj.lower(),
+        )
+    )
+    return diagnostic_claims
 
 
 def _load_claims(connection: sqlite3.Connection, *, total_documents: int) -> list[CorpusClaim]:
@@ -305,6 +488,28 @@ def _render_disagreement_card(item: dict[str, object]) -> str:
     )
 
 
+def _render_diagnostic_claim_card(claim: dict[str, object]) -> str:
+    def esc(value: object) -> str:
+        return html.escape(str(value))
+
+    runs = ", ".join(claim.get("supporting_runs") or [])
+    surface_forms = claim.get("surface_forms") or []
+    surface_preview = " | ".join(str(item) for item in surface_forms[:3])
+    return (
+        '<article class="claim-card">'
+        f'<div class="claim-meta">diagnostic {esc(claim["truth_value"]).replace("_", " ")} · '
+        f'{esc(claim["document_support"])} study(s) · {esc(claim["surface_form_count"])} surface form(s)</div>'
+        f'<h3>{esc(claim["subj"])} {esc(claim["rel"])} {esc(claim["obj"])}</h3>'
+        f'<p>{esc(claim["statement"] or claim["domain"])}</p>'
+        f'<p class="trace">Canonical key: {esc(claim["canonical_subj"])} · {esc(claim["canonical_rel"])} · '
+        f'{esc(claim["canonical_obj"])}'
+        + (f" · Surface forms: {esc(surface_preview)}" if surface_preview else "")
+        + (f" · Runs: {esc(runs)}" if runs else "")
+        + f' · Best exact support: {esc(claim["exact_document_support_max"])} study(s)</p>'
+        "</article>"
+    )
+
+
 def _render_study_card(item: dict[str, object]) -> str:
     def esc(value: object) -> str:
         return html.escape(str(value))
@@ -338,6 +543,9 @@ def _render_dashboard_html(
     )
     weak_markup = "".join(_render_claim_card(item) for item in payload.get("weakly_supported") or []) or (
         '<div class="empty">No weakly supported claims were classified.</div>'
+    )
+    diagnostic_markup = "".join(_render_diagnostic_claim_card(item) for item in payload.get("diagnostic_supported") or []) or (
+        '<div class="empty">No additional claims were recovered by the relaxed diagnostic gluing pass.</div>'
     )
     disagreement_markup = "".join(_render_disagreement_card(item) for item in payload.get("disagreements") or []) or (
         '<div class="empty">No cross-study disagreements were detected in the current corpus graph.</div>'
@@ -408,6 +616,7 @@ def _render_dashboard_html(
             <span class="chip">{esc(payload.get("n_documents") or 0)} studies glued into one corpus object</span>
             <span class="chip">{esc(len(payload.get("strongly_supported") or []))} strongly supported claims</span>
             <span class="chip">{esc(len(payload.get("weakly_supported") or []))} weak or provisional claims</span>
+            <span class="chip">{esc(len(payload.get("diagnostic_supported") or []))} normalized diagnostic claims</span>
             <span class="chip">{esc(len(payload.get("disagreements") or []))} disagreement surfaces</span>
           </div>
           <div class="link-row">
@@ -432,6 +641,11 @@ def _render_dashboard_html(
           <p class="eyebrow">Weakly Supported</p>
           <div class="claim-grid">{weak_markup}</div>
         </section>
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Normalized Diagnostic Support</p>
+        <p class="trace">This relaxed pass ignores per-paper topic domains and merges lightweight language variants so we can see claims that almost glued but were split by wording drift. Treat these as diagnostic evidence, not the primary strict verdict.</p>
+        <div class="claim-grid" style="margin-top:12px;">{diagnostic_markup}</div>
       </section>
       <section class="section-grid">
         <section class="panel">

@@ -968,6 +968,7 @@ class DemocritusBatchAgenticRunner:
             "summary_path": str(self.corpus_synthesis_summary_path),
             "strongly_supported": list(payload.get("strongly_supported") or []),
             "weakly_supported": list(payload.get("weakly_supported") or []),
+            "diagnostic_supported": list(payload.get("diagnostic_supported") or []),
             "disagreements": list(payload.get("disagreements") or []),
         }
 

@@ -329,9 +329,81 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
                 connection.close()
             self.assertEqual(claim_count, 4)
             self.assertEqual(edge_support, 2)
+            synthesis_payload = json.loads(result.corpus_synthesis.summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(synthesis_payload["diagnostic_supported"], [])
             synthesis_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
             self.assertIn("Democritus Corpus Synthesis", synthesis_html)
             self.assertIn("carbon", synthesis_html)
+
+    def test_corpus_synthesis_surfaces_normalized_diagnostic_claims(self) -> None:
+        class FakeRunner:
+            def __init__(self, outdir: Path, name: str) -> None:
+                self.outdir = outdir
+                self.name = name
+
+            def _execute_agent(self, agent_name: str, frontier_index: int):
+                triples_path = self.outdir / "relational_triples.jsonl"
+                triples_path.parent.mkdir(parents=True, exist_ok=True)
+                payload_by_name = {
+                    "run_0": (
+                        '{"topic":"weight loss","path":["weight loss"],"question":"q","statement":"The use of GLP-1 receptor agonists increases weight loss.","subj":"the use of glp-1 receptor agonists","rel":"increases","obj":"weight loss","domain":"GLP-1 receptor agonists effects"}'
+                    ),
+                    "run_1": (
+                        '{"topic":"weight loss","path":["weight loss"],"question":"q","statement":"Treatment with glucagon-like peptide-1 receptor agonists increases weight loss.","subj":"treatment with glucagon-like peptide-1 receptor agonists","rel":"increases","obj":"weight loss","domain":"Glucagon-Like Peptide-1 receptor agonists"}'
+                    ),
+                }
+                triples_path.write_text(payload_by_name[self.name] + "\n", encoding="utf-8")
+                return DemocritusAgentRecord(
+                    agent_name=agent_name,
+                    frontier_index=frontier_index,
+                    status="ok",
+                    started_at=0.0,
+                    ended_at=1.0,
+                    outputs=(str(triples_path),),
+                    log_path=None,
+                    notes="",
+                )
+
+        class FakeBatchRunner(DemocritusBatchAgenticRunner):
+            def _discover_documents(self):
+                documents = []
+                for index in range(2):
+                    run_name = f"run_{index}"
+                    outdir = Path(self.config.outdir) / run_name
+                    documents.append(
+                        DemocritusBatchDocument(
+                            index=index,
+                            pdf_path=Path(f"/tmp/{run_name}.pdf"),
+                            run_name=run_name,
+                            outdir=outdir,
+                            runner=FakeRunner(outdir, run_name),
+                            plan=((SimpleNamespace(name="triple_extraction_agent"),),),
+                        )
+                    )
+                return tuple(documents)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = FakeBatchRunner(
+                DemocritusBatchConfig(
+                    pdf_dir=Path(tmpdir),
+                    outdir=Path(tmpdir) / "runs",
+                    max_workers=2,
+                    dry_run=False,
+                )
+            )
+            result = runner.run_with_artifacts()
+
+            self.assertIsNotNone(result.corpus_synthesis)
+            synthesis_payload = json.loads(result.corpus_synthesis.summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(synthesis_payload["strongly_supported"], [])
+            self.assertEqual(len(synthesis_payload["diagnostic_supported"]), 1)
+            diagnostic_claim = synthesis_payload["diagnostic_supported"][0]
+            self.assertEqual(diagnostic_claim["document_support"], 2)
+            self.assertEqual(diagnostic_claim["exact_document_support_max"], 1)
+            self.assertEqual(diagnostic_claim["canonical_subj"], "glp1 receptor agonist")
+            synthesis_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
+            self.assertIn("Normalized Diagnostic Support", synthesis_html)
+            self.assertIn("glp1 receptor agonist", synthesis_html)
 
     def test_incremental_corpus_synthesis_refreshes_only_when_new_triple_documents_arrive(self) -> None:
         class FakeRunner:
