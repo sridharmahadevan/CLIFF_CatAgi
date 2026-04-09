@@ -201,8 +201,26 @@ _NUMBER_WORDS = {
 
 _COUNT_FILLER_PATTERN = r"(?:\s+(?:recent|latest|new|top|best|peer[- ]reviewed|open[- ]access|additional|relevant|high[- ]quality))*"
 _URL_PATTERN = re.compile(r"https?://[^\s<>'\"\])]+")
-_DIRECT_PDF_TOKEN_PATTERN = re.compile(r"(?:file://)?(?:~|\.{1,2}/|/)[^\s`\"']+\.pdf", re.IGNORECASE)
-_DIRECT_LOCAL_TOKEN_PATTERN = re.compile(r"(?:file://)?(?:~|\.{1,2}/|/)[^\s`\"']+", re.IGNORECASE)
+_COMMON_ABSOLUTE_PATH_PREFIXES = (
+    "Users/",
+    "private/",
+    "Volumes/",
+    "Applications/",
+    "Library/",
+    "System/",
+    "opt/",
+    "etc/",
+    "var/",
+    "tmp/",
+)
+_DIRECT_PDF_TOKEN_PATTERN = re.compile(
+    r"(?:file://)?(?:~|\.{1,2}/|/|Users/|private/|Volumes/|Applications/|Library/|System/|opt/|etc/|var/|tmp/)[^\s`\"']+\.pdf",
+    re.IGNORECASE,
+)
+_DIRECT_LOCAL_TOKEN_PATTERN = re.compile(
+    r"(?:file://)?(?:~|\.{1,2}/|/|Users/|private/|Volumes/|Applications/|Library/|System/|opt/|etc/|var/|tmp/)[^\s`\"']+",
+    re.IGNORECASE,
+)
 _MAX_NON_PDF_REMOTE_BYTES = 2 * 1024 * 1024
 _HEAVY_NEWS_HOST_LIMITS = {
     "washingtonpost.com": 768 * 1024,
@@ -401,18 +419,7 @@ def _extract_direct_document_urls(query: str) -> tuple[str, ...]:
 
 
 def _extract_direct_document_paths(query: str, *, explicit_path: Path | None = None) -> tuple[str, ...]:
-    candidates: list[str] = []
-    if explicit_path is not None:
-        candidates.append(str(explicit_path))
-    text = str(query or "")
-    for pattern in (
-        r"`([^`]+\.pdf)`",
-        r'"([^"]+\.pdf)"',
-        r"'([^']+\.pdf)'",
-    ):
-        candidates.extend(match.group(1) for match in re.finditer(pattern, text, flags=re.IGNORECASE))
-    candidates.extend(_DIRECT_PDF_TOKEN_PATTERN.findall(text))
-
+    candidates = _direct_document_path_candidates(query, explicit_path=explicit_path)
     resolved_paths: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -425,6 +432,21 @@ def _extract_direct_document_paths(query: str, *, explicit_path: Path | None = N
         seen.add(resolved_str)
         resolved_paths.append(resolved_str)
     return tuple(resolved_paths)
+
+
+def _direct_document_path_candidates(query: str, *, explicit_path: Path | None = None) -> tuple[str, ...]:
+    candidates: list[str] = []
+    if explicit_path is not None:
+        candidates.append(str(explicit_path))
+    text = str(query or "")
+    for pattern in (
+        r"`([^`]+\.pdf)`",
+        r'"([^"]+\.pdf)"',
+        r"'([^']+\.pdf)'",
+    ):
+        candidates.extend(match.group(1) for match in re.finditer(pattern, text, flags=re.IGNORECASE))
+    candidates.extend(_DIRECT_PDF_TOKEN_PATTERN.findall(text))
+    return tuple(dict.fromkeys(candidate for candidate in candidates if str(candidate or "").strip()))
 
 
 def _extract_direct_document_directories(
@@ -464,6 +486,10 @@ def _normalize_direct_document_path(candidate: str) -> Path | None:
         return None
     if raw.startswith("file://"):
         raw = unquote(urlparse(raw).path)
+    for prefix in _COMMON_ABSOLUTE_PATH_PREFIXES:
+        if raw.startswith(prefix):
+            raw = "/" + raw
+            break
     path = Path(raw).expanduser()
     if not path.is_absolute():
         path = (Path.cwd() / path).resolve()
@@ -1731,6 +1757,10 @@ class DemocritusQueryAgenticRunner:
         sec_company_targets = _extract_sec_company_targets(self.config.query)
         sec_cohort_mode = _infer_sec_cohort_mode(self.config.query, sec_company_targets)
         direct_document_urls = _extract_direct_document_urls(self.config.query)
+        raw_direct_document_path_candidates = _direct_document_path_candidates(
+            self.config.query,
+            explicit_path=self.config.input_pdf_path,
+        )
         direct_document_paths = _extract_direct_document_paths(
             self.config.query,
             explicit_path=self.config.input_pdf_path,
@@ -1739,6 +1769,13 @@ class DemocritusQueryAgenticRunner:
             self.config.query,
             explicit_dir=self.config.input_pdf_dir,
         )
+        if raw_direct_document_path_candidates and not direct_document_paths:
+            joined_candidates = ", ".join(raw_direct_document_path_candidates[:3])
+            raise ValueError(
+                "Could not resolve the requested local PDF path. "
+                f"Tried: {joined_candidates}. Use an absolute path like `/Users/.../file.pdf` "
+                "or provide the uploaded file path explicitly."
+            )
         explicit_target_documents = infer_requested_result_count(
             self.config.query,
             nouns=("filing", "filings", "report", "reports", "document", "documents"),

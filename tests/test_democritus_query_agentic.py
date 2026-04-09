@@ -48,6 +48,7 @@ except ModuleNotFoundError:
         QueryPlan,
         SECFilingRetrievalBackend,
         ScholarlyRetrievalBackend,
+        _direct_document_path_candidates,
         _derive_retrieval_query,
         infer_requested_result_count,
         _resolve_sec_user_agent,
@@ -328,6 +329,47 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
             self.assertEqual(plan.direct_document_paths, (str(pdf_path.resolve()),))
             self.assertEqual(plan.target_documents, 1)
             self.assertEqual(runner._backend_name(), "direct_file")
+
+    def test_direct_document_path_candidates_accept_macos_path_without_leading_slash(self) -> None:
+        candidates = _direct_document_path_candidates(
+            "Analyze the PDF document at Users/sridharmahadevan/Desktop/WaPo_EmperorPenguin.pdf"
+        )
+
+        self.assertEqual(candidates, ("Users/sridharmahadevan/Desktop/WaPo_EmperorPenguin.pdf",))
+
+    def test_query_interpretation_recovers_macos_path_without_leading_slash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            real_pdf = Path(tmpdir) / "WaPo_EmperorPenguin.pdf"
+            real_pdf.write_bytes(b"%PDF-1.4\nuploaded\n")
+            query_path = str(real_pdf.resolve()).lstrip("/")
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query=f"Analyze the PDF document at {query_path}",
+                    outdir=Path(tmpdir) / "query_run",
+                    retrieval_backend="auto",
+                    dry_run=True,
+                )
+            )
+
+            plan = runner._run_query_interpretation_agent()
+
+            self.assertEqual(plan.direct_document_paths, (str(real_pdf.resolve()),))
+            self.assertEqual(plan.target_documents, 1)
+            self.assertEqual(runner._backend_name(), "direct_file")
+
+    def test_query_interpretation_fails_fast_for_unresolved_local_pdf_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query="Analyze the PDF document at Users/sridharmahadevan/Desktop/DoesNotExist.pdf",
+                    outdir=Path(tmpdir) / "query_run",
+                    retrieval_backend="auto",
+                    dry_run=True,
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "Could not resolve the requested local PDF path"):
+                runner._run_query_interpretation_agent()
 
     def test_query_interpretation_extracts_local_pdf_directory_and_counts_pdfs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
