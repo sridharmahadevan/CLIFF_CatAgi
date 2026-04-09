@@ -54,6 +54,16 @@ class CLIFFTests(unittest.TestCase):
 
         self.assertEqual(decision.route_name, "course_demo")
 
+    def test_route_cliff_query_routes_direct_document_url_to_democritus(self) -> None:
+        decision = module.route_cliff_query("Analyze the document at https://example.org/news/story-about-water")
+
+        self.assertEqual(decision.route_name, "democritus")
+
+    def test_route_cliff_query_routes_local_pdf_path_to_democritus(self) -> None:
+        decision = module.route_cliff_query("Analyze the PDF at /tmp/uploaded_paper.pdf")
+
+        self.assertEqual(decision.route_name, "democritus")
+
     def test_route_cliff_query_routes_sheaves_request_to_course_demo(self) -> None:
         decision = module.route_cliff_query("Explain sheaves via covers and gluing")
 
@@ -80,12 +90,34 @@ class CLIFFTests(unittest.TestCase):
     def test_build_worker_command_includes_query_and_outdir(self) -> None:
         args = argparse.Namespace(
             route="auto",
+            democritus_input_pdf="/tmp/uploaded_paper.pdf",
+            democritus_input_pdf_dir="/tmp/uploaded_pdfs",
             democritus_manifest="",
             democritus_source_pdf_root="",
             democritus_target_docs=None,
             democritus_retrieval_backend="auto",
             democritus_max_docs=None,
             democritus_intra_document_shards=1,
+            democritus_manifold_mode="moe",
+            democritus_topk=144,
+            democritus_radii="2,4",
+            democritus_maxnodes="12,24",
+            democritus_lambda_edge=0.4,
+            democritus_topk_models=7,
+            democritus_topk_claims=21,
+            democritus_alpha=1.3,
+            democritus_tier1=0.7,
+            democritus_tier2=0.2,
+            democritus_anchors="resveratrol, red wine",
+            democritus_title="Red Wine Democritus",
+            democritus_dedupe_focus=True,
+            democritus_require_anchor_in_focus=True,
+            democritus_focus_blacklist_regex="^generic$",
+            democritus_render_topk_pngs=True,
+            democritus_assets_dir="credibility_assets",
+            democritus_png_dpi=240,
+            democritus_write_deep_dive=True,
+            democritus_deep_dive_max_bullets=11,
             democritus_discovery_only=False,
             democritus_dry_run=False,
             product_manifest="",
@@ -117,6 +149,21 @@ class CLIFFTests(unittest.TestCase):
         self.assertIn("functorflow_v3.cliff_worker", command)
         self.assertIn("How easy is it to drive the Mazda Miata 3?", command)
         self.assertIn("/tmp/cliff-run-0001", command)
+        self.assertIn("--democritus-input-pdf", command)
+        self.assertIn("/tmp/uploaded_paper.pdf", command)
+        self.assertIn("--democritus-input-pdf-dir", command)
+        self.assertIn("/tmp/uploaded_pdfs", command)
+        self.assertIn("--democritus-manifold-mode", command)
+        self.assertIn("moe", command)
+        self.assertIn("--democritus-topk", command)
+        self.assertIn("144", command)
+        self.assertIn("--democritus-anchors", command)
+        self.assertIn("resveratrol, red wine", command)
+        self.assertIn("--democritus-title", command)
+        self.assertIn("Red Wine Democritus", command)
+        self.assertIn("--democritus-dedupe-focus", command)
+        self.assertIn("--democritus-render-topk-pngs", command)
+        self.assertIn("--democritus-write-deep-dive", command)
         self.assertIn("--culinary-manifest", command)
         self.assertIn("/tmp/culinary_stop_manifest.jsonl", command)
         self.assertIn("--course-timeout-sec", command)

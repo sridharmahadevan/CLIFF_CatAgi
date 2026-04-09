@@ -13,13 +13,17 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 try:
+    from functorflow_v3 import democritus_query_agentic as democritus_query_agentic_module
     from functorflow_v3 import DemocritusQueryAgenticConfig, DemocritusQueryAgenticRunner
     from functorflow_v3.democritus_agentic import DemocritusAgentRecord
     from functorflow_v3.democritus_batch_agentic import DemocritusBatchRecord, DemocritusBatchRunResult
     from functorflow_v3.democritus_query_agentic import (
         CrossrefRetrievalBackend,
         DemocritusEvidenceSnapshot,
+        DirectFileRetrievalBackend,
+        DirectURLRetrievalBackend,
         DiscoveredDocument,
+        DirectDirectoryRetrievalBackend,
         EuropePMCOARetrievalBackend,
         QueryPlan,
         SECFilingRetrievalBackend,
@@ -29,13 +33,17 @@ try:
         _resolve_sec_user_agent,
     )
 except ModuleNotFoundError:
+    from ..functorflow_v3 import democritus_query_agentic as democritus_query_agentic_module
     from ..functorflow_v3 import DemocritusQueryAgenticConfig, DemocritusQueryAgenticRunner
     from ..functorflow_v3.democritus_agentic import DemocritusAgentRecord
     from ..functorflow_v3.democritus_batch_agentic import DemocritusBatchRecord, DemocritusBatchRunResult
     from ..functorflow_v3.democritus_query_agentic import (
         CrossrefRetrievalBackend,
         DemocritusEvidenceSnapshot,
+        DirectFileRetrievalBackend,
+        DirectURLRetrievalBackend,
         DiscoveredDocument,
+        DirectDirectoryRetrievalBackend,
         EuropePMCOARetrievalBackend,
         QueryPlan,
         SECFilingRetrievalBackend,
@@ -75,6 +83,49 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
         self.assertEqual(config.statement_batch_size, 32)
         self.assertEqual(config.statement_max_tokens, 72)
         self.assertEqual(config.intra_document_shards, 2)
+
+    def test_query_config_quick_mode_preserves_full_document_pipeline_for_direct_pdf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_path = Path(tmpdir) / "uploaded_paper.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\nuploaded\n")
+
+            config = DemocritusQueryAgenticConfig(
+                query="Analyze this uploaded PDF",
+                outdir=Path(tmpdir) / "query_run",
+                execution_mode="quick",
+                input_pdf_path=pdf_path,
+            ).resolved()
+
+        self.assertEqual(config.execution_mode, "quick")
+        self.assertEqual(config.root_topic_strategy, "v0_openai")
+        self.assertFalse(config.include_phase2)
+        self.assertEqual(config.depth_limit, 3)
+        self.assertEqual(config.max_total_topics, 100)
+        self.assertEqual(config.statements_per_question, 2)
+        self.assertEqual(config.statement_batch_size, 16)
+        self.assertEqual(config.statement_max_tokens, 192)
+        self.assertEqual(config.intra_document_shards, 1)
+
+    def test_query_config_quick_mode_preserves_full_document_pipeline_for_direct_pdf_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_dir = Path(tmpdir) / "papers"
+            pdf_dir.mkdir()
+            (pdf_dir / "alpha.pdf").write_bytes(b"%PDF-1.4\nalpha\n")
+
+            config = DemocritusQueryAgenticConfig(
+                query="Analyze these uploaded PDFs",
+                outdir=Path(tmpdir) / "query_run",
+                execution_mode="quick",
+                input_pdf_dir=pdf_dir,
+            ).resolved()
+
+        self.assertEqual(config.execution_mode, "quick")
+        self.assertEqual(config.depth_limit, 3)
+        self.assertEqual(config.max_total_topics, 100)
+        self.assertEqual(config.statements_per_question, 2)
+        self.assertEqual(config.statement_batch_size, 16)
+        self.assertEqual(config.statement_max_tokens, 192)
+        self.assertEqual(config.intra_document_shards, 1)
 
     def test_resolve_query_for_main_uses_cli_query_when_present(self) -> None:
         try:
@@ -199,6 +250,13 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
 
         self.assertEqual(retrieval_query, "weight loss drug glp-1")
 
+    def test_derive_retrieval_query_drops_direct_document_url_only_boilerplate(self) -> None:
+        query = "Analyze the document at https://example.org/news/story-about-water"
+
+        retrieval_query = _derive_retrieval_query(query)
+
+        self.assertEqual(retrieval_query, "")
+
     def test_default_download_headers_use_browser_user_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             runner = DemocritusQueryAgenticRunner(
@@ -214,6 +272,396 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
 
             self.assertIn("Mozilla/5.0", headers["User-Agent"])
             self.assertEqual(headers["Referer"], "https://example.org/paper")
+
+    def test_query_interpretation_extracts_direct_document_url_and_forces_single_document(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query="Analyze the document at https://example.org/news/story-about-water",
+                    outdir=Path(tmpdir) / "query_run",
+                    retrieval_backend="auto",
+                    dry_run=True,
+                )
+            )
+
+            plan = runner._run_query_interpretation_agent()
+
+            self.assertEqual(plan.direct_document_urls, ("https://example.org/news/story-about-water",))
+            self.assertEqual(plan.target_documents, 1)
+            self.assertEqual(runner._backend_name(), "direct_url")
+
+    def test_query_interpretation_extracts_local_pdf_path_and_forces_single_document(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_path = Path(tmpdir) / "uploaded_paper.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\nuploaded\n")
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query=f"Analyze the PDF at `{pdf_path}`",
+                    outdir=Path(tmpdir) / "query_run",
+                    retrieval_backend="auto",
+                    dry_run=True,
+                )
+            )
+
+            plan = runner._run_query_interpretation_agent()
+
+            self.assertEqual(plan.direct_document_paths, (str(pdf_path.resolve()),))
+            self.assertEqual(plan.target_documents, 1)
+            self.assertEqual(runner._backend_name(), "direct_file")
+
+    def test_query_interpretation_uses_explicit_input_pdf_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_path = Path(tmpdir) / "uploaded_paper.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\nuploaded\n")
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query="Analyze this uploaded PDF",
+                    outdir=Path(tmpdir) / "query_run",
+                    input_pdf_path=pdf_path,
+                    retrieval_backend="auto",
+                    dry_run=True,
+                )
+            )
+
+            plan = runner._run_query_interpretation_agent()
+
+            self.assertEqual(plan.direct_document_paths, (str(pdf_path.resolve()),))
+            self.assertEqual(plan.target_documents, 1)
+            self.assertEqual(runner._backend_name(), "direct_file")
+
+    def test_query_interpretation_extracts_local_pdf_directory_and_counts_pdfs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_dir = Path(tmpdir) / "papers"
+            pdf_dir.mkdir()
+            (pdf_dir / "alpha.pdf").write_bytes(b"%PDF-1.4\nalpha\n")
+            (pdf_dir / "beta.pdf").write_bytes(b"%PDF-1.4\nbeta\n")
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query=f"Analyze the PDFs in `{pdf_dir}`",
+                    outdir=Path(tmpdir) / "query_run",
+                    retrieval_backend="auto",
+                    dry_run=True,
+                )
+            )
+
+            plan = runner._run_query_interpretation_agent()
+
+            self.assertEqual(plan.direct_document_directories, (str(pdf_dir.resolve()),))
+            self.assertEqual(plan.target_documents, 2)
+            self.assertEqual(runner._backend_name(), "direct_directory")
+
+    def test_query_interpretation_uses_explicit_input_pdf_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_dir = Path(tmpdir) / "papers"
+            pdf_dir.mkdir()
+            (pdf_dir / "alpha.pdf").write_bytes(b"%PDF-1.4\nalpha\n")
+            (pdf_dir / "beta.pdf").write_bytes(b"%PDF-1.4\nbeta\n")
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query="Analyze this uploaded PDF folder",
+                    outdir=Path(tmpdir) / "query_run",
+                    input_pdf_dir=pdf_dir,
+                    retrieval_backend="auto",
+                    dry_run=True,
+                )
+            )
+
+            plan = runner._run_query_interpretation_agent()
+
+            self.assertEqual(plan.direct_document_directories, (str(pdf_dir.resolve()),))
+            self.assertEqual(plan.target_documents, 2)
+            self.assertEqual(runner._backend_name(), "direct_directory")
+
+    def test_direct_url_backend_emits_direct_document_candidates(self) -> None:
+        backend = DirectURLRetrievalBackend()
+
+        results = backend.search(
+            QueryPlan(
+                query="Analyze the document at https://example.org/news/story-about-water",
+                normalized_query="",
+                keyword_tokens=(),
+                target_documents=1,
+                direct_document_urls=("https://example.org/news/story-about-water",),
+            ),
+            limit=1,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].retrieval_backend, "direct_url")
+        self.assertEqual(results[0].url, "https://example.org/news/story-about-water")
+        self.assertEqual(results[0].document_format, "unknown")
+
+    def test_direct_file_backend_emits_local_pdf_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_path = Path(tmpdir) / "uploaded_paper.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\nuploaded\n")
+            backend = DirectFileRetrievalBackend()
+
+            results = backend.search(
+                QueryPlan(
+                    query=f"Analyze the PDF at {pdf_path}",
+                    normalized_query="",
+                    keyword_tokens=(),
+                    target_documents=1,
+                    direct_document_paths=(str(pdf_path.resolve()),),
+                ),
+                limit=1,
+            )
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].retrieval_backend, "direct_file")
+            self.assertEqual(results[0].source_path, str(pdf_path.resolve()))
+            self.assertEqual(results[0].document_format, "pdf")
+
+    def test_direct_directory_backend_emits_local_pdf_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pdf_dir = Path(tmpdir) / "papers"
+            pdf_dir.mkdir()
+            alpha = pdf_dir / "alpha.pdf"
+            beta = pdf_dir / "nested" / "beta.pdf"
+            beta.parent.mkdir()
+            alpha.write_bytes(b"%PDF-1.4\nalpha\n")
+            beta.write_bytes(b"%PDF-1.4\nbeta\n")
+            backend = DirectDirectoryRetrievalBackend()
+
+            results = backend.search(
+                QueryPlan(
+                    query=f"Analyze the PDFs in {pdf_dir}",
+                    normalized_query="",
+                    keyword_tokens=(),
+                    target_documents=2,
+                    direct_document_directories=(str(pdf_dir.resolve()),),
+                ),
+                limit=2,
+            )
+
+            self.assertEqual(len(results), 2)
+            self.assertTrue(all(item.retrieval_backend == "direct_directory" for item in results))
+            self.assertEqual({item.source_path for item in results}, {str(alpha.resolve()), str(beta.resolve())})
+
+    def test_runner_materializes_local_pdf_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_pdf = Path(tmpdir) / "uploaded_paper.pdf"
+            source_pdf.write_bytes(b"%PDF-1.4\nuploaded\n")
+            outdir = Path(tmpdir) / "query_run"
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query=f"Analyze the PDF at `{source_pdf}`",
+                    outdir=outdir,
+                    retrieval_backend="auto",
+                    dry_run=True,
+                    auto_topics_from_pdf=False,
+                )
+            )
+
+            plan = runner._run_query_interpretation_agent()
+            selected, acquired, *_ = runner._run_corpus_materialization_agent(plan)
+
+            self.assertEqual(len(selected), 1)
+            self.assertEqual(len(acquired), 1)
+            acquired_pdf = Path(acquired[0].acquired_pdf_path)
+            self.assertTrue(acquired_pdf.exists())
+            self.assertEqual(acquired_pdf.read_bytes(), source_pdf.read_bytes())
+
+    def test_runner_materializes_html_article_url_into_extractable_pdf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "query_run"
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query="Analyze the document at https://example.org/news/story-about-water",
+                    outdir=outdir,
+                    retrieval_backend="auto",
+                    dry_run=True,
+                )
+            )
+            plan = runner._run_query_interpretation_agent()
+            article_html = """
+                <html>
+                  <head><title>Winter Storms Ease Drought in California</title></head>
+                  <body>
+                    <article>
+                      <p>Winter storms improved reservoir levels across California.</p>
+                      <p>The article links heavy rainfall to lower drought pressure and reduced wildfire risk.</p>
+                    </article>
+                  </body>
+                </html>
+            """
+            runner._fetch_url_payload = lambda url, referer=None: (  # type: ignore[assignment]
+                article_html.encode("utf-8"),
+                "text/html; charset=utf-8",
+                url,
+            )
+
+            selected, acquired, *_ = runner._run_corpus_materialization_agent(plan)
+
+            self.assertEqual(len(selected), 1)
+            self.assertEqual(len(acquired), 1)
+            acquired_pdf = Path(acquired[0].acquired_pdf_path)
+            self.assertTrue(acquired_pdf.exists())
+            self.assertTrue(acquired_pdf.read_bytes().startswith(b"%PDF-"))
+            extracted_text = runner._extract_pdf_text_for_validation(acquired_pdf)
+            if extracted_text is not None:
+                self.assertIn("Winter storms improved reservoir levels across California.", extracted_text)
+                self.assertIn("reduced wildfire risk", extracted_text)
+
+    def test_direct_url_fetch_retries_with_longer_timeouts_after_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query="Analyze the document at https://example.org/story",
+                    outdir=Path(tmpdir) / "query_run",
+                    retrieval_backend="auto",
+                    retrieval_timeout_seconds=7.0,
+                    dry_run=True,
+                )
+            )
+            seen_timeouts: list[float] = []
+
+            class FakeHeaders:
+                def get(self, key: str, default=None):
+                    if key.lower() == "content-type":
+                        return "text/html; charset=utf-8"
+                    return default
+
+            class FakeResponse:
+                headers = FakeHeaders()
+
+                def geturl(self) -> str:
+                    return "https://example.org/story"
+
+                def read(self, size: int = -1) -> bytes:
+                    del size
+                    return b"<html><body><article>hello</article></body></html>"
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            def fake_urlopen(request, timeout):
+                del request
+                seen_timeouts.append(timeout)
+                if len(seen_timeouts) == 1:
+                    raise TimeoutError("The read operation timed out")
+                return FakeResponse()
+
+            with patch.object(democritus_query_agentic_module, "urlopen", side_effect=fake_urlopen):
+                payload, content_type, source_reference = runner._fetch_url_payload("https://example.org/story")
+
+            self.assertEqual(payload, b"<html><body><article>hello</article></body></html>")
+            self.assertEqual(content_type, "text/html; charset=utf-8")
+            self.assertEqual(source_reference, "https://example.org/story")
+            self.assertEqual(seen_timeouts, [7.0, 45.0])
+
+    def test_non_pdf_remote_payload_reads_are_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query="Analyze the document at https://example.org/story",
+                    outdir=Path(tmpdir) / "query_run",
+                    retrieval_backend="auto",
+                    dry_run=True,
+                )
+            )
+
+            class FakeResponse:
+                def __init__(self) -> None:
+                    self.sizes: list[int] = []
+
+                def read(self, size: int = -1) -> bytes:
+                    self.sizes.append(size)
+                    return b"<html><body><article><p>ok</p></article></body></html>" if len(self.sizes) == 1 else b""
+
+            response = FakeResponse()
+
+            payload = runner._read_remote_payload(
+                response,
+                content_type="text/html; charset=utf-8",
+                source_reference="https://example.org/story",
+            )
+
+            self.assertIn(b"<article>", payload)
+            self.assertEqual(response.sizes, [democritus_query_agentic_module._NON_PDF_STREAM_CHUNK_BYTES])
+
+    def test_washington_post_uses_smaller_non_pdf_byte_budget(self) -> None:
+        limit = democritus_query_agentic_module.DemocritusQueryAgenticRunner._non_pdf_remote_byte_limit(
+            "https://www.washingtonpost.com/wellness/2025/12/26/dark-chocolate-health-benefits/"
+        )
+
+        self.assertEqual(limit, 768 * 1024)
+
+    def test_washington_post_direct_url_request_specs_include_range_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query="Analyze the document at https://www.washingtonpost.com/wellness/2025/12/26/dark-chocolate-health-benefits/",
+                    outdir=Path(tmpdir) / "query_run",
+                    retrieval_backend="auto",
+                    dry_run=True,
+                )
+            )
+
+            specs = runner._direct_document_request_specs(
+                "https://www.washingtonpost.com/wellness/2025/12/26/dark-chocolate-health-benefits/"
+            )
+
+            self.assertEqual(len(specs), 3)
+            self.assertTrue(any("Range" in headers for headers in specs))
+            self.assertTrue(any(headers.get("Connection") == "close" for headers in specs))
+
+    def test_washington_post_direct_url_uses_host_specific_timeouts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query="Analyze the document at https://www.washingtonpost.com/wellness/2025/12/26/dark-chocolate-health-benefits/",
+                    outdir=Path(tmpdir) / "query_run",
+                    retrieval_backend="auto",
+                    retrieval_timeout_seconds=7.0,
+                    dry_run=True,
+                )
+            )
+
+            timeouts = runner._request_timeouts_for_url(
+                "https://www.washingtonpost.com/wellness/2025/12/26/dark-chocolate-health-benefits/",
+                kind="direct_url",
+            )
+
+            self.assertEqual(timeouts, (8.0, 20.0, 40.0))
+
+    def test_non_pdf_chunked_reader_stops_once_article_markup_is_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query="Analyze the document at https://example.org/story",
+                    outdir=Path(tmpdir) / "query_run",
+                    retrieval_backend="auto",
+                    dry_run=True,
+                )
+            )
+
+            class FakeResponse:
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                def read(self, size: int = -1) -> bytes:
+                    self.calls += 1
+                    if self.calls == 1:
+                        return (
+                            b"<html><body><article><p>One</p><p>Two</p><p>Three</p>"
+                            b"<p>Four</p><p>Five</p><p>Six</p></article>"
+                        )
+                    return b""
+
+            response = FakeResponse()
+
+            payload = runner._read_non_pdf_payload_chunked(
+                response,
+                source_reference="https://example.org/story",
+            )
+
+            self.assertIn(b"</article>", payload)
+            self.assertEqual(response.calls, 1)
 
     def test_query_runner_acquires_manifest_documents_and_hands_off_to_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1000,6 +1448,9 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
                     raise RuntimeError("HTTP Error 403: Forbidden")
                 target_path.write_bytes(b"%PDF-1.4\n")
 
+            def _validate_materialized_pdf(self, path: Path) -> None:
+                self._validate_pdf_file(path)
+
         with tempfile.TemporaryDirectory() as tmpdir:
             outdir = Path(tmpdir) / "query_run"
             runner = FallbackRunner(
@@ -1017,6 +1468,70 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
 
             self.assertEqual(len(result.selected_documents), 1)
             self.assertEqual(result.selected_documents[0].title, "Working PDF")
+            self.assertEqual(len(result.acquired_documents), 1)
+            self.assertTrue(Path(result.acquired_documents[0].acquired_pdf_path).exists())
+
+    def test_materialization_falls_back_to_landing_page_when_pdf_link_is_broken(self) -> None:
+        class FallbackRunner(DemocritusQueryAgenticRunner):
+            def _provider(self):
+                class FakeProvider:
+                    backend_name = "scholarly"
+
+                    def search(self, plan: QueryPlan, *, limit: int):
+                        del plan, limit
+                        return (
+                            DiscoveredDocument(
+                                title="Fallback Article",
+                                score=9.0,
+                                retrieval_backend="crossref",
+                                download_url="https://example.org/broken.pdf",
+                                url="https://example.org/article",
+                                document_format="pdf",
+                            ),
+                        )
+
+                return FakeProvider()
+
+            def _download_file(self, url: str, target_path: Path, *, referer: str | None = None) -> None:
+                del url, target_path, referer
+                raise RuntimeError("HTTP Error 404: Not Found")
+
+            def _validate_materialized_pdf(self, path: Path) -> None:
+                self._validate_pdf_file(path)
+
+            def _fetch_url_payload(
+                self,
+                url: str,
+                *,
+                referer: str | None = None,
+            ) -> tuple[bytes, str, str]:
+                del referer
+                if url != "https://example.org/article":
+                    raise AssertionError(f"unexpected fallback URL: {url}")
+                return (
+                    b"<html><head><title>Fallback Article</title></head>"
+                    b"<body><article><p>GLP-1 treatment reduces body weight.</p></article></body></html>",
+                    "text/html; charset=utf-8",
+                    url,
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "query_run"
+            runner = FallbackRunner(
+                DemocritusQueryAgenticConfig(
+                    query="glp-1 weight loss",
+                    outdir=outdir,
+                    target_documents=1,
+                    retrieval_backend="scholarly",
+                    include_phase2=False,
+                    root_topic_strategy="heuristic",
+                    dry_run=True,
+                )
+            )
+            result = runner.run()
+
+            self.assertEqual(len(result.selected_documents), 1)
+            self.assertEqual(result.selected_documents[0].title, "Fallback Article")
             self.assertEqual(len(result.acquired_documents), 1)
             self.assertTrue(Path(result.acquired_documents[0].acquired_pdf_path).exists())
 

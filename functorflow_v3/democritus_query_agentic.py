@@ -8,13 +8,16 @@ import json
 import os
 import re
 import shutil
+import socket
+import textwrap
 import webbrowser
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
+from html import unescape
 from pathlib import Path
 from typing import Callable, Protocol
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree as ET
@@ -88,6 +91,14 @@ _STOPWORDS = {
     "analyze",
     "analyzed",
     "analysis",
+    "article",
+    "articles",
+    "at",
+    "document",
+    "documents",
+    "page",
+    "pages",
+    "url",
 }
 
 _SEC_COMPANY_QUERY_STOPWORDS = {
@@ -189,6 +200,17 @@ _NUMBER_WORDS = {
 }
 
 _COUNT_FILLER_PATTERN = r"(?:\s+(?:recent|latest|new|top|best|peer[- ]reviewed|open[- ]access|additional|relevant|high[- ]quality))*"
+_URL_PATTERN = re.compile(r"https?://[^\s<>'\"\])]+")
+_DIRECT_PDF_TOKEN_PATTERN = re.compile(r"(?:file://)?(?:~|\.{1,2}/|/)[^\s`\"']+\.pdf", re.IGNORECASE)
+_DIRECT_LOCAL_TOKEN_PATTERN = re.compile(r"(?:file://)?(?:~|\.{1,2}/|/)[^\s`\"']+", re.IGNORECASE)
+_MAX_NON_PDF_REMOTE_BYTES = 2 * 1024 * 1024
+_HEAVY_NEWS_HOST_LIMITS = {
+    "washingtonpost.com": 768 * 1024,
+}
+_NON_PDF_STREAM_CHUNK_BYTES = 64 * 1024
+_HEAVY_NEWS_HOST_TIMEOUTS = {
+    "washingtonpost.com": (8.0, 20.0, 40.0),
+}
 
 
 def _slugify(name: str, maxlen: int = 80) -> str:
@@ -321,10 +343,15 @@ class QueryPlan:
     retrieval_query: str = ""
     sec_company_targets: tuple[tuple[str, ...], ...] = ()
     sec_cohort_mode: str = "ranked"
+    direct_document_urls: tuple[str, ...] = ()
+    direct_document_paths: tuple[str, ...] = ()
+    direct_document_directories: tuple[str, ...] = ()
 
 
 def _derive_retrieval_query(query: str) -> str:
     normalized = " ".join(query.lower().split())
+    had_url = normalized != _strip_urls(normalized)
+    normalized = _strip_urls(normalized)
     stripped = normalized
     for pattern in (
         r"^i(?:'d|\swould)?\s+like\s+to\s+know\s+",
@@ -352,7 +379,226 @@ def _derive_retrieval_query(query: str) -> str:
     fallback_tokens = _tokenize(normalized)
     if fallback_tokens:
         return " ".join(fallback_tokens)
+    if had_url:
+        return ""
     return normalized
+
+
+def _strip_urls(text: str) -> str:
+    return " ".join(_URL_PATTERN.sub(" ", str(text)).split())
+
+
+def _extract_direct_document_urls(query: str) -> tuple[str, ...]:
+    seen: set[str] = set()
+    urls: list[str] = []
+    for match in _URL_PATTERN.findall(str(query or "")):
+        candidate = match.rstrip(".,;:!?)]}\"'")
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        urls.append(candidate)
+    return tuple(urls)
+
+
+def _extract_direct_document_paths(query: str, *, explicit_path: Path | None = None) -> tuple[str, ...]:
+    candidates: list[str] = []
+    if explicit_path is not None:
+        candidates.append(str(explicit_path))
+    text = str(query or "")
+    for pattern in (
+        r"`([^`]+\.pdf)`",
+        r'"([^"]+\.pdf)"',
+        r"'([^']+\.pdf)'",
+    ):
+        candidates.extend(match.group(1) for match in re.finditer(pattern, text, flags=re.IGNORECASE))
+    candidates.extend(_DIRECT_PDF_TOKEN_PATTERN.findall(text))
+
+    resolved_paths: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = _normalize_direct_document_path(candidate)
+        if resolved is None:
+            continue
+        resolved_str = str(resolved)
+        if resolved_str in seen:
+            continue
+        seen.add(resolved_str)
+        resolved_paths.append(resolved_str)
+    return tuple(resolved_paths)
+
+
+def _extract_direct_document_directories(
+    query: str,
+    *,
+    explicit_dir: Path | None = None,
+) -> tuple[str, ...]:
+    candidates: list[str] = []
+    if explicit_dir is not None:
+        candidates.append(str(explicit_dir))
+    text = str(query or "")
+    for pattern in (
+        r"`([^`]+)`",
+        r'"([^"]+)"',
+        r"'([^']+)'",
+    ):
+        candidates.extend(match.group(1) for match in re.finditer(pattern, text))
+    candidates.extend(_DIRECT_LOCAL_TOKEN_PATTERN.findall(text))
+
+    resolved_dirs: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = _normalize_direct_document_directory(candidate)
+        if resolved is None:
+            continue
+        resolved_str = str(resolved)
+        if resolved_str in seen:
+            continue
+        seen.add(resolved_str)
+        resolved_dirs.append(resolved_str)
+    return tuple(resolved_dirs)
+
+
+def _normalize_direct_document_path(candidate: str) -> Path | None:
+    raw = str(candidate or "").strip().strip("\"'`")
+    if not raw:
+        return None
+    if raw.startswith("file://"):
+        raw = unquote(urlparse(raw).path)
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = (Path.cwd() / path).resolve()
+    else:
+        path = path.resolve()
+    if path.suffix.lower() != ".pdf":
+        return None
+    if not path.exists() or not path.is_file():
+        return None
+    return path
+
+
+def _normalize_direct_document_directory(candidate: str) -> Path | None:
+    raw = str(candidate or "").strip().strip("\"'`")
+    if not raw:
+        return None
+    if raw.startswith("file://"):
+        raw = unquote(urlparse(raw).path)
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = (Path.cwd() / path).resolve()
+    else:
+        path = path.resolve()
+    if not path.exists() or not path.is_dir():
+        return None
+    return path
+
+
+def _iter_pdf_files(directory: Path) -> tuple[Path, ...]:
+    return tuple(sorted(path.resolve() for path in directory.rglob("*.pdf") if path.is_file()))
+
+
+def _direct_directory_pdf_paths(directories: tuple[str, ...]) -> tuple[str, ...]:
+    pdf_paths: list[str] = []
+    seen: set[str] = set()
+    for directory_str in directories:
+        for path in _iter_pdf_files(Path(directory_str)):
+            path_str = str(path)
+            if path_str in seen:
+                continue
+            seen.add(path_str)
+            pdf_paths.append(path_str)
+    return tuple(pdf_paths)
+
+
+def _has_direct_document_input(
+    query: str,
+    *,
+    explicit_path: Path | None = None,
+    explicit_dir: Path | None = None,
+) -> bool:
+    return bool(
+        _extract_direct_document_paths(query, explicit_path=explicit_path)
+        or _extract_direct_document_directories(query, explicit_dir=explicit_dir)
+        or _extract_direct_document_urls(query)
+    )
+
+
+def _looks_like_html(path_or_url: str) -> bool:
+    lowered = str(path_or_url or "").lower()
+    return lowered.endswith(".html") or lowered.endswith(".htm") or "html" in lowered
+
+
+def _payload_looks_like_html(payload: str) -> bool:
+    snippet = payload[:1000].lower()
+    return any(marker in snippet for marker in ("<!doctype html", "<html", "<body", "<article", "<main"))
+
+
+def _extract_html_region(html_text: str) -> str:
+    candidates = []
+    for pattern in (
+        r"(?is)<article\b[^>]*>(.*?)</article>",
+        r"(?is)<main\b[^>]*>(.*?)</main>",
+        r"(?is)<body\b[^>]*>(.*?)</body>",
+    ):
+        candidates.extend(re.findall(pattern, html_text))
+    if not candidates:
+        return html_text
+    return max(candidates, key=len)
+
+
+def _strip_html(html_text: str) -> str:
+    text = _extract_html_region(html_text)
+    text = re.sub(r"(?is)<script.*?>.*?</script>", " ", text)
+    text = re.sub(r"(?is)<style.*?>.*?</style>", " ", text)
+    text = re.sub(r"(?is)<svg.*?>.*?</svg>", " ", text)
+    text = re.sub(r"(?is)<noscript.*?>.*?</noscript>", " ", text)
+    text = re.sub(r"(?is)<(header|footer|nav|aside|form)\b[^>]*>.*?</\1>", " ", text)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</p>", "\n", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = unescape(text)
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    filtered = []
+    for line in lines:
+        lowered = line.lower()
+        if not line:
+            continue
+        if lowered in {"skip to content", "search", "menu"}:
+            continue
+        if lowered.startswith("home »") or lowered.startswith("home >"):
+            continue
+        filtered.append(line)
+    return "\n".join(filtered).strip()
+
+
+def _extract_document_text(payload: str, *, source_hint: str) -> str:
+    if _looks_like_html(source_hint) or _payload_looks_like_html(payload):
+        return _strip_html(payload)
+    return " ".join(payload.split())
+
+
+def _extract_html_title(payload: str) -> str:
+    match = re.search(r"(?is)<title[^>]*>(.*?)</title>", payload)
+    if not match:
+        return ""
+    text = re.sub(r"(?s)<[^>]+>", " ", match.group(1))
+    return " ".join(unescape(text).split())
+
+
+def _title_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    tail = unquote(Path(parsed.path).name).strip()
+    if tail:
+        stem = Path(tail).stem
+        return _pretty_url_title(stem)
+    if parsed.netloc:
+        return _pretty_url_title(parsed.netloc)
+    return "document"
+
+
+def _pretty_url_title(value: str) -> str:
+    cleaned = re.sub(r"[_-]+", " ", value or "").strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned or "document"
 
 
 def _extract_sec_company_targets(query: str) -> tuple[tuple[str, ...], ...]:
@@ -554,6 +800,8 @@ class DemocritusQueryAgenticConfig:
     outdir: Path
     execution_mode: str = "quick"
     target_documents: int = 10
+    input_pdf_path: Path | None = None
+    input_pdf_dir: Path | None = None
     manifest_path: Path | None = None
     source_pdf_root: Path | None = None
     retrieval_backend: str = "auto"
@@ -575,6 +823,26 @@ class DemocritusQueryAgenticConfig:
     statements_per_question: int = 2
     statement_batch_size: int = 16
     statement_max_tokens: int = 192
+    manifold_mode: str = "full"
+    topk: int = 200
+    radii: str = "1,2,3"
+    maxnodes: str = "10,20,30,40,60"
+    lambda_edge: float = 0.25
+    topk_models: int = 5
+    topk_claims: int = 30
+    alpha: float = 1.0
+    tier1: float = 0.60
+    tier2: float = 0.30
+    anchors: str = ""
+    title: str = ""
+    dedupe_focus: bool = False
+    require_anchor_in_focus: bool = False
+    focus_blacklist_regex: str = ""
+    render_topk_pngs: bool = False
+    assets_dir: str = "assets"
+    png_dpi: int = 200
+    write_deep_dive: bool = False
+    deep_dive_max_bullets: int = 8
     intra_document_shards: int = 1
     discovery_only: bool = False
     dry_run: bool = False
@@ -596,9 +864,17 @@ class DemocritusQueryAgenticConfig:
         statements_per_question = max(1, int(self.statements_per_question))
         statement_batch_size = max(1, int(self.statement_batch_size))
         statement_max_tokens = max(48, int(self.statement_max_tokens))
+        topk = max(1, int(self.topk))
+        topk_models = max(1, int(self.topk_models))
+        topk_claims = max(1, int(self.topk_claims))
         root_topic_strategy = str(self.root_topic_strategy)
         intra_document_shards = max(1, int(self.intra_document_shards))
-        if execution_mode == "quick":
+        direct_document_input = _has_direct_document_input(
+            self.query,
+            explicit_path=self.input_pdf_path,
+            explicit_dir=self.input_pdf_dir,
+        )
+        if execution_mode == "quick" and not direct_document_input:
             if root_topic_strategy == "v0_openai":
                 root_topic_strategy = "heuristic"
             depth_limit = min(depth_limit, 2)
@@ -612,6 +888,8 @@ class DemocritusQueryAgenticConfig:
             outdir=self.outdir.resolve(),
             execution_mode=execution_mode,
             target_documents=target_documents,
+            input_pdf_path=self.input_pdf_path.resolve() if self.input_pdf_path else None,
+            input_pdf_dir=self.input_pdf_dir.resolve() if self.input_pdf_dir else None,
             manifest_path=self.manifest_path.resolve() if self.manifest_path else None,
             source_pdf_root=self.source_pdf_root.resolve() if self.source_pdf_root else None,
             retrieval_backend=self.retrieval_backend,
@@ -633,6 +911,26 @@ class DemocritusQueryAgenticConfig:
             statements_per_question=statements_per_question,
             statement_batch_size=statement_batch_size,
             statement_max_tokens=statement_max_tokens,
+            manifold_mode=self.manifold_mode,
+            topk=topk,
+            radii=self.radii,
+            maxnodes=self.maxnodes,
+            lambda_edge=float(self.lambda_edge),
+            topk_models=topk_models,
+            topk_claims=topk_claims,
+            alpha=float(self.alpha),
+            tier1=float(self.tier1),
+            tier2=float(self.tier2),
+            anchors=self.anchors,
+            title=self.title,
+            dedupe_focus=bool(self.dedupe_focus),
+            require_anchor_in_focus=bool(self.require_anchor_in_focus),
+            focus_blacklist_regex=self.focus_blacklist_regex,
+            render_topk_pngs=bool(self.render_topk_pngs),
+            assets_dir=self.assets_dir,
+            png_dpi=max(72, int(self.png_dpi)),
+            write_deep_dive=bool(self.write_deep_dive),
+            deep_dive_max_bullets=max(1, int(self.deep_dive_max_bullets)),
             intra_document_shards=intra_document_shards,
             discovery_only=self.discovery_only,
             dry_run=self.dry_run,
@@ -925,6 +1223,76 @@ class FilesystemRetrievalBackend:
             )
         candidates.sort(key=lambda item: (-item.score, item.title.lower()))
         return tuple(candidates[:limit])
+
+
+class DirectFileRetrievalBackend:
+    """Treat local PDF paths as a fixed one-off Democritus corpus."""
+
+    backend_name = "direct_file"
+
+    def search(self, plan: QueryPlan, *, limit: int) -> tuple[DiscoveredDocument, ...]:
+        candidates: list[DiscoveredDocument] = []
+        for path_str in plan.direct_document_paths[:limit]:
+            path = Path(path_str)
+            candidates.append(
+                DiscoveredDocument(
+                    title=path.stem.replace("_", " ").replace("-", " "),
+                    score=1000.0,
+                    retrieval_backend=self.backend_name,
+                    source_path=str(path),
+                    identifier=str(path),
+                    document_format="pdf",
+                    evidence=("direct_file",),
+                )
+            )
+        return tuple(candidates)
+
+
+class DirectDirectoryRetrievalBackend:
+    """Treat local PDF directories as a fixed one-off Democritus corpus."""
+
+    backend_name = "direct_directory"
+
+    def search(self, plan: QueryPlan, *, limit: int) -> tuple[DiscoveredDocument, ...]:
+        candidates: list[DiscoveredDocument] = []
+        for path_str in _direct_directory_pdf_paths(plan.direct_document_directories)[:limit]:
+            path = Path(path_str)
+            candidates.append(
+                DiscoveredDocument(
+                    title=path.stem.replace("_", " ").replace("-", " "),
+                    score=1000.0,
+                    retrieval_backend=self.backend_name,
+                    source_path=str(path),
+                    identifier=str(path),
+                    document_format="pdf",
+                    evidence=("direct_directory",),
+                )
+            )
+        return tuple(candidates)
+
+
+class DirectURLRetrievalBackend:
+    """Treat URLs embedded in the query as a fixed one-off Democritus corpus."""
+
+    backend_name = "direct_url"
+
+    def search(self, plan: QueryPlan, *, limit: int) -> tuple[DiscoveredDocument, ...]:
+        candidates: list[DiscoveredDocument] = []
+        for url in plan.direct_document_urls[:limit]:
+            document_format = _infer_document_format(url)
+            candidates.append(
+                DiscoveredDocument(
+                    title=_title_from_url(url),
+                    score=1000.0,
+                    retrieval_backend=self.backend_name,
+                    download_url=url if document_format == "pdf" else None,
+                    url=url,
+                    identifier=url,
+                    document_format=document_format,
+                    evidence=("direct_url",),
+                )
+            )
+        return tuple(candidates)
 
 
 class CrossrefRetrievalBackend(HttpJsonRetrievalBackend):
@@ -1324,6 +1692,26 @@ class DemocritusQueryAgenticRunner:
                 statements_per_question=self.config.statements_per_question,
                 statement_batch_size=self.config.statement_batch_size,
                 statement_max_tokens=self.config.statement_max_tokens,
+                manifold_mode=self.config.manifold_mode,
+                topk=self.config.topk,
+                radii=self.config.radii,
+                maxnodes=self.config.maxnodes,
+                lambda_edge=self.config.lambda_edge,
+                topk_models=self.config.topk_models,
+                topk_claims=self.config.topk_claims,
+                alpha=self.config.alpha,
+                tier1=self.config.tier1,
+                tier2=self.config.tier2,
+                anchors=self.config.anchors,
+                title=self.config.title,
+                dedupe_focus=self.config.dedupe_focus,
+                require_anchor_in_focus=self.config.require_anchor_in_focus,
+                focus_blacklist_regex=self.config.focus_blacklist_regex,
+                render_topk_pngs=self.config.render_topk_pngs,
+                assets_dir=self.config.assets_dir,
+                png_dpi=self.config.png_dpi,
+                write_deep_dive=self.config.write_deep_dive,
+                deep_dive_max_bullets=self.config.deep_dive_max_bullets,
                 intra_document_shards=self.config.intra_document_shards,
                 enable_corpus_synthesis=self.config.enable_corpus_synthesis,
                 discover_existing_documents=not streaming,
@@ -1342,17 +1730,36 @@ class DemocritusQueryAgenticRunner:
         retrieval_query = _derive_retrieval_query(self.config.query)
         sec_company_targets = _extract_sec_company_targets(self.config.query)
         sec_cohort_mode = _infer_sec_cohort_mode(self.config.query, sec_company_targets)
+        direct_document_urls = _extract_direct_document_urls(self.config.query)
+        direct_document_paths = _extract_direct_document_paths(
+            self.config.query,
+            explicit_path=self.config.input_pdf_path,
+        )
+        direct_document_directories = _extract_direct_document_directories(
+            self.config.query,
+            explicit_dir=self.config.input_pdf_dir,
+        )
         explicit_target_documents = infer_requested_result_count(
             self.config.query,
             nouns=("filing", "filings", "report", "reports", "document", "documents"),
         )
-        if explicit_target_documents is not None:
+        if direct_document_paths:
+            target_documents = len(direct_document_paths)
+        elif direct_document_directories:
+            target_documents = len(_direct_directory_pdf_paths(direct_document_directories))
+        elif direct_document_urls:
+            target_documents = len(direct_document_urls)
+        elif explicit_target_documents is not None:
             target_documents = explicit_target_documents
         elif sec_cohort_mode == "latest_per_company":
             target_documents = len(sec_company_targets)
         else:
             target_documents = max(1, self.config.target_documents)
-        if self.config.execution_mode == "quick" and sec_cohort_mode != "latest_per_company":
+        if (
+            self.config.execution_mode == "quick"
+            and sec_cohort_mode != "latest_per_company"
+            and not (direct_document_paths or direct_document_directories or direct_document_urls)
+        ):
             target_documents = min(target_documents, 3)
         plan = QueryPlan(
             query=self.config.query,
@@ -1363,6 +1770,9 @@ class DemocritusQueryAgenticRunner:
             requested_forms=tuple(form.upper() for form in requested_forms),
             sec_company_targets=sec_company_targets,
             sec_cohort_mode=sec_cohort_mode,
+            direct_document_urls=direct_document_urls,
+            direct_document_paths=direct_document_paths,
+            direct_document_directories=direct_document_directories,
         )
         _write_json(self.query_plan_path, asdict(plan))
         self._log(
@@ -1377,6 +1787,9 @@ class DemocritusQueryAgenticRunner:
                 f"[REQUESTED_FORMS] {', '.join(plan.requested_forms) if plan.requested_forms else '(none)'}",
                 f"[SEC_COMPANY_TARGETS] {' | '.join('/'.join(target) for target in plan.sec_company_targets) if plan.sec_company_targets else '(none)'}",
                 f"[SEC_COHORT_MODE] {plan.sec_cohort_mode}",
+                f"[DIRECT_DOCUMENT_URLS] {' | '.join(plan.direct_document_urls) if plan.direct_document_urls else '(none)'}",
+                f"[DIRECT_DOCUMENT_PATHS] {' | '.join(plan.direct_document_paths) if plan.direct_document_paths else '(none)'}",
+                f"[DIRECT_DOCUMENT_DIRECTORIES] {' | '.join(plan.direct_document_directories) if plan.direct_document_directories else '(none)'}",
                 f"[RETRIEVAL_BACKEND] {self._backend_name()}",
             ],
         )
@@ -1384,6 +1797,12 @@ class DemocritusQueryAgenticRunner:
 
     def _backend_name(self) -> str:
         if self.config.retrieval_backend == "auto":
+            if _extract_direct_document_paths(self.config.query, explicit_path=self.config.input_pdf_path):
+                return "direct_file"
+            if _extract_direct_document_directories(self.config.query, explicit_dir=self.config.input_pdf_dir):
+                return "direct_directory"
+            if _extract_direct_document_urls(self.config.query):
+                return "direct_url"
             if self.config.manifest_path:
                 return "manifest"
             if self.config.source_pdf_root:
@@ -1404,6 +1823,12 @@ class DemocritusQueryAgenticRunner:
             if not self.config.source_pdf_root:
                 raise ValueError("Filesystem backend requires `source_pdf_root`.")
             return FilesystemRetrievalBackend(self.config.source_pdf_root)
+        if backend_name == "direct_file":
+            return DirectFileRetrievalBackend()
+        if backend_name == "direct_directory":
+            return DirectDirectoryRetrievalBackend()
+        if backend_name == "direct_url":
+            return DirectURLRetrievalBackend()
         if backend_name == "crossref":
             return CrossrefRetrievalBackend(
                 user_agent=self.config.retrieval_user_agent,
@@ -1647,6 +2072,60 @@ class DemocritusQueryAgenticRunner:
                 except Exception as exc:
                     if target_path.exists():
                         target_path.unlink()
+                    if document.url and document.url != document.download_url:
+                        try:
+                            source_reference = self._materialize_remote_document_as_pdf(
+                                replace(document, download_url=None),
+                                target_path=target_path,
+                                source_url_override=document.url,
+                            )
+                        except Exception as fallback_exc:
+                            if target_path.exists():
+                                target_path.unlink()
+                            failures.append(
+                                f"{document.title}: {exc}; fallback via landing page failed: {fallback_exc}"
+                            )
+                            log_lines.append(
+                                f"[SKIP] rank={candidate_index} download failed for {document.title}: {exc}; "
+                                f"landing-page fallback failed: {fallback_exc}"
+                            )
+                            continue
+                        selected.append(document)
+                        materialized = AcquiredCorpusDocument(
+                            title=document.title,
+                            acquired_pdf_path=str(target_path),
+                            source_path=source_reference,
+                            score=document.score,
+                            run_name_hint=target_path.stem,
+                            retrieval_backend=document.retrieval_backend,
+                        )
+                        acquired.append(materialized)
+                        self._persist_materialized_corpus(selected, acquired)
+                        if on_document_acquired is not None:
+                            on_document_acquired(materialized)
+                        log_lines.append(
+                            f"[MATERIALIZE_FALLBACK] rank={candidate_index} {document.url} -> {target_path} "
+                            f"after direct PDF download failed: {exc}"
+                        )
+                        stop_now, assessment_ran, reason = self._assess_convergence_if_ready(
+                            plan,
+                            selected,
+                            acquired_count=len(acquired),
+                            search_exhausted=discovery_exhausted and candidate_index >= len(discovered_documents),
+                            batch_size=batch_size,
+                            tracker=convergence_tracker,
+                        )
+                        if assessment_ran:
+                            analysis_iterations += 1
+                            convergence_assessment = convergence_tracker.last_assessment().as_dict()
+                        if reason:
+                            log_lines.append(f"[CONVERGENCE] {reason}")
+                        if stop_now:
+                            consensus_reached = (
+                                convergence_tracker.last_assessment().stop_trigger == "stability"
+                            )
+                            break
+                        continue
                     failures.append(f"{document.title}: {exc}")
                     log_lines.append(
                         f"[SKIP] rank={candidate_index} download failed for {document.title}: {exc}"
@@ -1666,6 +2145,54 @@ class DemocritusQueryAgenticRunner:
                 if on_document_acquired is not None:
                     on_document_acquired(materialized)
                 log_lines.append(f"[DOWNLOAD] rank={candidate_index} {document.download_url} -> {target_path}")
+                stop_now, assessment_ran, reason = self._assess_convergence_if_ready(
+                    plan,
+                    selected,
+                    acquired_count=len(acquired),
+                    search_exhausted=discovery_exhausted and candidate_index >= len(discovered_documents),
+                    batch_size=batch_size,
+                    tracker=convergence_tracker,
+                )
+                if assessment_ran:
+                    analysis_iterations += 1
+                    convergence_assessment = convergence_tracker.last_assessment().as_dict()
+                if reason:
+                    log_lines.append(f"[CONVERGENCE] {reason}")
+                if stop_now:
+                    consensus_reached = (
+                        convergence_tracker.last_assessment().stop_trigger == "stability"
+                    )
+                    break
+                continue
+            if document.url or document.download_url:
+                source_reference = document.url or document.download_url or ""
+                try:
+                    source_reference = self._materialize_remote_document_as_pdf(
+                        document,
+                        target_path=target_path,
+                    )
+                except Exception as exc:
+                    if target_path.exists():
+                        target_path.unlink()
+                    failures.append(f"{document.title}: {exc}")
+                    log_lines.append(
+                        f"[SKIP] rank={candidate_index} remote document materialization failed for {document.title}: {exc}"
+                    )
+                    continue
+                selected.append(document)
+                materialized = AcquiredCorpusDocument(
+                    title=document.title,
+                    acquired_pdf_path=str(target_path),
+                    source_path=source_reference,
+                    score=document.score,
+                    run_name_hint=target_path.stem,
+                    retrieval_backend=document.retrieval_backend,
+                )
+                acquired.append(materialized)
+                self._persist_materialized_corpus(selected, acquired)
+                if on_document_acquired is not None:
+                    on_document_acquired(materialized)
+                log_lines.append(f"[MATERIALIZE] rank={candidate_index} {source_reference} -> {target_path}")
                 stop_now, assessment_ran, reason = self._assess_convergence_if_ready(
                     plan,
                     selected,
@@ -1808,22 +2335,23 @@ class DemocritusQueryAgenticRunner:
         last_error: Exception | None = None
         for candidate_url in dict.fromkeys(candidate_urls):
             headers = self._download_request_headers(referer=referer)
-            request = Request(candidate_url, headers=headers)
-            try:
-                with urlopen(request, timeout=self.config.retrieval_timeout_seconds) as response:
-                    content = response.read()
-            except (HTTPError, URLError) as exc:
-                last_error = exc
-                continue
-            target_path.write_bytes(content)
-            try:
-                self._validate_pdf_file(target_path)
-            except Exception as exc:
-                if target_path.exists():
-                    target_path.unlink()
-                last_error = exc
-                continue
-            return
+            for timeout_seconds in self._request_timeouts_for_url(candidate_url, kind="download"):
+                request = Request(candidate_url, headers=headers)
+                try:
+                    with urlopen(request, timeout=timeout_seconds) as response:
+                        content = response.read()
+                except (HTTPError, URLError, TimeoutError, socket.timeout, ValueError) as exc:
+                    last_error = exc
+                    continue
+                target_path.write_bytes(content)
+                try:
+                    self._validate_pdf_file(target_path)
+                except Exception as exc:
+                    if target_path.exists():
+                        target_path.unlink()
+                    last_error = exc
+                    continue
+                return
         if last_error is None:
             raise RuntimeError(f"Could not download {url}")
         raise last_error
@@ -1885,6 +2413,477 @@ class DemocritusQueryAgenticRunner:
             headers["Referer"] = referer
         return headers
 
+    def _browser_like_request_headers(self, *, referer: str | None = None) -> dict[str, str]:
+        headers = {
+            "User-Agent": _BROWSER_DOWNLOAD_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "identity",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Connection": "close",
+            "Upgrade-Insecure-Requests": "1",
+        }
+        if referer:
+            headers["Referer"] = referer
+        return headers
+
+    def _materialize_remote_document_as_pdf(
+        self,
+        document: DiscoveredDocument,
+        *,
+        target_path: Path,
+        source_url_override: str | None = None,
+    ) -> str:
+        source_url = source_url_override or document.download_url or document.url
+        if not source_url:
+            raise ValueError(f"Document {document.title!r} does not define a URL to materialize.")
+        payload, content_type, source_reference = self._fetch_url_payload(
+            source_url,
+            referer=document.url if (source_url == document.download_url and document.download_url and document.url) else None,
+        )
+        if self._payload_is_pdf(payload, content_type=content_type, source_reference=source_reference):
+            target_path.write_bytes(payload)
+            self._validate_materialized_pdf(target_path)
+            return source_reference
+        decoded_payload = self._decode_remote_payload(payload, content_type=content_type)
+        extracted_text = _extract_document_text(decoded_payload, source_hint=source_reference)
+        if not extracted_text.strip():
+            raise RuntimeError(f"Document {source_reference!r} did not yield extractable article text")
+        document_title = _extract_html_title(decoded_payload) or document.title or _title_from_url(source_reference)
+        self._write_extractable_text_pdf(
+            target_path,
+            title=document_title,
+            text=extracted_text,
+            source_reference=source_reference,
+        )
+        self._validate_materialized_pdf(target_path)
+        return source_reference
+
+    def _fetch_url_payload(
+        self,
+        url: str,
+        *,
+        referer: str | None = None,
+    ) -> tuple[bytes, str, str]:
+        request_specs = self._direct_document_request_specs(url, referer=referer)
+        last_error: Exception | None = None
+        for headers in request_specs:
+            for timeout_seconds in self._request_timeouts_for_url(url, kind="direct_url"):
+                request = Request(url, headers=headers)
+                try:
+                    with urlopen(request, timeout=timeout_seconds) as response:
+                        content_type = response.headers.get("Content-Type", "")
+                        source_reference = str(response.geturl() or url)
+                        payload = self._read_remote_payload(
+                            response,
+                            content_type=content_type,
+                            source_reference=source_reference,
+                        )
+                        return payload, content_type, source_reference
+                except (HTTPError, URLError, TimeoutError, socket.timeout, ValueError) as exc:
+                    last_error = exc
+                    continue
+        if last_error is None:
+            raise RuntimeError(f"Unable to fetch {url}")
+        raise last_error
+
+    def _direct_document_request_specs(self, url: str, *, referer: str | None = None) -> tuple[dict[str, str], ...]:
+        browser_headers = self._browser_like_request_headers(referer=referer or url)
+        hostname = urlparse(str(url or "")).netloc.lower()
+        specs: list[dict[str, str]] = [self._download_request_headers(referer=referer)]
+        if self._is_heavy_news_host(hostname):
+            ranged_headers = dict(browser_headers)
+            ranged_headers["Range"] = f"bytes=0-{self._non_pdf_remote_byte_limit(url) - 1}"
+            specs.append(ranged_headers)
+        specs.append(browser_headers)
+        return tuple(specs)
+
+    def _request_timeouts(self, *, kind: str) -> tuple[float, ...]:
+        base_timeout = max(5.0, float(self.config.retrieval_timeout_seconds))
+        if kind == "direct_url":
+            candidates = (
+                base_timeout,
+                max(base_timeout * 2.0, 45.0),
+                max(base_timeout * 4.0, 90.0),
+            )
+        elif kind == "download":
+            candidates = (
+                base_timeout,
+                max(base_timeout * 2.0, 60.0),
+            )
+        else:
+            candidates = (base_timeout,)
+        ordered: list[float] = []
+        for value in candidates:
+            if value not in ordered:
+                ordered.append(value)
+        return tuple(ordered)
+
+    def _request_timeouts_for_url(self, url: str, *, kind: str) -> tuple[float, ...]:
+        if kind == "direct_url":
+            hostname = urlparse(str(url or "")).netloc.lower()
+            if self._is_heavy_news_host(hostname):
+                for host_suffix, values in _HEAVY_NEWS_HOST_TIMEOUTS.items():
+                    if hostname == host_suffix or hostname.endswith(f".{host_suffix}"):
+                        return values
+        return self._request_timeouts(kind=kind)
+
+    def _read_remote_payload(
+        self,
+        response,
+        *,
+        content_type: str,
+        source_reference: str,
+    ) -> bytes:
+        if self._should_read_remote_payload_fully(content_type=content_type, source_reference=source_reference):
+            return response.read()
+        return self._read_non_pdf_payload_chunked(
+            response,
+            source_reference=source_reference,
+        )
+
+    def _read_non_pdf_payload_chunked(self, response, *, source_reference: str) -> bytes:
+        max_bytes = self._non_pdf_remote_byte_limit(source_reference)
+        payload = bytearray()
+        while len(payload) < max_bytes:
+            remaining = max_bytes - len(payload)
+            chunk = response.read(min(_NON_PDF_STREAM_CHUNK_BYTES, remaining))
+            if not chunk:
+                break
+            payload.extend(chunk)
+            if self._has_enough_non_pdf_payload(bytes(payload), source_reference=source_reference):
+                break
+        return bytes(payload)
+
+    @staticmethod
+    def _non_pdf_remote_byte_limit(source_reference: str) -> int:
+        hostname = urlparse(str(source_reference or "")).netloc.lower()
+        for host_suffix, limit in _HEAVY_NEWS_HOST_LIMITS.items():
+            if hostname == host_suffix or hostname.endswith(f".{host_suffix}"):
+                return limit
+        return _MAX_NON_PDF_REMOTE_BYTES
+
+    @staticmethod
+    def _is_heavy_news_host(hostname: str) -> bool:
+        normalized = str(hostname or "").lower()
+        return any(
+            normalized == host_suffix or normalized.endswith(f".{host_suffix}")
+            for host_suffix in _HEAVY_NEWS_HOST_LIMITS
+        )
+
+    @staticmethod
+    def _has_enough_non_pdf_payload(payload: bytes, *, source_reference: str) -> bool:
+        lowered = payload[: 256 * 1024].lower()
+        if b"</article>" in lowered:
+            return True
+        if b"<article" in lowered and lowered.count(b"<p") >= 6:
+            return True
+        if b"</main>" in lowered and lowered.count(b"<p") >= 8:
+            return True
+        if b"application/ld+json" in lowered and b"articlebody" in lowered:
+            return True
+        hostname = urlparse(str(source_reference or "")).netloc.lower()
+        if "washingtonpost.com" in hostname and (lowered.count(b"<p") >= 6 or b"articlebody" in lowered):
+            return True
+        return False
+
+    @staticmethod
+    def _should_read_remote_payload_fully(*, content_type: str, source_reference: str) -> bool:
+        lowered_content_type = str(content_type or "").lower()
+        if "application/pdf" in lowered_content_type:
+            return True
+        if "application/octet-stream" in lowered_content_type and _looks_like_pdf(source_reference):
+            return True
+        return False
+
+    @staticmethod
+    def _payload_is_pdf(payload: bytes, *, content_type: str, source_reference: str) -> bool:
+        if payload.lstrip().startswith(b"%PDF-"):
+            return True
+        lowered_content_type = str(content_type or "").lower()
+        if "application/pdf" in lowered_content_type:
+            return True
+        return _looks_like_pdf(source_reference)
+
+    @staticmethod
+    def _decode_remote_payload(payload: bytes, *, content_type: str) -> str:
+        charset_match = re.search(r"charset=([^\s;]+)", str(content_type or ""), re.IGNORECASE)
+        charset = charset_match.group(1).strip("\"'") if charset_match else "utf-8"
+        try:
+            return payload.decode(charset, errors="replace")
+        except LookupError:
+            return payload.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _write_extractable_text_pdf(
+        target_path: Path,
+        *,
+        title: str,
+        text: str,
+        source_reference: str,
+    ) -> None:
+        try:
+            import fitz  # PyMuPDF
+        except ModuleNotFoundError:
+            try:
+                DemocritusQueryAgenticRunner._write_extractable_text_pdf_with_matplotlib(
+                    target_path,
+                    title=title,
+                    text=text,
+                    source_reference=source_reference,
+                )
+            except ModuleNotFoundError:
+                DemocritusQueryAgenticRunner._write_extractable_text_pdf_basic(
+                    target_path,
+                    title=title,
+                    text=text,
+                    source_reference=source_reference,
+                )
+            return
+
+        page_width, page_height = fitz.paper_size("letter")
+        left_margin = 54
+        right_margin = 54
+        top_margin = 54
+        bottom_margin = 54
+        title_font_size = 16
+        source_font_size = 8.5
+        body_font_size = 10.5
+        body_line_height = body_font_size * 1.45
+        title_text, source_line, wrapped_body_lines = DemocritusQueryAgenticRunner._prepare_text_pdf_layout(
+            title=title,
+            text=text,
+            source_reference=source_reference,
+        )
+
+        available_height = page_height - top_margin - bottom_margin - (title_font_size * 2.4) - (source_font_size * 2.0)
+        lines_per_page = max(1, int(available_height // body_line_height))
+
+        document = fitz.open()
+        try:
+            line_index = 0
+            while line_index < len(wrapped_body_lines) or document.page_count == 0:
+                page = document.new_page(width=page_width, height=page_height)
+                page.insert_text(
+                    (left_margin, top_margin),
+                    title_text,
+                    fontsize=title_font_size,
+                    fontname="helv",
+                )
+                page.insert_text(
+                    (left_margin, top_margin + (title_font_size * 1.9)),
+                    source_line,
+                    fontsize=source_font_size,
+                    fontname="helv",
+                )
+                chunk = wrapped_body_lines[line_index : line_index + lines_per_page]
+                line_index += len(chunk)
+                body_rect = fitz.Rect(
+                    left_margin,
+                    top_margin + (title_font_size * 3.0),
+                    page_width - right_margin,
+                    page_height - bottom_margin,
+                )
+                page.insert_textbox(
+                    body_rect,
+                    "\n".join(chunk),
+                    fontsize=body_font_size,
+                    fontname="helv",
+                    lineheight=1.25,
+                )
+            document.set_metadata(
+                {
+                    "title": title_text,
+                    "subject": source_reference[:2000],
+                }
+            )
+            document.save(str(target_path))
+        finally:
+            document.close()
+
+    @staticmethod
+    def _prepare_text_pdf_layout(
+        *,
+        title: str,
+        text: str,
+        source_reference: str,
+    ) -> tuple[str, str, list[str]]:
+        max_chars_per_line = 92
+        source_line = f"Source: {source_reference}".strip()
+        wrapped_body_lines: list[str] = []
+        for paragraph in re.split(r"\n{2,}", text):
+            normalized = " ".join(paragraph.split())
+            if not normalized:
+                wrapped_body_lines.append("")
+                continue
+            wrapped_body_lines.extend(
+                textwrap.wrap(
+                    normalized,
+                    width=max_chars_per_line,
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+                or [normalized]
+            )
+            wrapped_body_lines.append("")
+        if wrapped_body_lines and not wrapped_body_lines[-1]:
+            wrapped_body_lines.pop()
+        title_text = " ".join(str(title or "Document").split()) or "Document"
+        return title_text, source_line, wrapped_body_lines
+
+    @staticmethod
+    def _write_extractable_text_pdf_with_matplotlib(
+        target_path: Path,
+        *,
+        title: str,
+        text: str,
+        source_reference: str,
+    ) -> None:
+        from matplotlib.backends.backend_pdf import PdfPages
+        import matplotlib.pyplot as plt
+
+        title_text, source_line, wrapped_body_lines = DemocritusQueryAgenticRunner._prepare_text_pdf_layout(
+            title=title,
+            text=text,
+            source_reference=source_reference,
+        )
+        lines_per_page = 58
+        with PdfPages(str(target_path)) as pdf:
+            line_index = 0
+            while line_index < len(wrapped_body_lines) or line_index == 0:
+                figure = plt.figure(figsize=(8.5, 11.0))
+                figure.patch.set_facecolor("white")
+                figure.text(0.08, 0.96, title_text, fontsize=15, va="top", ha="left")
+                figure.text(0.08, 0.925, source_line, fontsize=8, va="top", ha="left")
+                chunk = wrapped_body_lines[line_index : line_index + lines_per_page]
+                line_index += len(chunk)
+                figure.text(
+                    0.08,
+                    0.89,
+                    "\n".join(chunk),
+                    fontsize=10,
+                    va="top",
+                    ha="left",
+                    family="monospace",
+                )
+                pdf.savefig(figure)
+                plt.close(figure)
+
+    @staticmethod
+    def _write_extractable_text_pdf_basic(
+        target_path: Path,
+        *,
+        title: str,
+        text: str,
+        source_reference: str,
+    ) -> None:
+        title_text, source_line, wrapped_body_lines = DemocritusQueryAgenticRunner._prepare_text_pdf_layout(
+            title=title,
+            text=text,
+            source_reference=source_reference,
+        )
+        lines_per_page = 48
+        page_chunks: list[list[str]] = []
+        if not wrapped_body_lines:
+            page_chunks.append([])
+        else:
+            for index in range(0, len(wrapped_body_lines), lines_per_page):
+                page_chunks.append(wrapped_body_lines[index : index + lines_per_page])
+
+        objects: list[bytes] = []
+
+        def add_object(payload: str | bytes) -> int:
+            if isinstance(payload, str):
+                payload_bytes = payload.encode("latin-1", errors="replace")
+            else:
+                payload_bytes = payload
+            objects.append(payload_bytes)
+            return len(objects)
+
+        font_id = add_object("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+        page_ids: list[int] = []
+        content_ids: list[int] = []
+        pages_id = len(objects) + (2 * len(page_chunks)) + 1
+
+        for chunk in page_chunks:
+            content_stream = DemocritusQueryAgenticRunner._basic_pdf_content_stream(
+                title_text=title_text,
+                source_line=source_line,
+                body_lines=chunk,
+            )
+            content_id = add_object(
+                f"<< /Length {len(content_stream)} >>\nstream\n".encode("latin-1")
+                + content_stream
+                + b"\nendstream"
+            )
+            content_ids.append(content_id)
+            page_id = add_object(
+                (
+                    "<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 612 792] "
+                    "/Resources << /ProcSet [/PDF /Text] /Font << /F1 {font_id} 0 R >> >> "
+                    f"/Contents {content_id} 0 R >>"
+                ).format(pages_id=pages_id, font_id=font_id)
+            )
+            page_ids.append(page_id)
+
+        add_object(
+            "<< /Type /Pages /Kids ["
+            + " ".join(f"{page_id} 0 R" for page_id in page_ids)
+            + f"] /Count {len(page_ids)} >>"
+        )
+        catalog_id = add_object(f"<< /Type /Catalog /Pages {pages_id} 0 R >>")
+
+        buffer = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+        offsets = [0]
+        for index, payload in enumerate(objects, start=1):
+            offsets.append(len(buffer))
+            buffer.extend(f"{index} 0 obj\n".encode("latin-1"))
+            buffer.extend(payload)
+            buffer.extend(b"\nendobj\n")
+        xref_offset = len(buffer)
+        buffer.extend(f"xref\n0 {len(objects) + 1}\n".encode("latin-1"))
+        buffer.extend(b"0000000000 65535 f \n")
+        for offset in offsets[1:]:
+            buffer.extend(f"{offset:010d} 00000 n \n".encode("latin-1"))
+        buffer.extend(
+            (
+                f"trailer << /Size {len(objects) + 1} /Root {catalog_id} 0 R >>\n"
+                f"startxref\n{xref_offset}\n%%EOF\n"
+            ).encode("latin-1")
+        )
+        target_path.write_bytes(bytes(buffer))
+
+    @staticmethod
+    def _basic_pdf_content_stream(
+        *,
+        title_text: str,
+        source_line: str,
+        body_lines: list[str],
+    ) -> bytes:
+        commands = [
+            "BT",
+            "/F1 16 Tf",
+            "1 0 0 1 54 738 Tm",
+            f"({DemocritusQueryAgenticRunner._escape_pdf_text(title_text)}) Tj",
+            "/F1 8 Tf",
+            "1 0 0 1 54 718 Tm",
+            f"({DemocritusQueryAgenticRunner._escape_pdf_text(source_line)}) Tj",
+            "/F1 10 Tf",
+            "1 0 0 1 54 694 Tm",
+        ]
+        for line in body_lines:
+            safe_line = DemocritusQueryAgenticRunner._escape_pdf_text(line)
+            commands.append(f"({safe_line}) Tj")
+            commands.append("0 -13 Td")
+        commands.append("ET")
+        return "\n".join(commands).encode("latin-1", errors="replace")
+
+    @staticmethod
+    def _escape_pdf_text(value: str) -> str:
+        ascii_value = str(value or "").encode("latin-1", errors="replace").decode("latin-1")
+        return ascii_value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
     @staticmethod
     def _validate_pdf_file(path: Path) -> None:
         if not path.exists():
@@ -1905,12 +2904,14 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--target-docs", type=int, default=None)
+    parser.add_argument("--input-pdf", default="")
+    parser.add_argument("--input-pdf-dir", default="")
     parser.add_argument("--manifest", default="")
     parser.add_argument("--source-pdf-root", default="")
     parser.add_argument(
         "--retrieval-backend",
         default="auto",
-        choices=["auto", "manifest", "filesystem", "crossref", "semantic_scholar", "europe_pmc", "scholarly", "sec"],
+        choices=["auto", "manifest", "filesystem", "direct_file", "direct_directory", "direct_url", "crossref", "semantic_scholar", "europe_pmc", "scholarly", "sec"],
     )
     parser.add_argument(
         "--retrieval-user-agent",
@@ -1945,6 +2946,26 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--statements-per-question", type=int, default=2)
     parser.add_argument("--statement-batch-size", type=int, default=16)
     parser.add_argument("--statement-max-tokens", type=int, default=192)
+    parser.add_argument("--manifold-mode", default="full", choices=["full", "lite", "moe"])
+    parser.add_argument("--topk", type=int, default=200)
+    parser.add_argument("--radii", default="1,2,3")
+    parser.add_argument("--maxnodes", default="10,20,30,40,60")
+    parser.add_argument("--lambda-edge", type=float, default=0.25)
+    parser.add_argument("--topk-models", type=int, default=5)
+    parser.add_argument("--topk-claims", type=int, default=30)
+    parser.add_argument("--alpha", type=float, default=1.0)
+    parser.add_argument("--tier1", type=float, default=0.60)
+    parser.add_argument("--tier2", type=float, default=0.30)
+    parser.add_argument("--anchors", default="")
+    parser.add_argument("--title", default="")
+    parser.add_argument("--dedupe-focus", action="store_true")
+    parser.add_argument("--require-anchor-in-focus", action="store_true")
+    parser.add_argument("--focus-blacklist-regex", default="")
+    parser.add_argument("--render-topk-pngs", action="store_true")
+    parser.add_argument("--assets-dir", default="assets")
+    parser.add_argument("--png-dpi", type=int, default=200)
+    parser.add_argument("--write-deep-dive", action="store_true")
+    parser.add_argument("--deep-dive-max-bullets", type=int, default=8)
     parser.add_argument("--intra-document-shards", type=int, default=1)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -1988,7 +3009,13 @@ def _resolve_query_for_main(args: argparse.Namespace) -> str:
             query_placeholder=(
                 "Analyze 10 studies on the benefits of drinking red wine and synthesize the results\n"
                 "or\n"
-                "Analyze recent 10-K filings for Nvidia and AMD"
+                "Analyze the PDF at /absolute/path/to/document.pdf\n"
+                "or\n"
+                "Analyze the PDFs in /absolute/path/to/folder\n"
+                "or\n"
+                "Analyze recent 10-K filings for Nvidia and AMD\n"
+                "or\n"
+                "Analyze the document at https://example.org/article"
             ),
             submit_label="Launch Democritus Run",
             waiting_message=(
@@ -2023,6 +3050,8 @@ def main() -> None:
             query=query,
             outdir=Path(args.outdir),
             target_documents=target_documents,
+            input_pdf_path=Path(args.input_pdf) if args.input_pdf else None,
+            input_pdf_dir=Path(args.input_pdf_dir) if args.input_pdf_dir else None,
             manifest_path=Path(args.manifest) if args.manifest else None,
             source_pdf_root=Path(args.source_pdf_root) if args.source_pdf_root else None,
             retrieval_backend=args.retrieval_backend,
@@ -2047,6 +3076,26 @@ def main() -> None:
             statements_per_question=args.statements_per_question,
             statement_batch_size=args.statement_batch_size,
             statement_max_tokens=args.statement_max_tokens,
+            manifold_mode=args.manifold_mode,
+            topk=args.topk,
+            radii=args.radii,
+            maxnodes=args.maxnodes,
+            lambda_edge=args.lambda_edge,
+            topk_models=args.topk_models,
+            topk_claims=args.topk_claims,
+            alpha=args.alpha,
+            tier1=args.tier1,
+            tier2=args.tier2,
+            anchors=args.anchors,
+            title=args.title,
+            dedupe_focus=args.dedupe_focus,
+            require_anchor_in_focus=args.require_anchor_in_focus,
+            focus_blacklist_regex=args.focus_blacklist_regex,
+            render_topk_pngs=args.render_topk_pngs,
+            assets_dir=args.assets_dir,
+            png_dpi=args.png_dpi,
+            write_deep_dive=args.write_deep_dive,
+            deep_dive_max_bullets=args.deep_dive_max_bullets,
             intra_document_shards=args.intra_document_shards,
             dry_run=args.dry_run,
         )

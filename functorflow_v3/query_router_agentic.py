@@ -133,12 +133,34 @@ class FF2QueryRouterConfig:
     outdir: Path
     execution_mode: str = "quick"
     route_override: str = "auto"
+    democritus_input_pdf_path: Path | None = None
+    democritus_input_pdf_dir: Path | None = None
     democritus_manifest_path: Path | None = None
     democritus_source_pdf_root: Path | None = None
     democritus_target_documents: int = 10
     democritus_retrieval_backend: str = "auto"
     democritus_max_docs: int = 0
     democritus_intra_document_shards: int = 1
+    democritus_manifold_mode: str = "full"
+    democritus_topk: int = 200
+    democritus_radii: str = "1,2,3"
+    democritus_maxnodes: str = "10,20,30,40,60"
+    democritus_lambda_edge: float = 0.25
+    democritus_topk_models: int = 5
+    democritus_topk_claims: int = 30
+    democritus_alpha: float = 1.0
+    democritus_tier1: float = 0.60
+    democritus_tier2: float = 0.30
+    democritus_anchors: str = ""
+    democritus_title: str = ""
+    democritus_dedupe_focus: bool = False
+    democritus_require_anchor_in_focus: bool = False
+    democritus_focus_blacklist_regex: str = ""
+    democritus_render_topk_pngs: bool = False
+    democritus_assets_dir: str = "assets"
+    democritus_png_dpi: int = 200
+    democritus_write_deep_dive: bool = False
+    democritus_deep_dive_max_bullets: int = 8
     defer_final_synthesis_to_cliff: bool = False
     democritus_discovery_only: bool = False
     democritus_dry_run: bool = False
@@ -167,12 +189,34 @@ class FF2QueryRouterConfig:
             outdir=self.outdir.resolve(),
             execution_mode="deep" if str(self.execution_mode).strip().lower() == "deep" else "quick",
             route_override=self.route_override,
+            democritus_input_pdf_path=self.democritus_input_pdf_path.resolve() if self.democritus_input_pdf_path else None,
+            democritus_input_pdf_dir=self.democritus_input_pdf_dir.resolve() if self.democritus_input_pdf_dir else None,
             democritus_manifest_path=self.democritus_manifest_path.resolve() if self.democritus_manifest_path else None,
             democritus_source_pdf_root=self.democritus_source_pdf_root.resolve() if self.democritus_source_pdf_root else None,
             democritus_target_documents=self.democritus_target_documents,
             democritus_retrieval_backend=self.democritus_retrieval_backend,
             democritus_max_docs=self.democritus_max_docs,
             democritus_intra_document_shards=max(1, int(self.democritus_intra_document_shards)),
+            democritus_manifold_mode=self.democritus_manifold_mode,
+            democritus_topk=max(1, int(self.democritus_topk)),
+            democritus_radii=self.democritus_radii,
+            democritus_maxnodes=self.democritus_maxnodes,
+            democritus_lambda_edge=float(self.democritus_lambda_edge),
+            democritus_topk_models=max(1, int(self.democritus_topk_models)),
+            democritus_topk_claims=max(1, int(self.democritus_topk_claims)),
+            democritus_alpha=float(self.democritus_alpha),
+            democritus_tier1=float(self.democritus_tier1),
+            democritus_tier2=float(self.democritus_tier2),
+            democritus_anchors=self.democritus_anchors,
+            democritus_title=self.democritus_title,
+            democritus_dedupe_focus=bool(self.democritus_dedupe_focus),
+            democritus_require_anchor_in_focus=bool(self.democritus_require_anchor_in_focus),
+            democritus_focus_blacklist_regex=self.democritus_focus_blacklist_regex,
+            democritus_render_topk_pngs=bool(self.democritus_render_topk_pngs),
+            democritus_assets_dir=self.democritus_assets_dir,
+            democritus_png_dpi=max(72, int(self.democritus_png_dpi)),
+            democritus_write_deep_dive=bool(self.democritus_write_deep_dive),
+            democritus_deep_dive_max_bullets=max(1, int(self.democritus_deep_dive_max_bullets)),
             defer_final_synthesis_to_cliff=self.defer_final_synthesis_to_cliff,
             democritus_discovery_only=self.democritus_discovery_only,
             democritus_dry_run=self.democritus_dry_run,
@@ -356,11 +400,33 @@ class FF2QueryRouter:
                 query=self.config.query,
                 outdir=route_outdir,
                 target_documents=self.config.democritus_target_documents,
+                input_pdf_path=self.config.democritus_input_pdf_path,
+                input_pdf_dir=self.config.democritus_input_pdf_dir,
                 manifest_path=self.config.democritus_manifest_path,
                 source_pdf_root=self.config.democritus_source_pdf_root,
                 retrieval_backend=self.config.democritus_retrieval_backend,
                 max_docs=self.config.democritus_max_docs,
                 intra_document_shards=self.config.democritus_intra_document_shards,
+                manifold_mode=self.config.democritus_manifold_mode,
+                topk=self.config.democritus_topk,
+                radii=self.config.democritus_radii,
+                maxnodes=self.config.democritus_maxnodes,
+                lambda_edge=self.config.democritus_lambda_edge,
+                topk_models=self.config.democritus_topk_models,
+                topk_claims=self.config.democritus_topk_claims,
+                alpha=self.config.democritus_alpha,
+                tier1=self.config.democritus_tier1,
+                tier2=self.config.democritus_tier2,
+                anchors=self.config.democritus_anchors,
+                title=self.config.democritus_title,
+                dedupe_focus=self.config.democritus_dedupe_focus,
+                require_anchor_in_focus=self.config.democritus_require_anchor_in_focus,
+                focus_blacklist_regex=self.config.democritus_focus_blacklist_regex,
+                render_topk_pngs=self.config.democritus_render_topk_pngs,
+                assets_dir=self.config.democritus_assets_dir,
+                png_dpi=self.config.democritus_png_dpi,
+                write_deep_dive=self.config.democritus_write_deep_dive,
+                deep_dive_max_bullets=self.config.democritus_deep_dive_max_bullets,
                 enable_corpus_synthesis=not self.config.defer_final_synthesis_to_cliff,
                 discovery_only=self.config.democritus_discovery_only,
                 dry_run=self.config.democritus_dry_run,
@@ -710,11 +776,23 @@ def _build_router_from_args_with_outdir(
         if args.democritus_target_docs is not None
         else (democritus_inferred_target or 10)
     )
-    democritus_max_docs = (
-        int(args.democritus_max_docs)
-        if args.democritus_max_docs is not None
-        else (democritus_inferred_target or 0)
-    )
+    if args.democritus_max_docs is not None:
+        democritus_max_docs = int(args.democritus_max_docs)
+    else:
+        democritus_default_target = democritus_inferred_target or 10
+        has_fixed_democritus_corpus = bool(
+            getattr(args, "democritus_input_pdf", "")
+            or getattr(args, "democritus_input_pdf_dir", "")
+            or getattr(args, "democritus_manifest", "")
+            or getattr(args, "democritus_source_pdf_root", "")
+        )
+        backend_name = str(getattr(args, "democritus_retrieval_backend", "auto") or "auto")
+        if has_fixed_democritus_corpus:
+            democritus_max_docs = democritus_inferred_target or 0
+        elif backend_name in {"auto", "scholarly", "crossref", "semantic_scholar", "europe_pmc"}:
+            democritus_max_docs = min(max(democritus_default_target * 3, democritus_default_target + 10), 100)
+        else:
+            democritus_max_docs = democritus_inferred_target or 0
     product_target_documents = (
         int(args.product_target_docs)
         if args.product_target_docs is not None
@@ -736,12 +814,42 @@ def _build_router_from_args_with_outdir(
             outdir=Path(outdir),
             execution_mode=getattr(args, "execution_mode", "quick"),
             route_override=args.route,
+            democritus_input_pdf_path=(
+                Path(getattr(args, "democritus_input_pdf", ""))
+                if getattr(args, "democritus_input_pdf", "")
+                else None
+            ),
+            democritus_input_pdf_dir=(
+                Path(getattr(args, "democritus_input_pdf_dir", ""))
+                if getattr(args, "democritus_input_pdf_dir", "")
+                else None
+            ),
             democritus_manifest_path=Path(args.democritus_manifest) if args.democritus_manifest else None,
             democritus_source_pdf_root=Path(args.democritus_source_pdf_root) if args.democritus_source_pdf_root else None,
             democritus_target_documents=democritus_target_documents,
             democritus_retrieval_backend=args.democritus_retrieval_backend,
             democritus_max_docs=democritus_max_docs,
             democritus_intra_document_shards=args.democritus_intra_document_shards,
+            democritus_manifold_mode=getattr(args, "democritus_manifold_mode", "full"),
+            democritus_topk=getattr(args, "democritus_topk", 200),
+            democritus_radii=getattr(args, "democritus_radii", "1,2,3"),
+            democritus_maxnodes=getattr(args, "democritus_maxnodes", "10,20,30,40,60"),
+            democritus_lambda_edge=getattr(args, "democritus_lambda_edge", 0.25),
+            democritus_topk_models=getattr(args, "democritus_topk_models", 5),
+            democritus_topk_claims=getattr(args, "democritus_topk_claims", 30),
+            democritus_alpha=getattr(args, "democritus_alpha", 1.0),
+            democritus_tier1=getattr(args, "democritus_tier1", 0.60),
+            democritus_tier2=getattr(args, "democritus_tier2", 0.30),
+            democritus_anchors=getattr(args, "democritus_anchors", ""),
+            democritus_title=getattr(args, "democritus_title", ""),
+            democritus_dedupe_focus=bool(getattr(args, "democritus_dedupe_focus", False)),
+            democritus_require_anchor_in_focus=bool(getattr(args, "democritus_require_anchor_in_focus", False)),
+            democritus_focus_blacklist_regex=getattr(args, "democritus_focus_blacklist_regex", ""),
+            democritus_render_topk_pngs=bool(getattr(args, "democritus_render_topk_pngs", False)),
+            democritus_assets_dir=getattr(args, "democritus_assets_dir", "assets"),
+            democritus_png_dpi=getattr(args, "democritus_png_dpi", 200),
+            democritus_write_deep_dive=bool(getattr(args, "democritus_write_deep_dive", False)),
+            democritus_deep_dive_max_bullets=getattr(args, "democritus_deep_dive_max_bullets", 8),
             defer_final_synthesis_to_cliff=bool(getattr(args, "cliff_defer_final_synthesis", False)),
             democritus_discovery_only=args.democritus_discovery_only,
             democritus_dry_run=args.democritus_dry_run,

@@ -209,11 +209,39 @@ def _build_worker_command(
         str(args.democritus_retrieval_backend),
         "--democritus-intra-document-shards",
         str(args.democritus_intra_document_shards),
+        "--democritus-manifold-mode",
+        str(getattr(args, "democritus_manifold_mode", "full")),
+        "--democritus-topk",
+        str(getattr(args, "democritus_topk", 200)),
+        "--democritus-radii",
+        str(getattr(args, "democritus_radii", "1,2,3")),
+        "--democritus-maxnodes",
+        str(getattr(args, "democritus_maxnodes", "10,20,30,40,60")),
+        "--democritus-lambda-edge",
+        str(getattr(args, "democritus_lambda_edge", 0.25)),
+        "--democritus-topk-models",
+        str(getattr(args, "democritus_topk_models", 5)),
+        "--democritus-topk-claims",
+        str(getattr(args, "democritus_topk_claims", 30)),
+        "--democritus-alpha",
+        str(getattr(args, "democritus_alpha", 1.0)),
+        "--democritus-tier1",
+        str(getattr(args, "democritus_tier1", 0.60)),
+        "--democritus-tier2",
+        str(getattr(args, "democritus_tier2", 0.30)),
+        "--democritus-assets-dir",
+        str(getattr(args, "democritus_assets_dir", "assets")),
+        "--democritus-png-dpi",
+        str(getattr(args, "democritus_png_dpi", 200)),
         "--sec-company-limit",
         str(args.sec_company_limit),
     ]
     if cycle_stage == "first_pass":
         command.append("--cliff-defer-final-synthesis")
+    if getattr(args, "democritus_input_pdf", ""):
+        command.extend(["--democritus-input-pdf", str(args.democritus_input_pdf)])
+    if getattr(args, "democritus_input_pdf_dir", ""):
+        command.extend(["--democritus-input-pdf-dir", str(args.democritus_input_pdf_dir)])
     if args.democritus_manifest:
         command.extend(["--democritus-manifest", str(args.democritus_manifest)])
     if args.democritus_source_pdf_root:
@@ -222,6 +250,27 @@ def _build_worker_command(
         command.extend(["--democritus-target-docs", str(args.democritus_target_docs)])
     if args.democritus_max_docs is not None:
         command.extend(["--democritus-max-docs", str(args.democritus_max_docs)])
+    if getattr(args, "democritus_anchors", ""):
+        command.extend(["--democritus-anchors", str(args.democritus_anchors)])
+    if getattr(args, "democritus_title", ""):
+        command.extend(["--democritus-title", str(args.democritus_title)])
+    if getattr(args, "democritus_dedupe_focus", False):
+        command.append("--democritus-dedupe-focus")
+    if getattr(args, "democritus_require_anchor_in_focus", False):
+        command.append("--democritus-require-anchor-in-focus")
+    if getattr(args, "democritus_focus_blacklist_regex", ""):
+        command.extend(["--democritus-focus-blacklist-regex", str(args.democritus_focus_blacklist_regex)])
+    if getattr(args, "democritus_render_topk_pngs", False):
+        command.append("--democritus-render-topk-pngs")
+    if getattr(args, "democritus_write_deep_dive", False):
+        command.append("--democritus-write-deep-dive")
+    if getattr(args, "democritus_deep_dive_max_bullets", None) is not None:
+        command.extend(
+            [
+                "--democritus-deep-dive-max-bullets",
+                str(getattr(args, "democritus_deep_dive_max_bullets")),
+            ]
+        )
     if args.democritus_discovery_only:
         command.append("--democritus-discovery-only")
     if args.democritus_dry_run:
@@ -650,12 +699,34 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--execution-mode", choices=("quick", "deep"), default="quick")
     parser.add_argument("--route", choices=("auto", "democritus", "basket_rocket_sec", "culinary_tour", "product_feedback", "company_similarity", "course_demo"), default="auto")
+    parser.add_argument("--democritus-input-pdf", default="")
+    parser.add_argument("--democritus-input-pdf-dir", default="")
     parser.add_argument("--democritus-manifest", default="")
     parser.add_argument("--democritus-source-pdf-root", default="")
     parser.add_argument("--democritus-target-docs", type=int, default=None)
     parser.add_argument("--democritus-retrieval-backend", default="auto")
     parser.add_argument("--democritus-max-docs", type=int, default=None)
     parser.add_argument("--democritus-intra-document-shards", type=int, default=1)
+    parser.add_argument("--democritus-manifold-mode", default="full", choices=("full", "lite", "moe"))
+    parser.add_argument("--democritus-topk", type=int, default=200)
+    parser.add_argument("--democritus-radii", default="1,2,3")
+    parser.add_argument("--democritus-maxnodes", default="10,20,30,40,60")
+    parser.add_argument("--democritus-lambda-edge", type=float, default=0.25)
+    parser.add_argument("--democritus-topk-models", type=int, default=5)
+    parser.add_argument("--democritus-topk-claims", type=int, default=30)
+    parser.add_argument("--democritus-alpha", type=float, default=1.0)
+    parser.add_argument("--democritus-tier1", type=float, default=0.60)
+    parser.add_argument("--democritus-tier2", type=float, default=0.30)
+    parser.add_argument("--democritus-anchors", default="")
+    parser.add_argument("--democritus-title", default="")
+    parser.add_argument("--democritus-dedupe-focus", action="store_true")
+    parser.add_argument("--democritus-require-anchor-in-focus", action="store_true")
+    parser.add_argument("--democritus-focus-blacklist-regex", default="")
+    parser.add_argument("--democritus-render-topk-pngs", action="store_true")
+    parser.add_argument("--democritus-assets-dir", default="assets")
+    parser.add_argument("--democritus-png-dpi", type=int, default=200)
+    parser.add_argument("--democritus-write-deep-dive", action="store_true")
+    parser.add_argument("--democritus-deep-dive-max-bullets", type=int, default=8)
     parser.add_argument("--democritus-discovery-only", action="store_true")
     parser.add_argument("--democritus-dry-run", action="store_true")
     parser.add_argument("--product-manifest", default="")
@@ -716,6 +787,10 @@ def main() -> None:
                     query_label="CLIFF query",
                     query_placeholder=(
                         "Analyze 10 recent Adobe 10-K filings and extract their workflows\n"
+                        "or\n"
+                        "Analyze the PDF at /absolute/path/to/document.pdf\n"
+                        "or\n"
+                        "Analyze the PDFs in /absolute/path/to/folder\n"
                         "or\n"
                         "Plan a seafood tour for Boston from July 6th-10th\n"
                         "or\n"

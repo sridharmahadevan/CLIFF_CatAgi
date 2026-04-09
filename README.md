@@ -174,6 +174,8 @@ Best for:
 
 - multi-document synthesis
 - study retrieval and corpus gluing
+- single-document analysis from a direct article or PDF URL
+- single-document analysis from a local uploaded PDF path
 - CSQL-backed textbook-grounded analysis
 - building the causal substrate that several heavier CLIFF routes depend on
 

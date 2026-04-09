@@ -105,6 +105,12 @@ class QueryRouterAgenticTests(unittest.TestCase):
         self.assertEqual(decision.route_name, "democritus")
         self.assertIn("Democritus", decision.rationale)
 
+    def test_route_ff2_query_defaults_to_democritus_for_direct_document_url(self) -> None:
+        decision = module.route_ff2_query("Analyze the document at https://example.org/news/story-about-water")
+
+        self.assertEqual(decision.route_name, "democritus")
+        self.assertIn("Democritus", decision.rationale)
+
     def test_route_ff2_query_honors_override(self) -> None:
         decision = module.route_ff2_query(
             "How comfortable is the Lovesac sectional sofa?",
@@ -294,6 +300,7 @@ class QueryRouterAgenticTests(unittest.TestCase):
         args = SimpleNamespace(
             outdir="/tmp/ff2-router",
             route="auto",
+            democritus_input_pdf_dir="",
             democritus_manifest="",
             democritus_source_pdf_root="",
             democritus_target_docs=10,
@@ -327,6 +334,7 @@ class QueryRouterAgenticTests(unittest.TestCase):
         args = SimpleNamespace(
             outdir="/tmp/ff2-router",
             route="auto",
+            democritus_input_pdf_dir="",
             democritus_manifest="",
             democritus_source_pdf_root="",
             democritus_target_docs=None,
@@ -356,18 +364,39 @@ class QueryRouterAgenticTests(unittest.TestCase):
         )
 
         self.assertEqual(router.config.democritus_target_documents, 5)
-        self.assertEqual(router.config.democritus_max_docs, 5)
+        self.assertEqual(router.config.democritus_max_docs, 15)
 
     def test_build_router_from_args_honors_explicit_democritus_overrides(self) -> None:
         args = SimpleNamespace(
             outdir="/tmp/ff2-router",
             route="auto",
+            democritus_input_pdf_dir="",
             democritus_manifest="",
             democritus_source_pdf_root="",
             democritus_target_docs=8,
             democritus_retrieval_backend="auto",
             democritus_max_docs=12,
             democritus_intra_document_shards=1,
+            democritus_manifold_mode="moe",
+            democritus_topk=144,
+            democritus_radii="2,4",
+            democritus_maxnodes="12,24",
+            democritus_lambda_edge=0.4,
+            democritus_topk_models=7,
+            democritus_topk_claims=21,
+            democritus_alpha=1.3,
+            democritus_tier1=0.7,
+            democritus_tier2=0.2,
+            democritus_anchors="resveratrol, red wine",
+            democritus_title="Red Wine Democritus",
+            democritus_dedupe_focus=True,
+            democritus_require_anchor_in_focus=True,
+            democritus_focus_blacklist_regex="^generic$",
+            democritus_render_topk_pngs=True,
+            democritus_assets_dir="credibility_assets",
+            democritus_png_dpi=240,
+            democritus_write_deep_dive=True,
+            democritus_deep_dive_max_bullets=11,
             democritus_discovery_only=False,
             democritus_dry_run=False,
             product_manifest="",
@@ -392,11 +421,32 @@ class QueryRouterAgenticTests(unittest.TestCase):
 
         self.assertEqual(router.config.democritus_target_documents, 8)
         self.assertEqual(router.config.democritus_max_docs, 12)
+        self.assertEqual(router.config.democritus_manifold_mode, "moe")
+        self.assertEqual(router.config.democritus_topk, 144)
+        self.assertEqual(router.config.democritus_radii, "2,4")
+        self.assertEqual(router.config.democritus_maxnodes, "12,24")
+        self.assertEqual(router.config.democritus_lambda_edge, 0.4)
+        self.assertEqual(router.config.democritus_topk_models, 7)
+        self.assertEqual(router.config.democritus_topk_claims, 21)
+        self.assertEqual(router.config.democritus_alpha, 1.3)
+        self.assertEqual(router.config.democritus_tier1, 0.7)
+        self.assertEqual(router.config.democritus_tier2, 0.2)
+        self.assertEqual(router.config.democritus_anchors, "resveratrol, red wine")
+        self.assertEqual(router.config.democritus_title, "Red Wine Democritus")
+        self.assertTrue(router.config.democritus_dedupe_focus)
+        self.assertTrue(router.config.democritus_require_anchor_in_focus)
+        self.assertEqual(router.config.democritus_focus_blacklist_regex, "^generic$")
+        self.assertTrue(router.config.democritus_render_topk_pngs)
+        self.assertEqual(router.config.democritus_assets_dir, "credibility_assets")
+        self.assertEqual(router.config.democritus_png_dpi, 240)
+        self.assertTrue(router.config.democritus_write_deep_dive)
+        self.assertEqual(router.config.democritus_deep_dive_max_bullets, 11)
 
     def test_build_router_from_args_with_outdir_uses_override_directory(self) -> None:
         args = SimpleNamespace(
             outdir="/tmp/ff2-router",
             route="auto",
+            democritus_input_pdf_dir="",
             democritus_manifest="",
             democritus_source_pdf_root="",
             democritus_target_docs=None,
@@ -427,6 +477,42 @@ class QueryRouterAgenticTests(unittest.TestCase):
         )
 
         self.assertEqual(router.config.outdir, Path("/tmp/ff2-router-run-0001").resolve())
+
+    def test_build_router_from_args_passes_direct_pdf_directory_override(self) -> None:
+        args = SimpleNamespace(
+            outdir="/tmp/ff2-router",
+            route="auto",
+            democritus_input_pdf="/tmp/uploaded_paper.pdf",
+            democritus_input_pdf_dir="/tmp/uploaded_pdfs",
+            democritus_manifest="",
+            democritus_source_pdf_root="",
+            democritus_target_docs=None,
+            democritus_retrieval_backend="auto",
+            democritus_max_docs=None,
+            democritus_intra_document_shards=1,
+            democritus_discovery_only=False,
+            democritus_dry_run=False,
+            product_manifest="",
+            product_target_docs=None,
+            product_max_docs=None,
+            product_name="",
+            brand_name="",
+            analysis_question="",
+            product_discovery_only=False,
+            sec_target_filings=None,
+            sec_retrieval_user_agent="",
+            sec_form=[],
+            sec_company_limit=3,
+            sec_discovery_only=False,
+            sec_dry_run=False,
+        )
+
+        router = module._build_router_from_args(
+            args,
+            query="Analyze the PDFs in /tmp/uploaded_pdfs",
+        )
+
+        self.assertEqual(router.config.democritus_input_pdf_dir, Path("/tmp/uploaded_pdfs").resolve())
 
     def test_run_session_query_updates_launcher_and_opens_completed_artifact(self) -> None:
         class FakeLauncher:
