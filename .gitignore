@@ -2,6 +2,8 @@
 .pytest_cache/
 .venv/
 .venv_ff/
+.venv_cliff/
+.venv_cliffcatagi/
 __pycache__/
 *.pyc
 *.pyo
