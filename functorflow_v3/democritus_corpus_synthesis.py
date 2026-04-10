@@ -115,6 +115,8 @@ _PHRASE_REWRITES: tuple[tuple[str, str], ...] = (
     (r"\bpatients\b", "people"),
     (r"\bsubjects\b", "people"),
     (r"\bpersons\b", "people"),
+    (r"\bmoving\b", "move"),
+    (r"\bmoves\b", "move"),
 )
 
 _RELATION_REWRITES = {
@@ -124,6 +126,24 @@ _RELATION_REWRITES = {
     "results_in": "causes",
     "results in": "causes",
     "influences": "affects",
+}
+
+_DISPLAY_TOKEN_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "by",
+    "for",
+    "in",
+    "into",
+    "of",
+    "on",
+    "that",
+    "the",
+    "their",
+    "this",
+    "to",
+    "which",
 }
 
 
@@ -159,6 +179,8 @@ def build_democritus_corpus_synthesis(
             if item.truth_value in {"provisional_support", "weak_support"}
             and (item.subj, item.obj, item.domain) not in contested_keys
         ]
+        strong_claims = _coalesce_display_claims(strong_claims, total_documents=total_documents)
+        weak_claims = _coalesce_display_claims(weak_claims, total_documents=total_documents)
         study_cards = _load_study_cards(connection, batch_outdir=batch_outdir)
 
     payload = {
@@ -357,6 +379,99 @@ def _load_claims(connection: sqlite3.Connection, *, total_documents: int) -> lis
     return claims
 
 
+def _token_signature(value: str) -> tuple[str, ...]:
+    normalized = _normalize_claim_text(value)
+    if not normalized:
+        return ()
+    tokens = [
+        token
+        for token in normalized.split()
+        if token and token not in _DISPLAY_TOKEN_STOPWORDS
+    ]
+    if not tokens:
+        return ()
+    return tuple(sorted(dict.fromkeys(tokens)))
+
+
+def _domain_rank(value: str) -> tuple[int, int]:
+    text = str(value or "").strip()
+    lowered = text.lower()
+    is_placeholder = lowered.startswith("no relevant content on ")
+    return (0 if is_placeholder else 1, len(text))
+
+
+def _coalesce_display_claims(
+    claims: list[CorpusClaim],
+    *,
+    total_documents: int,
+) -> list[CorpusClaim]:
+    if total_documents > 1 or len(claims) <= 1:
+        return claims
+
+    grouped: dict[tuple[tuple[str, ...], str, tuple[str, ...]], list[CorpusClaim]] = {}
+    for item in claims:
+        key = (
+            _token_signature(item.subj),
+            _normalize_relation(item.rel),
+            _token_signature(item.obj),
+        )
+        if not all(key):
+            key = ((item.subj.strip().lower(),), _normalize_relation(item.rel), (item.obj.strip().lower(),))
+        grouped.setdefault(key, []).append(item)
+
+    collapsed: list[CorpusClaim] = []
+    for items in grouped.values():
+        if len(items) == 1:
+            collapsed.append(items[0])
+            continue
+        representative = max(
+            items,
+            key=lambda item: (
+                int(item.document_support),
+                int(item.claim_count),
+                _domain_rank(item.domain),
+                len(item.statement),
+            ),
+        )
+        supporting_runs: list[str] = []
+        seen_runs: set[str] = set()
+        for item in items:
+            for run_name in item.supporting_runs:
+                if run_name in seen_runs:
+                    continue
+                seen_runs.add(run_name)
+                supporting_runs.append(run_name)
+        best_domain = max((item.domain for item in items), key=_domain_rank, default=representative.domain)
+        collapsed.append(
+            CorpusClaim(
+                subj=representative.subj,
+                rel=representative.rel,
+                obj=representative.obj,
+                domain=best_domain,
+                statement=representative.statement,
+                claim_count=sum(int(item.claim_count) for item in items),
+                document_support=len(supporting_runs),
+                support_ratio=round(len(supporting_runs) / total_documents, 3) if total_documents else 0.0,
+                truth_value=_support_truth_value(
+                    document_support=len(supporting_runs),
+                    total_documents=total_documents,
+                ),
+                supporting_runs=tuple(supporting_runs),
+            )
+        )
+
+    collapsed.sort(
+        key=lambda item: (
+            -item.document_support,
+            -item.claim_count,
+            item.subj.lower(),
+            item.rel.lower(),
+            item.obj.lower(),
+        )
+    )
+    return collapsed
+
+
 def _load_disagreements(connection: sqlite3.Connection, *, total_documents: int) -> list[CorpusDisagreement]:
     rows = connection.execute(
         """
@@ -538,6 +653,36 @@ def _render_dashboard_html(
     def esc(value: object) -> str:
         return html.escape(str(value))
 
+    n_documents = int(payload.get("n_documents") or 0)
+    single_document_mode = n_documents <= 1
+    disagreement_empty_text = (
+        "No internal relation variants were detected in the current document graph."
+        if single_document_mode
+        else "No cross-study disagreements were detected in the current corpus graph."
+    )
+    disagreement_label = "Relation Variants" if single_document_mode else "Disagreements"
+    disagreement_chip = "relation-variant surfaces" if single_document_mode else "disagreement surfaces"
+    hero_trace = (
+        "The conscious layer commissioned a corpus-level agent after Democritus finished. "
+        "For a single recovered document, the synthesized claims are classified by internal support tiers, "
+        "diagnostic near-matches, and relation variants where the document graph did not glue into one verb."
+        if single_document_mode
+        else
+        "The conscious layer commissioned a corpus-level agent after Democritus finished. "
+        "Instead of a Boolean true/false verdict, the synthesized claims are classified by cross-study support, "
+        "partial support, and disagreement across the recovered corpus graph."
+    )
+    classifier_trace = (
+        "`provisional_support` and `weak_support` describe how often the same edge reappeared inside this single document graph. "
+        "In a single-document run, the relation-variant cards below do not mean two studies disagree; they mean Democritus "
+        "produced multiple nearby relations, such as `causes` versus `influences`, for the same subject/object pair."
+        if single_document_mode
+        else
+        "`entailed` means every recovered study supported the same edge. `strong_support` means a majority-level cross-study pattern. "
+        "`provisional_support` and `weak_support` mark partial but incomplete agreement. Disagreement cards show where the corpus "
+        "does not glue into a single relation without remainder."
+    )
+
     strong_markup = "".join(_render_claim_card(item) for item in payload.get("strongly_supported") or []) or (
         '<div class="empty">No strongly supported cross-study claims were recovered yet.</div>'
     )
@@ -548,7 +693,7 @@ def _render_dashboard_html(
         '<div class="empty">No additional claims were recovered by the relaxed diagnostic gluing pass.</div>'
     )
     disagreement_markup = "".join(_render_disagreement_card(item) for item in payload.get("disagreements") or []) or (
-        '<div class="empty">No cross-study disagreements were detected in the current corpus graph.</div>'
+        f'<div class="empty">{esc(disagreement_empty_text)}</div>'
     )
     study_markup = "".join(_render_study_card(item) for item in payload.get("study_cards") or []) or (
         '<div class="empty">Study cards will appear once document-level artifacts are available.</div>'
@@ -611,13 +756,13 @@ def _render_dashboard_html(
         <div>
           <p class="eyebrow">CLIFF Topos Synthesis</p>
           <h1>{esc(payload.get("query") or "Democritus corpus synthesis")}</h1>
-          <p class="trace">The conscious layer commissioned a corpus-level agent after Democritus finished. Instead of a Boolean true/false verdict, the synthesized claims are classified by cross-study support, partial support, and disagreement across the recovered corpus graph.</p>
+          <p class="trace">{esc(hero_trace)}</p>
           <div class="chip-row">
-            <span class="chip">{esc(payload.get("n_documents") or 0)} studies glued into one corpus object</span>
+            <span class="chip">{esc(n_documents)} {"document" if n_documents == 1 else "documents"} glued into one corpus object</span>
             <span class="chip">{esc(len(payload.get("strongly_supported") or []))} strongly supported claims</span>
             <span class="chip">{esc(len(payload.get("weakly_supported") or []))} weak or provisional claims</span>
             <span class="chip">{esc(len(payload.get("diagnostic_supported") or []))} normalized diagnostic claims</span>
-            <span class="chip">{esc(len(payload.get("disagreements") or []))} disagreement surfaces</span>
+            <span class="chip">{esc(len(payload.get("disagreements") or []))} {esc(disagreement_chip)}</span>
           </div>
           <div class="link-row">
             {f'<a href="{esc(democritus_gui_href)}" target="_blank" rel="noreferrer">Open Democritus batch GUI</a>' if democritus_gui_href else ''}
@@ -626,7 +771,7 @@ def _render_dashboard_html(
         </div>
         <div class="panel" style="padding:18px; background:#f8ede0;">
           <p class="eyebrow">Subobject Classifier</p>
-          <p class="trace">`entailed` means every recovered study supported the same edge. `strong_support` means a majority-level cross-study pattern. `provisional_support` and `weak_support` mark partial but incomplete agreement. Disagreement cards show where the corpus does not glue into a single relation without remainder.</p>
+          <p class="trace">{esc(classifier_trace)}</p>
         </div>
       </section>
       <section class="panel">
@@ -649,7 +794,7 @@ def _render_dashboard_html(
       </section>
       <section class="section-grid">
         <section class="panel">
-          <p class="eyebrow">Disagreements</p>
+          <p class="eyebrow">{esc(disagreement_label)}</p>
           <div class="claim-grid">{disagreement_markup}</div>
         </section>
         <section class="panel">

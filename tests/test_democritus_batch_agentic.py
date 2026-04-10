@@ -405,6 +405,74 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             self.assertIn("Normalized Diagnostic Support", synthesis_html)
             self.assertIn("glp1 receptor agonist", synthesis_html)
 
+    def test_single_document_corpus_synthesis_coalesces_near_duplicate_claim_cards(self) -> None:
+        class FakeRunner:
+            def __init__(self, outdir: Path) -> None:
+                self.outdir = outdir
+
+            def _execute_agent(self, agent_name: str, frontier_index: int):
+                triples_path = self.outdir / "relational_triples.jsonl"
+                triples_path.parent.mkdir(parents=True, exist_ok=True)
+                triples_path.write_text(
+                    "\n".join(
+                        [
+                            '{"topic":"antarctic warming","path":["antarctic warming"],"question":"q","statement":"Rising ocean temperatures lead to krill moving to deeper waters, which reduces the food availability for Antarctic fur seals.","subj":"rising ocean temperatures","rel":"leads_to","obj":"krill moving to deeper waters, which reduces the food availability for antarctic fur seals","domain":"No relevant content on sea ice loss"}',
+                            '{"topic":"antarctic warming","path":["antarctic warming"],"question":"q","statement":"Rising ocean temperatures cause krill to move to deeper waters, which reduces food availability for Antarctic fur seals.","subj":"rising ocean temperatures","rel":"causes","obj":"krill to move to deeper waters, which reduces food availability for antarctic fur seals","domain":"Climate change effects on species"}',
+                            '{"topic":"antarctic warming","path":["antarctic warming"],"question":"q","statement":"Rising ocean temperatures cause krill to move to deeper waters, which reduces the availability of food for Antarctic fur seals.","subj":"rising ocean temperatures","rel":"causes","obj":"krill to move to deeper waters, which reduces the availability of food for antarctic fur seals","domain":"No relevant content on Antarctic species"}',
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return DemocritusAgentRecord(
+                    agent_name=agent_name,
+                    frontier_index=frontier_index,
+                    status="ok",
+                    started_at=0.0,
+                    ended_at=1.0,
+                    outputs=(str(triples_path),),
+                    log_path=None,
+                    notes="",
+                )
+
+        class FakeBatchRunner(DemocritusBatchAgenticRunner):
+            def _discover_documents(self):
+                run_name = "run_0"
+                outdir = Path(self.config.outdir) / run_name
+                return (
+                    DemocritusBatchDocument(
+                        index=0,
+                        pdf_path=Path("/tmp/run_0.pdf"),
+                        run_name=run_name,
+                        outdir=outdir,
+                        runner=FakeRunner(outdir),
+                        plan=((SimpleNamespace(name="triple_extraction_agent"),),),
+                    ),
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = FakeBatchRunner(
+                DemocritusBatchConfig(
+                    pdf_dir=Path(tmpdir),
+                    outdir=Path(tmpdir) / "runs",
+                    max_workers=1,
+                    dry_run=False,
+                )
+            )
+
+            result = runner.run_with_artifacts()
+
+            self.assertIsNotNone(result.corpus_synthesis)
+            synthesis_payload = json.loads(result.corpus_synthesis.summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(synthesis_payload["weakly_supported"]), 1)
+            weak_claim = synthesis_payload["weakly_supported"][0]
+            self.assertEqual(weak_claim["document_support"], 1)
+            self.assertEqual(weak_claim["claim_count"], 3)
+            self.assertEqual(weak_claim["domain"], "Climate change effects on species")
+            self.assertIn("Rising ocean temperatures", weak_claim["statement"])
+            synthesis_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
+            self.assertIn("Climate change effects on species", synthesis_html)
+
     def test_incremental_corpus_synthesis_refreshes_only_when_new_triple_documents_arrive(self) -> None:
         class FakeRunner:
             def _execute_agent(self, agent_name: str, frontier_index: int):
