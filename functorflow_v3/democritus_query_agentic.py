@@ -101,6 +101,43 @@ _STOPWORDS = {
     "url",
 }
 
+_GENERIC_RETRIEVAL_TOKENS = {
+    "benefit",
+    "benefits",
+    "burden",
+    "consumption",
+    "diet",
+    "drinking",
+    "effect",
+    "effects",
+    "exposure",
+    "health",
+    "impact",
+    "impacts",
+    "lifestyle",
+    "management",
+    "mechanism",
+    "mechanisms",
+    "outcome",
+    "outcomes",
+    "patient",
+    "patients",
+    "population",
+    "populations",
+    "prevention",
+    "protective",
+    "response",
+    "responses",
+    "review",
+    "reviews",
+    "risk",
+    "risks",
+    "safety",
+    "therapy",
+    "treatment",
+    "treatments",
+}
+
 _SEC_COMPANY_QUERY_STOPWORDS = {
     "10",
     "8",
@@ -288,17 +325,114 @@ def _tokenize(text: str) -> tuple[str, ...]:
     )
 
 
+def _ordered_query_tokens(plan: "QueryPlan") -> tuple[str, ...]:
+    query = plan.retrieval_query or plan.normalized_query or plan.query
+    return _tokenize(query)
+
+
+def _split_query_tokens(plan: "QueryPlan") -> tuple[tuple[str, ...], tuple[str, ...]]:
+    ordered_tokens = _ordered_query_tokens(plan)
+    if not ordered_tokens:
+        ordered_tokens = tuple(token for token in plan.keyword_tokens if token)
+    anchors: list[str] = []
+    generic: list[str] = []
+    seen: set[str] = set()
+    for token in ordered_tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        if token in _GENERIC_RETRIEVAL_TOKENS:
+            generic.append(token)
+        else:
+            anchors.append(token)
+    if anchors:
+        return tuple(anchors), tuple(generic)
+    return tuple(generic), ()
+
+
+def _best_query_phrase_match(plan: "QueryPlan", primary_text: str, full_text: str) -> tuple[float, str | None]:
+    ordered_anchors, _ = _split_query_tokens(plan)
+    if len(ordered_anchors) < 2:
+        return 0.0, None
+    best_phrase: str | None = None
+    best_score = 0.0
+    max_window = min(3, len(ordered_anchors))
+    for window in range(max_window, 1, -1):
+        for index in range(len(ordered_anchors) - window + 1):
+            phrase = " ".join(ordered_anchors[index : index + window])
+            if phrase in primary_text:
+                return 5.0 + float(window - 2), f"title_phrase:{phrase}"
+            if best_phrase is None and phrase in full_text:
+                best_phrase = phrase
+                best_score = 2.0 + float(window - 2) * 0.5
+    if best_phrase is None:
+        return 0.0, None
+    return best_score, f"text_phrase:{best_phrase}"
+
+
 def _match_score(plan: "QueryPlan", *texts: str) -> tuple[float, tuple[str, ...]]:
-    haystack = " ".join(texts).lower()
-    evidence = []
+    primary_text = " ".join(str(texts[0] or "").lower().split()) if texts else ""
+    secondary_text = " ".join(" ".join(str(text or "") for text in texts[1:]).lower().split())
+    haystack = " ".join(part for part in (primary_text, secondary_text) if part)
+    primary_tokens = set(_tokenize(primary_text))
+    secondary_tokens = set(_tokenize(secondary_text))
+    anchor_tokens, generic_tokens = _split_query_tokens(plan)
+    evidence: list[str] = []
     score = 0.0
     if plan.normalized_query and plan.normalized_query in haystack:
-        score += 5.0
+        score += 6.0
         evidence.append("exact_query")
-    matched = sorted({token for token in plan.keyword_tokens if token in haystack})
-    score += float(len(matched))
-    evidence.extend(matched)
-    return score, tuple(evidence)
+    phrase_bonus, phrase_evidence = _best_query_phrase_match(plan, primary_text, haystack)
+    score += phrase_bonus
+    if phrase_evidence:
+        evidence.append(phrase_evidence)
+    title_anchor_matches = tuple(token for token in anchor_tokens if token in primary_tokens)
+    text_anchor_matches = tuple(token for token in anchor_tokens if token in secondary_tokens)
+    if anchor_tokens and not title_anchor_matches and not text_anchor_matches and "exact_query" not in evidence:
+        return 0.0, ()
+    title_generic_matches = tuple(token for token in generic_tokens if token in primary_tokens)
+    text_generic_matches = tuple(token for token in generic_tokens if token in secondary_tokens)
+    score += 3.0 * float(len(title_anchor_matches))
+    score += 0.85 * float(len(text_anchor_matches))
+    score += 0.35 * float(len(title_generic_matches))
+    score += 0.10 * float(len(text_generic_matches))
+    matched_anchor_count = len(set(title_anchor_matches) | set(text_anchor_matches))
+    if len(anchor_tokens) >= 2 and len(title_anchor_matches) >= 2:
+        score += 2.0
+        evidence.append("title_anchor_pair")
+    elif len(anchor_tokens) >= 2 and matched_anchor_count >= 2:
+        score += 0.75
+        evidence.append("anchor_pair")
+    elif len(anchor_tokens) >= 2 and matched_anchor_count == 1 and not title_anchor_matches:
+        score *= 0.5
+    if anchor_tokens and not title_anchor_matches and matched_anchor_count < min(2, len(anchor_tokens)):
+        score *= 0.65
+    evidence.extend(f"title:{token}" for token in title_anchor_matches)
+    evidence.extend(f"text:{token}" for token in text_anchor_matches if token not in title_anchor_matches)
+    evidence.extend(title_anchor_matches)
+    evidence.extend(token for token in text_anchor_matches if token not in title_anchor_matches)
+    evidence.extend(f"generic_title:{token}" for token in title_generic_matches)
+    evidence.extend(f"generic_text:{token}" for token in text_generic_matches if token not in title_generic_matches)
+    deduped_evidence = tuple(dict.fromkeys(evidence))
+    return max(score, 0.0), deduped_evidence
+
+
+def _scholarly_citation_bonus(score: float, evidence: tuple[str, ...], citations: object, *, divisor: float) -> float:
+    if score < 3.0:
+        return 0.0
+    if not any(
+        item == "exact_query"
+        or item == "title_anchor_pair"
+        or item.startswith("title_phrase:")
+        or item.startswith("title:")
+        for item in evidence
+    ):
+        return 0.0
+    try:
+        citation_count = float(citations or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return min(citation_count / divisor, 1.5)
 
 
 def _sec_company_match_score(plan: "QueryPlan", *texts: str) -> tuple[float, tuple[str, ...]]:
@@ -843,7 +977,7 @@ class DemocritusQueryAgenticConfig:
     agent_concurrency_limits: tuple[tuple[str, int], ...] = ()
     include_phase2: bool = True
     auto_topics_from_pdf: bool = True
-    root_topic_strategy: str = "v0_openai"
+    root_topic_strategy: str = "summary_guided"
     depth_limit: int = 3
     max_total_topics: int = 100
     statements_per_question: int = 2
@@ -901,7 +1035,7 @@ class DemocritusQueryAgenticConfig:
             explicit_dir=self.input_pdf_dir,
         )
         if execution_mode == "quick" and not direct_document_input:
-            if root_topic_strategy == "v0_openai":
+            if root_topic_strategy in {"v0_openai", "summary_guided"}:
                 root_topic_strategy = "heuristic"
             depth_limit = min(depth_limit, 2)
             max_total_topics = min(max_total_topics, 40)
@@ -1056,7 +1190,12 @@ class EuropePMCOARetrievalBackend(HttpJsonRetrievalBackend):
             abstract = str(item.get("abstractText") or "")
             journal = str(item.get("journalTitle") or "")
             score, evidence = _match_score(plan, title, abstract, journal)
-            score += float(item.get("citedByCount") or 0) / 250.0
+            score += _scholarly_citation_bonus(
+                score,
+                evidence,
+                item.get("citedByCount"),
+                divisor=250.0,
+            )
             if score <= 0.0:
                 continue
             pmcid = self._normalize_pmcid(str(item.get("pmcid") or ""))
@@ -1343,7 +1482,12 @@ class CrossrefRetrievalBackend(HttpJsonRetrievalBackend):
             title = title_values[0].strip() if title_values else "untitled_work"
             abstract = str(item.get("abstract") or "")
             score, evidence = _match_score(plan, title, abstract)
-            score += float(item.get("is-referenced-by-count") or 0) / 500.0
+            score += _scholarly_citation_bonus(
+                score,
+                evidence,
+                item.get("is-referenced-by-count"),
+                divisor=500.0,
+            )
             if score <= 0.0:
                 continue
             links = item.get("link") or []
@@ -1403,7 +1547,12 @@ class SemanticScholarRetrievalBackend(HttpJsonRetrievalBackend):
             title = str(item.get("title") or "untitled_paper")
             abstract = str(item.get("abstract") or "")
             score, evidence = _match_score(plan, title, abstract, str(item.get("venue") or ""))
-            score += float(item.get("citationCount") or 0) / 250.0
+            score += _scholarly_citation_bonus(
+                score,
+                evidence,
+                item.get("citationCount"),
+                divisor=250.0,
+            )
             if score <= 0.0:
                 continue
             open_access_pdf = item.get("openAccessPdf") or {}
@@ -2976,7 +3125,11 @@ def _parse_args() -> argparse.Namespace:
         help="Per-agent concurrency limit in the form agent_name=limit. May be repeated.",
     )
     parser.add_argument("--skip-phase2", action="store_true")
-    parser.add_argument("--root-topic-strategy", default="v0_openai", choices=["v0_openai", "heuristic"])
+    parser.add_argument(
+        "--root-topic-strategy",
+        default="summary_guided",
+        choices=["summary_guided", "v0_openai", "heuristic"],
+    )
     parser.add_argument("--no-auto-topics", action="store_true")
     parser.add_argument("--depth-limit", type=int, default=3)
     parser.add_argument("--max-total-topics", type=int, default=100)

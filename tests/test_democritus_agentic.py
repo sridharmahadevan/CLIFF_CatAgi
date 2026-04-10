@@ -130,6 +130,149 @@ class DemocritusAgenticTests(unittest.TestCase):
             self.assertIn("attempt 3/3 failed", log_text)
             self.assertIn("Falling back to heuristic topic discovery", log_text)
 
+    def test_root_topic_discovery_agent_uses_summary_guided_strategy_and_writes_guide(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir)
+            input_pdf = outdir / "input.pdf"
+            input_pdf.write_bytes(b"%PDF-1.4\n%fake\n")
+            runner = DemocritusAgenticRunner(
+                DemocritusAgenticConfig(
+                    outdir=outdir,
+                    input_pdf=input_pdf,
+                    auto_topics_from_pdf=True,
+                    root_topic_strategy="summary_guided",
+                    include_phase2=False,
+                )
+            )
+
+            calls = {"summary_guided": 0, "v0_openai": 0}
+
+            def succeed_summary_guided() -> tuple[str, ...]:
+                calls["summary_guided"] += 1
+                runner._topic_guidance_path().write_text(
+                    json.dumps({"raw": "SUMMARY: emperor penguins lose sea ice habitat"}, indent=2),
+                    encoding="utf-8",
+                )
+                return ("emperor penguin decline", "sea ice breakup")
+
+            def fail_v0_openai() -> tuple[str, ...]:
+                calls["v0_openai"] += 1
+                raise AssertionError("v0_openai strategy should not be used")
+
+            runner._discover_root_topics_summary_guided = succeed_summary_guided  # type: ignore[assignment]
+            runner._discover_root_topics_v0_openai = fail_v0_openai  # type: ignore[assignment]
+
+            outputs = runner.run_agent("root_topic_discovery_agent")
+
+            topics_path = (outdir / "configs" / "root_topics.txt").resolve()
+            guidance_path = (outdir / "configs" / "document_topic_guide.json").resolve()
+            self.assertEqual(calls["summary_guided"], 1)
+            self.assertEqual(calls["v0_openai"], 0)
+            self.assertIn(str(topics_path), outputs)
+            self.assertIn(str(guidance_path), outputs)
+            self.assertEqual(topics_path.read_text(encoding="utf-8"), "emperor penguin decline\nsea ice breakup\n")
+            self.assertTrue(guidance_path.exists())
+
+    def test_root_topic_discovery_agent_falls_back_to_heuristic_after_summary_guided_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir)
+            input_pdf = outdir / "input.pdf"
+            input_pdf.write_bytes(b"%PDF-1.4\n%fake\n")
+            runner = DemocritusAgenticRunner(
+                DemocritusAgenticConfig(
+                    outdir=outdir,
+                    input_pdf=input_pdf,
+                    auto_topics_from_pdf=True,
+                    root_topic_strategy="summary_guided",
+                    include_phase2=False,
+                )
+            )
+
+            attempts = {"summary_guided": 0, "heuristic": 0}
+
+            def fail_summary_guided() -> tuple[str, ...]:
+                attempts["summary_guided"] += 1
+                raise RuntimeError("summary guidance failed")
+
+            def succeed_heuristic() -> tuple[str, ...]:
+                attempts["heuristic"] += 1
+                return ("antarctic species decline", "sea ice habitat loss")
+
+            runner._discover_root_topics_summary_guided = fail_summary_guided  # type: ignore[assignment]
+            runner._discover_root_topics_heuristic = succeed_heuristic  # type: ignore[assignment]
+
+            with mock.patch.object(democritus_agentic_module.time, "sleep", return_value=None):
+                outputs = runner.run_agent("root_topic_discovery_agent")
+
+            topics_path = (outdir / "configs" / "root_topics.txt").resolve()
+            log_path = outdir / "agent_logs" / "root_topic_discovery_agent.log"
+
+            self.assertEqual(attempts["summary_guided"], 3)
+            self.assertEqual(attempts["heuristic"], 1)
+            self.assertIn(str(topics_path), outputs)
+            self.assertEqual(topics_path.read_text(encoding="utf-8"), "antarctic species decline\nsea ice habitat loss\n")
+            log_text = log_path.read_text(encoding="utf-8")
+            self.assertIn("summary_guided topic discovery attempt 1/3 failed", log_text)
+            self.assertIn("summary_guided topic discovery attempt 3/3 failed", log_text)
+            self.assertIn("Falling back to heuristic topic discovery after summary_guided failure", log_text)
+
+    def test_summary_guided_topic_discovery_uses_document_guide_to_break_ties(self) -> None:
+        fake_numpy = ModuleType("numpy")
+        fake_numpy.ndarray = object
+        fake_numpy.array = lambda *args, **kwargs: args[0] if args else []
+        fake_numpy.zeros = lambda *args, **kwargs: []
+        fake_numpy.ones = lambda *args, **kwargs: []
+
+        with mock.patch.dict(sys.modules, {"numpy": fake_numpy}):
+            from FunctorFlow import democritus as democritus_module
+
+            class FakeLLM:
+                def ask(self, prompt: str) -> str:
+                    self.last_summary_prompt = prompt
+                    return (
+                        "SUMMARY: Emperor penguins and Antarctic fur seals are endangered because warming disrupts sea ice "
+                        "and prey availability.\n"
+                        "CORE TOPICS:\n"
+                        "- emperor penguin decline\n"
+                        "- sea ice breakup\n"
+                        "- fur seal prey scarcity\n"
+                        "KEY ENTITIES:\n"
+                        "- emperor penguins\n"
+                        "- antarctic fur seals\n"
+                        "KEY OUTCOMES:\n"
+                        "- habitat loss\n"
+                        "- prey scarcity\n"
+                    )
+
+                def ask_batch(self, prompts):
+                    self.last_topic_prompts = list(prompts)
+                    return [
+                        "Knowledge graph consistency\nEmperor penguin decline",
+                        "PDF viewer synchronization\nSea ice breakup",
+                    ]
+
+            llm = FakeLLM()
+            config = democritus_module.DemocritusTopicDiscoveryConfig(
+                num_root_topics=2,
+                topics_per_chunk=2,
+                guidance_mode="summary_guided",
+                max_chunk_chars=80,
+            )
+
+            topics, metadata = democritus_module.discover_topics_from_text_with_metadata(
+                (
+                    "The article explains that emperor penguins are losing habitat as sea ice breaks up earlier. "
+                    "It also discusses Antarctic fur seals facing prey scarcity."
+                ),
+                llm=llm,
+                config=config,
+            )
+
+            self.assertEqual(topics, ["Emperor penguin decline", "Sea ice breakup"])
+            self.assertEqual(metadata["guidance_mode"], "summary_guided")
+            self.assertIn("emperor penguins", metadata["guidance"]["raw"].lower())
+            self.assertTrue(all("guide to the same document" in prompt.lower() for prompt in llm.last_topic_prompts))
+
     def test_dry_run_records_all_agents(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             runner = DemocritusAgenticRunner(

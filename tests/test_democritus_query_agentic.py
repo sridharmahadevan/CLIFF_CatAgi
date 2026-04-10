@@ -28,6 +28,7 @@ try:
         QueryPlan,
         SECFilingRetrievalBackend,
         ScholarlyRetrievalBackend,
+        _match_score,
         _derive_retrieval_query,
         infer_requested_result_count,
         _resolve_sec_user_agent,
@@ -49,6 +50,7 @@ except ModuleNotFoundError:
         SECFilingRetrievalBackend,
         ScholarlyRetrievalBackend,
         _direct_document_path_candidates,
+        _match_score,
         _derive_retrieval_query,
         infer_requested_result_count,
         _resolve_sec_user_agent,
@@ -98,7 +100,7 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
             ).resolved()
 
         self.assertEqual(config.execution_mode, "quick")
-        self.assertEqual(config.root_topic_strategy, "v0_openai")
+        self.assertEqual(config.root_topic_strategy, "summary_guided")
         self.assertFalse(config.include_phase2)
         self.assertEqual(config.depth_limit, 3)
         self.assertEqual(config.max_total_topics, 100)
@@ -257,6 +259,30 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
         retrieval_query = _derive_retrieval_query(query)
 
         self.assertEqual(retrieval_query, "")
+
+    def test_match_score_prefers_title_anchor_phrase_over_generic_context_overlap(self) -> None:
+        plan = QueryPlan(
+            query="health impacts of drinking red wine",
+            normalized_query="health impacts red wine",
+            keyword_tokens=("health", "impacts", "red", "wine"),
+            target_documents=5,
+            retrieval_query="health impacts red wine",
+        )
+
+        specific_score, specific_evidence = _match_score(
+            plan,
+            "Red Wine Polyphenols and Cardiovascular Outcomes",
+            "Study of red wine health impacts and mechanisms.",
+        )
+        generic_score, generic_evidence = _match_score(
+            plan,
+            "Mediterranean Diet and Cardiovascular Health",
+            "Background discussion mentions red wine consumption among several diet components.",
+        )
+
+        self.assertGreater(specific_score, generic_score)
+        self.assertTrue(any(item.startswith("title_phrase:red wine") for item in specific_evidence))
+        self.assertFalse(any(item.startswith("title:") for item in generic_evidence))
 
     def test_default_download_headers_use_browser_user_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -925,6 +951,53 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
         self.assertEqual(results[0].retrieval_backend, "crossref")
         self.assertEqual(results[0].download_url, "https://example.org/red_wine.pdf")
         self.assertEqual(results[0].document_format, "pdf")
+
+    def test_crossref_backend_downranks_generic_highly_cited_matches_for_red_wine_queries(self) -> None:
+        class FakeCrossrefBackend(CrossrefRetrievalBackend):
+            def _fetch_json(self, url: str, params=None):
+                del url, params
+                return {
+                    "message": {
+                        "items": [
+                            {
+                                "DOI": "10.1000/specific-red-wine",
+                                "title": ["Red Wine Polyphenols and Cardiovascular Outcomes"],
+                                "abstract": "Study of red wine health impacts and polyphenol mechanisms.",
+                                "URL": "https://doi.org/10.1000/specific-red-wine",
+                                "link": [{"URL": "https://example.org/red_wine.pdf", "content-type": "application/pdf"}],
+                                "is-referenced-by-count": 12,
+                                "type": "journal-article",
+                                "published-online": {"date-parts": [[2024, 5, 1]]},
+                            },
+                            {
+                                "DOI": "10.1000/generic-diet",
+                                "title": ["Mediterranean Diet and Cardiovascular Health"],
+                                "abstract": "A broad diet review that briefly mentions red wine consumption.",
+                                "URL": "https://doi.org/10.1000/generic-diet",
+                                "link": [{"URL": "https://example.org/generic.pdf", "content-type": "application/pdf"}],
+                                "is-referenced-by-count": 5000,
+                                "type": "journal-article",
+                                "published-online": {"date-parts": [[2024, 4, 1]]},
+                            },
+                        ]
+                    }
+                }
+
+        backend = FakeCrossrefBackend(user_agent="test-agent", timeout_seconds=5.0)
+        results = backend.search(
+            QueryPlan(
+                query="health impacts of drinking red wine",
+                normalized_query="health impacts red wine",
+                keyword_tokens=("health", "impacts", "red", "wine"),
+                target_documents=2,
+                retrieval_query="health impacts red wine",
+            ),
+            limit=2,
+        )
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0].identifier, "10.1000/specific-red-wine")
+        self.assertGreater(results[0].score, results[1].score)
 
     def test_europe_pmc_backend_prefers_pmc_oa_pdf_links(self) -> None:
         class FakeEuropePMCBackend(EuropePMCOARetrievalBackend):

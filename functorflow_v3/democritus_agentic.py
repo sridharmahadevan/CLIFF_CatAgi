@@ -45,7 +45,7 @@ class DemocritusAgenticConfig:
     root_topics: tuple[str, ...] = ()
     input_pdf: Path | None = None
     auto_topics_from_pdf: bool = False
-    root_topic_strategy: str = "v0_openai"
+    root_topic_strategy: str = "summary_guided"
     include_phase2: bool = True
     depth_limit: int = 3
     max_total_topics: int = 100
@@ -442,6 +442,9 @@ class DemocritusAgenticRunner:
     def _topics_path(self) -> Path:
         return self.outdir / "configs" / "root_topics.txt"
 
+    def _topic_guidance_path(self) -> Path:
+        return self.outdir / "configs" / "document_topic_guide.json"
+
     def _root_topics_values(self) -> tuple[str, ...]:
         topics_path = self._topics_path()
         if not topics_path.exists():
@@ -485,12 +488,38 @@ class DemocritusAgenticRunner:
         try:
             democ = import_module("FunctorFlow.democritus")
             llm_client = democ._default_llm_client()
-            discovery_config = democ.DemocritusTopicDiscoveryConfig()
+            discovery_config = democ.DemocritusTopicDiscoveryConfig(guidance_mode="plain")
             _, topics = democ.discover_topics_from_pdf(
                 self.config.input_pdf,
                 llm=llm_client,
                 config=discovery_config,
             )
+        finally:
+            sys.path.pop(0)
+        return tuple(topics)
+
+    def _discover_root_topics_summary_guided(self) -> tuple[str, ...]:
+        workspace_root = _workspace_root()
+        sys.path.insert(0, str(workspace_root))
+        try:
+            democ = import_module("FunctorFlow.democritus")
+            llm_client = democ._default_llm_client()
+            discovery_config = democ.DemocritusTopicDiscoveryConfig(guidance_mode="summary_guided")
+            if hasattr(democ, "discover_topics_from_pdf_with_metadata"):
+                _, topics, metadata = democ.discover_topics_from_pdf_with_metadata(
+                    self.config.input_pdf,
+                    llm=llm_client,
+                    config=discovery_config,
+                )
+                guidance = dict(metadata.get("guidance") or {})
+                if guidance:
+                    self._topic_guidance_path().write_text(json.dumps(guidance, indent=2), encoding="utf-8")
+            else:
+                _, topics = democ.discover_topics_from_pdf(
+                    self.config.input_pdf,
+                    llm=llm_client,
+                    config=discovery_config,
+                )
         finally:
             sys.path.pop(0)
         return tuple(topics)
@@ -515,21 +544,27 @@ class DemocritusAgenticRunner:
     def _discover_root_topics_with_resilience(self) -> tuple[str, ...]:
         if self.config.root_topic_strategy == "heuristic":
             return self._discover_root_topics_heuristic()
-        if self.config.root_topic_strategy != "v0_openai":
+        if self.config.root_topic_strategy not in {"v0_openai", "summary_guided"}:
             raise ValueError(
                 "Unsupported `root_topic_strategy`. Expected one of "
-                "`heuristic` or `v0_openai`."
+                "`heuristic`, `summary_guided`, or `v0_openai`."
             )
+        strategy_name = self.config.root_topic_strategy
+        discover_topics = (
+            self._discover_root_topics_summary_guided
+            if strategy_name == "summary_guided"
+            else self._discover_root_topics_v0_openai
+        )
 
         last_openai_error: Exception | None = None
         for attempt in range(1, 4):
             try:
-                return self._discover_root_topics_v0_openai()
+                return discover_topics()
             except Exception as exc:
                 last_openai_error = exc
                 self._write_agent_note(
                     "root_topic_discovery_agent",
-                    f"[FF2] v0_openai topic discovery attempt {attempt}/3 failed: {exc}",
+                    f"[FF2] {strategy_name} topic discovery attempt {attempt}/3 failed: {exc}",
                 )
                 if attempt < 3:
                     time.sleep(1.0)
@@ -539,7 +574,7 @@ class DemocritusAgenticRunner:
                 topics = self._discover_root_topics_heuristic()
                 self._write_agent_note(
                     "root_topic_discovery_agent",
-                    "[FF2] Falling back to heuristic topic discovery after v0_openai failure.",
+                    f"[FF2] Falling back to heuristic topic discovery after {strategy_name} failure.",
                 )
                 return topics
             except Exception as heuristic_exc:
@@ -548,12 +583,12 @@ class DemocritusAgenticRunner:
                     f"[FF2] Heuristic topic discovery fallback failed: {heuristic_exc}",
                 )
                 raise RuntimeError(
-                    "Root topic discovery failed for both v0_openai and heuristic strategies. "
-                    f"v0_openai error: {last_openai_error}; heuristic error: {heuristic_exc}"
+                    f"Root topic discovery failed for both {strategy_name} and heuristic strategies. "
+                    f"{strategy_name} error: {last_openai_error}; heuristic error: {heuristic_exc}"
                 ) from heuristic_exc
 
         raise RuntimeError(
-            "Root topic discovery failed via v0_openai and no PDF-backed heuristic fallback was available. "
+            f"Root topic discovery failed via {strategy_name} and no PDF-backed heuristic fallback was available. "
             f"Last error: {last_openai_error}"
         ) from last_openai_error
 
@@ -577,7 +612,11 @@ class DemocritusAgenticRunner:
                 )
 
         topics_path.write_text("\n".join(topics) + "\n", encoding="utf-8")
-        return (str(topics_path.resolve()),)
+        outputs = [str(topics_path.resolve())]
+        guidance_path = self._topic_guidance_path()
+        if guidance_path.exists():
+            outputs.append(str(guidance_path.resolve()))
+        return tuple(outputs)
 
     def _run_topic_graph_agent(self) -> tuple[str, ...]:
         topic_graph = self.outdir / "topic_graph.jsonl"
@@ -973,7 +1012,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--root-topic", action="append", default=[])
     parser.add_argument("--input-pdf", default="")
     parser.add_argument("--auto-topics-from-pdf", action="store_true")
-    parser.add_argument("--root-topic-strategy", default="v0_openai", choices=["v0_openai", "heuristic"])
+    parser.add_argument(
+        "--root-topic-strategy",
+        default="summary_guided",
+        choices=["summary_guided", "v0_openai", "heuristic"],
+    )
     parser.add_argument("--skip-phase2", action="store_true")
     parser.add_argument("--depth-limit", type=int, default=3)
     parser.add_argument("--max-total-topics", type=int, default=100)

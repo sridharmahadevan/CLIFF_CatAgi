@@ -275,7 +275,7 @@ class DemocritusBatchConfig:
     agent_concurrency_limits: tuple[tuple[str, int], ...] = ()
     include_phase2: bool = True
     auto_topics_from_pdf: bool = True
-    root_topic_strategy: str = "v0_openai"
+    root_topic_strategy: str = "summary_guided"
     depth_limit: int = 3
     max_total_topics: int = 100
     statements_per_question: int = 2
@@ -2245,7 +2245,11 @@ def _parse_args() -> argparse.Namespace:
         help="Per-agent concurrency limit in the form agent_name=limit. May be repeated.",
     )
     parser.add_argument("--skip-phase2", action="store_true")
-    parser.add_argument("--root-topic-strategy", default="v0_openai", choices=["v0_openai", "heuristic"])
+    parser.add_argument(
+        "--root-topic-strategy",
+        default="summary_guided",
+        choices=["summary_guided", "v0_openai", "heuristic"],
+    )
     parser.add_argument("--no-auto-topics", action="store_true")
     parser.add_argument("--intra-document-shards", type=int, default=1)
     parser.add_argument("--dry-run", action="store_true")
