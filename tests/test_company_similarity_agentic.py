@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import threading
 import tempfile
 import time
@@ -54,6 +55,14 @@ class CompanySimilarityAgenticTests(unittest.TestCase):
         self.assertEqual(profile["batch_size"], 6)
         self.assertEqual(profile["skip_visualization"], 1)
         self.assertEqual(profile["skip_branch_visuals"], 1)
+
+    def test_interactive_mode_profile_preserves_explicit_year_window(self) -> None:
+        profile = module._company_similarity_mode_profile("interactive", year_start=2011, year_end=2014)
+
+        self.assertEqual(profile["execution_mode"], "interactive")
+        self.assertEqual(profile["year_start"], 2011)
+        self.assertEqual(profile["year_end"], 2014)
+        self.assertEqual(profile["jobs"], 3)
 
     def test_format_duration_preserves_subsecond_work(self) -> None:
         self.assertEqual(module._format_duration(0.25), "<1s")
@@ -285,10 +294,59 @@ class CompanySimilarityAgenticTests(unittest.TestCase):
             self.assertIn("--edgar-ticker", command)
             self.assertIn("adbe", command)
             self.assertNotIn("--index-url", command)
+            self.assertIn("--filings-only", command)
             self.assertIn("--skip-visuals", command)
             self.assertEqual(stream_label, "Adobe")
             self.assertEqual(combined_dir, (outdir / "runs_adobe_financial_filings" / "atlas_adobe_financial_combined").resolve())
             self.assertEqual(manifest_path.resolve(), (outdir / "add_company_analysis_manifest.json").resolve())
+
+    def test_ensure_company_analysis_ignores_stale_local_manifest_when_year_window_expands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            outdir = root / "outputs" / "adobe"
+            filings_outdir = outdir / "runs_adobe_financial_filings"
+            filings_outdir.mkdir(parents=True, exist_ok=True)
+            stale_manifest = filings_outdir / "adobe_sec_edgar_manifest.csv"
+            stale_manifest.write_text(
+                "doc_id,brand,fiscal_year,filing_type,file_path\n"
+                "adobe_10k_2024,Adobe,2024,10k,/tmp/2024.pdf\n"
+                "adobe_10k_2025,Adobe,2025,10k,/tmp/2025.pdf\n",
+                encoding="utf-8",
+            )
+            record = module._CompanyRecord(
+                brand="Adobe",
+                slug="adobe",
+                aliases=("adobe", "adbe"),
+                ticker="adbe",
+                index_url="https://stocklight.example/adobe",
+                outdir=outdir,
+                existing_combined_dir=None,
+            )
+
+            def fake_run(command: list[str], *, cwd: Path, stream_label: str = "") -> None:
+                manifest_path = outdir / "add_company_analysis_manifest.json"
+                combined_dir = outdir / "runs_adobe_financial_filings" / "atlas_adobe_financial_combined"
+                combined_dir.mkdir(parents=True, exist_ok=True)
+                manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                manifest_path.write_text('{"combined_dir": "%s"}' % str(combined_dir), encoding="utf-8")
+                self.captured = (command, cwd, stream_label)
+
+            self.captured = None
+            with mock.patch.object(module, "_run_command", side_effect=fake_run):
+                module._ensure_company_analysis(
+                    record=record,
+                    sec_user_agent="Test Agent",
+                    workspace_root=root,
+                    python_executable="python3",
+                    execution_mode="deep",
+                    year_start=2019,
+                    year_end=2025,
+                )
+
+            command, _cwd, _stream_label = self.captured
+            self.assertIn("--edgar-ticker", command)
+            self.assertIn("--filings-only", command)
+            self.assertNotIn("--manifest", command)
 
     def test_preflight_company_similarity_backend_requires_key_when_no_cached_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -324,6 +382,36 @@ class CompanySimilarityAgenticTests(unittest.TestCase):
 
             with mock.patch.dict(module.os.environ, {}, clear=True):
                 module._preflight_company_similarity_backend((record,))
+
+    def test_preflight_company_similarity_backend_rejects_insufficient_cached_year_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            outdir = root / "outputs" / "adobe"
+            combined_dir = outdir / "runs_adobe_financial_filings" / "atlas_adobe_financial_combined"
+            combined_dir.mkdir(parents=True, exist_ok=True)
+            temporal_blocks_dir = outdir / "temporal_blocks"
+            temporal_blocks_dir.mkdir(parents=True, exist_ok=True)
+            (temporal_blocks_dir / "temporal_block_summary.json").write_text(
+                '{"year_min": 2023, "year_max": 2024}',
+                encoding="utf-8",
+            )
+            (outdir / "add_company_analysis_manifest.json").write_text(
+                json.dumps({"temporal_summary_path": str(temporal_blocks_dir / "temporal_block_summary.json")}),
+                encoding="utf-8",
+            )
+            record = module._CompanyRecord(
+                brand="Adobe",
+                slug="adobe",
+                aliases=("adobe", "adbe"),
+                ticker="adbe",
+                index_url="https://stocklight.example/adobe",
+                outdir=outdir,
+                existing_combined_dir=None,
+            )
+
+            with mock.patch.dict(module.os.environ, {}, clear=True):
+                with self.assertRaisesRegex(RuntimeError, "requested years"):
+                    module._preflight_company_similarity_backend((record,), year_start=2020, year_end=2025)
 
     def test_run_command_streams_stdout_and_raises_with_tail(self) -> None:
         class FakePopen:
@@ -529,6 +617,68 @@ class CompanySimilarityAgenticTests(unittest.TestCase):
                 ),
                 "expected a heartbeat telemetry refresh with a ticking active stage duration",
             )
+
+    def test_interactive_run_returns_checkpoint_before_final_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "company_similarity"
+            runner = module.CompanySimilarityAgenticRunner(
+                "Compare Adobe and Nike",
+                outdir,
+                execution_mode="interactive",
+                year_start=2012,
+                year_end=2015,
+            )
+            plan = module.CompanySimilarityQueryPlan(
+                query="Compare Adobe and Nike",
+                company_a="Adobe",
+                company_b="Nike",
+                company_a_slug="adobe",
+                company_b_slug="nike",
+            )
+            adobe = module._CompanyRecord("Adobe", "adobe", ("adobe",), outdir=Path(tmpdir) / "adobe")
+            nike = module._CompanyRecord("Nike", "nike", ("nike",), outdir=Path(tmpdir) / "nike")
+
+            with mock.patch.object(module, "interpret_company_similarity_query", return_value=plan):
+                with mock.patch.object(module, "_resolve_brand_workspace_root", return_value=Path(tmpdir) / "brand_root"):
+                    with mock.patch.object(module, "repo_root", return_value=Path(tmpdir) / "repo_root" / "subdir"):
+                        with mock.patch.object(module, "_select_python_for_brand_pipeline", return_value="python3"):
+                            with mock.patch.object(module, "_find_company_record", side_effect=[adobe, nike]):
+                                with mock.patch.object(module, "_preflight_company_similarity_backend"):
+                                    with mock.patch.object(
+                                        module,
+                                        "_ensure_company_analyses",
+                                        return_value={
+                                            "adobe": (Path(tmpdir) / "adobe_combined", None),
+                                            "nike": (Path(tmpdir) / "nike_combined", None),
+                                        },
+                                    ):
+                                        with mock.patch.object(
+                                            runner,
+                                            "_refresh_partial_similarity_preview",
+                                            side_effect=lambda **kwargs: kwargs["partial_preview_state"].update(
+                                                {
+                                                    "status": "ready",
+                                                    "note": "Initial similarity read is ready.",
+                                                    "summary_path": str(outdir / "partial" / "cross_company_functors_summary.md"),
+                                                    "manifest_path": str(outdir / "partial" / "cross_company_functors_manifest.json"),
+                                                    "overlap_years": [2013, 2014],
+                                                    "shared_edge_basis_size": 9,
+                                                }
+                                            ),
+                                        ):
+                                            with mock.patch.object(
+                                                module,
+                                                "_build_company_similarity_checkpoint",
+                                                return_value=(
+                                                    outdir / "interactive_checkpoint" / "company_similarity_checkpoint.json",
+                                                    outdir / "interactive_checkpoint" / "company_similarity_checkpoint.html",
+                                                ),
+                                            ):
+                                                result = runner.run()
+
+        self.assertEqual(result.artifact_path, outdir / "interactive_checkpoint" / "company_similarity_checkpoint.html")
+        self.assertEqual(result.checkpoint_manifest_path, outdir / "interactive_checkpoint" / "company_similarity_checkpoint.json")
+        self.assertEqual(result.checkpoint_dashboard_path, outdir / "interactive_checkpoint" / "company_similarity_checkpoint.html")
 
 
 if __name__ == "__main__":

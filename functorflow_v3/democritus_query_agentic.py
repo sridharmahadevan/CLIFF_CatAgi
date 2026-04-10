@@ -392,7 +392,7 @@ def _render_democritus_topic_checkpoint_html(payload: dict[str, object]) -> str:
           radial-gradient(circle at top left, rgba(147,69,30,0.12), transparent 24%),
           linear-gradient(180deg, #fbf7f0 0%, var(--paper) 100%);
       }}
-      main {{ width: min(1220px, calc(100vw - 32px)); margin: 32px auto 48px; display: grid; gap: 18px; }}
+      main {{ width: min(1280px, calc(100vw - 32px)); margin: 32px auto 48px; display: grid; gap: 18px; }}
       .panel {{ background: var(--card); border: 1px solid var(--line); border-radius: 28px; padding: 24px; box-shadow: 0 24px 60px rgba(30,25,18,0.08); }}
       .eyebrow {{ margin: 0 0 10px; text-transform: uppercase; letter-spacing: 0.16em; font-size: 12px; color: var(--accent); }}
       .hero-grid {{ display: grid; gap: 18px; grid-template-columns: 1.4fr 1fr; }}
@@ -401,8 +401,8 @@ def _render_democritus_topic_checkpoint_html(payload: dict[str, object]) -> str:
       .chip-row, .topic-list {{ display: flex; flex-wrap: wrap; gap: 10px; min-width: 0; }}
       .chip, .topic-pill {{ border-radius: 999px; padding: 8px 12px; background: #efe7d9; font-size: 0.92rem; color: #64492b; }}
       .topic-pill {{ background: #f5efe4; max-width: 100%; overflow-wrap: anywhere; }}
-      .doc-grid {{ display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); }}
-      .doc-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 16px; background: #fffdf9; display: grid; gap: 10px; min-width: 0; align-content: start; overflow: hidden; }}
+      .doc-grid {{ display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); align-items: start; }}
+      .doc-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 18px; background: #fffdf9; display: grid; gap: 12px; min-width: 0; align-content: start; overflow: hidden; }}
       .doc-meta {{ color: var(--muted); font-size: 0.9rem; }}
       .doc-title {{
         display: -webkit-box;
@@ -414,7 +414,7 @@ def _render_democritus_topic_checkpoint_html(payload: dict[str, object]) -> str:
         min-width: 0;
       }}
       .doc-actions {{ min-width: 0; }}
-      .guide {{ color: var(--ink); line-height: 1.5; min-width: 0; overflow-wrap: anywhere; }}
+      .guide {{ color: var(--ink); line-height: 1.65; min-width: 0; overflow-wrap: anywhere; max-width: 68ch; }}
       .callout {{ background: #f8ede0; }}
       .empty {{ color: var(--muted); line-height: 1.6; }}
       a {{ color: var(--green); text-decoration: none; font-weight: 700; }}

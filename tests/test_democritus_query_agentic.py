@@ -60,6 +60,28 @@ except ModuleNotFoundError:
 
 
 class DemocritusQueryAgenticTests(unittest.TestCase):
+    def test_topic_checkpoint_uses_wider_document_cards(self) -> None:
+        html = democritus_query_agentic_module._render_democritus_topic_checkpoint_html(
+            {
+                "query": "What are the health effects of red wine?",
+                "stage_label": "Topic checkpoint",
+                "summary_text": "Preview the topic atlas before going deeper.",
+                "n_documents": 2,
+                "top_topics": [{"topic": "polyphenols", "document_count": 2}],
+                "documents": [
+                    {
+                        "run_name": "run_0",
+                        "title": "Study of moderate red wine consumption",
+                        "guide_summary": "A longer abstract-style snapshot that should have room to breathe.",
+                        "topics": ["polyphenols", "cardiovascular outcomes"],
+                    }
+                ],
+            }
+        )
+
+        self.assertIn("minmax(min(100%, 360px), 1fr)", html)
+        self.assertIn("max-width: 68ch", html)
+
     def test_query_config_defaults_to_eight_workers(self) -> None:
         config = DemocritusQueryAgenticConfig(
             query="find me 10 recent studies on glp-1",

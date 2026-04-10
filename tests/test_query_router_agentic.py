@@ -221,11 +221,13 @@ class QueryRouterAgenticTests(unittest.TestCase):
         class FakeCompanySimilarityRunner:
             instances: list["FakeCompanySimilarityRunner"] = []
 
-            def __init__(self, query, outdir, *, sec_user_agent="", execution_mode="quick"):
+            def __init__(self, query, outdir, *, sec_user_agent="", execution_mode="quick", year_start=None, year_end=None):
                 self.query = query
                 self.outdir = outdir
                 self.sec_user_agent = sec_user_agent
                 self.execution_mode = execution_mode
+                self.year_start = year_start
+                self.year_end = year_end
                 type(self).instances.append(self)
 
             def run(self):

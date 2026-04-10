@@ -163,6 +163,48 @@ class DashboardQueryLauncherTests(unittest.TestCase):
             },
         )
 
+    def test_request_session_run_deepen_stores_company_similarity_year_overrides(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="How similar is Adobe to Nike?",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+                enable_execution_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        run_id = launcher.submit_query("How similar is Adobe to Nike?", execution_mode="interactive")
+        launcher.wait_for_next_submission(timeout=0.01)
+        launcher.update_session_run(
+            run_id,
+            status="complete",
+            route_name="company_similarity",
+            note="Interactive checkpoint ready.",
+            artifact_path=Path("/tmp/company_similarity_checkpoint.html"),
+            outdir=Path("/tmp/ff2-run-0003"),
+        )
+
+        deep_run_id = launcher.request_session_run_deepen(
+            run_id,
+            company_similarity_year_start=2011,
+            company_similarity_year_end=2018,
+        )
+        followup = launcher.wait_for_next_submission(timeout=0.01)
+
+        self.assertEqual(followup, (deep_run_id, "How similar is Adobe to Nike?", "deep"))
+        self.assertEqual(
+            launcher.submission_overrides_for_run(str(deep_run_id)),
+            {
+                "company_similarity_year_start": 2011,
+                "company_similarity_year_end": 2018,
+            },
+        )
+
     def test_render_run_artifact_page_for_democritus_checkpoint_includes_curation_controls(self) -> None:
         launcher = DashboardQueryLauncher(
             DashboardQueryLauncherConfig(
@@ -343,6 +385,134 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         self.assertEqual(telemetry_summary["action_counts"]["deepen"], 1)
         self.assertEqual(telemetry_summary["cumulative_topic_preference_signal"]["minimum wage increases"], 1)
         self.assertEqual(telemetry_summary["cumulative_topic_preference_signal"]["household income effects"], -1)
+
+    def test_render_run_artifact_page_for_company_similarity_checkpoint_includes_year_controls(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Ask a question",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+                enable_execution_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            checkpoint_dir = root / "interactive_checkpoint"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            artifact_path = checkpoint_dir / "company_similarity_checkpoint.html"
+            artifact_path.write_text("<html>placeholder</html>", encoding="utf-8")
+            (checkpoint_dir / "company_similarity_checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "query": "How similar is Adobe to Nike?",
+                        "company_a": "Adobe",
+                        "company_b": "Nike",
+                        "year_window": {"start": 2023, "end": 2025},
+                        "suggested_year_window": {"start": 2015, "end": 2020},
+                        "available_overlap_years": [2015, 2016, 2017],
+                        "summary_text": "Initial similarity read.",
+                        "partial_preview": {"status": "ready", "shared_edge_basis_size": 7},
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            run_id = launcher.submit_query("How similar is Adobe to Nike?", execution_mode="interactive")
+            launcher.wait_for_next_submission(timeout=0.01)
+            launcher.update_session_run(
+                run_id,
+                status="complete",
+                route_name="company_similarity",
+                note="Interactive checkpoint ready.",
+                artifact_path=artifact_path,
+                outdir=root,
+            )
+
+            rendered = launcher._render_run_artifact_page(run_id)
+
+        self.assertIn('name="company_similarity_year_start"', rendered)
+        self.assertIn('name="company_similarity_year_end"', rendered)
+        self.assertIn("Go deeper on this window", rendered)
+        self.assertIn("Available Overlap", rendered)
+
+    def test_handle_company_similarity_checkpoint_action_deepen_queues_followup_with_year_window(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Ask a question",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+                enable_execution_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            checkpoint_dir = root / "interactive_checkpoint"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            artifact_path = checkpoint_dir / "company_similarity_checkpoint.html"
+            artifact_path.write_text("<html>placeholder</html>", encoding="utf-8")
+            (checkpoint_dir / "company_similarity_checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "query": "How similar is Adobe to Nike?",
+                        "company_a": "Adobe",
+                        "company_b": "Nike",
+                        "year_window": {"start": 2023, "end": 2025},
+                        "suggested_year_window": {"start": 2015, "end": 2020},
+                        "available_overlap_years": [2015, 2016, 2017],
+                        "summary_text": "Initial similarity read.",
+                        "partial_preview": {"status": "ready", "shared_edge_basis_size": 7},
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            run_id = launcher.submit_query("How similar is Adobe to Nike?", execution_mode="interactive")
+            launcher.wait_for_next_submission(timeout=0.01)
+            launcher.update_session_run(
+                run_id,
+                status="complete",
+                route_name="company_similarity",
+                note="Interactive checkpoint ready.",
+                artifact_path=artifact_path,
+                outdir=root,
+            )
+
+            body, status = launcher._handle_checkpoint_action(
+                run_id=run_id,
+                action_kind="deepen",
+                selected_pdf_paths=(),
+                additional_documents=3,
+                retrieval_refinement="",
+                company_similarity_year_start=2014,
+                company_similarity_year_end=2018,
+            )
+            followup = launcher.wait_for_next_submission(timeout=0.01)
+
+        self.assertEqual(status, module.HTTPStatus.OK)
+        self.assertIsNotNone(followup)
+        deep_run_id, followup_query, followup_mode = followup
+        self.assertEqual(followup_query, "How similar is Adobe to Nike?")
+        self.assertEqual(followup_mode, "deep")
+        self.assertIn("Deep Company-Similarity Run Queued", body)
+        self.assertEqual(
+            launcher.submission_overrides_for_run(deep_run_id),
+            {
+                "company_similarity_year_start": 2014,
+                "company_similarity_year_end": 2018,
+            },
+        )
 
     def test_render_launcher_page_includes_demo_tour_queries(self) -> None:
         launcher = DashboardQueryLauncher(

@@ -121,7 +121,10 @@ def _should_pause_at_interactive_checkpoint(
     *,
     execution_mode: object,
 ) -> bool:
-    return decision.route_name == "democritus" and str(execution_mode).strip().lower() == "interactive"
+    return (
+        decision.route_name in {"democritus", "company_similarity"}
+        and str(execution_mode).strip().lower() == "interactive"
+    )
 
 
 def _synthesis_artifact_path_for_decision(run_outdir: Path, decision: CLIFFRouteDecision) -> Path | None:
@@ -299,6 +302,10 @@ def _build_worker_command(
         command.extend(["--analysis-question", str(args.analysis_question)])
     if args.product_discovery_only:
         command.append("--product-discovery-only")
+    if getattr(args, "company_similarity_year_start", None) is not None:
+        command.extend(["--company-similarity-year-start", str(args.company_similarity_year_start)])
+    if getattr(args, "company_similarity_year_end", None) is not None:
+        command.extend(["--company-similarity-year-end", str(args.company_similarity_year_end)])
     if args.sec_target_filings is not None:
         command.extend(["--sec-target-filings", str(args.sec_target_filings)])
     if args.sec_retrieval_user_agent:
@@ -442,11 +449,18 @@ def _monitor_cliff_session_worker(
             artifact_path = Path(artifact_value) if artifact_value else None
             conscious_report = report_to_cliff_consciousness(query, decision, artifact_path=artifact_path)
             if _should_pause_at_interactive_checkpoint(decision, execution_mode=getattr(args, "execution_mode", "quick")):
-                note = (
-                    "Democritus completed the interactive checkpoint and brought that result back into CLIFF's "
-                    "conscious layer. Open Result now shows the checkpoint, and Go deeper will launch the deeper "
-                    "causal extraction and corpus synthesis pass."
-                )
+                if decision.route_name == "company_similarity":
+                    note = (
+                        "Company similarity completed the interactive checkpoint and brought that result back into CLIFF's "
+                        "conscious layer. Open Result now shows the checkpoint, and Go deeper will launch the deeper "
+                        "year-window comparison pass."
+                    )
+                else:
+                    note = (
+                        "Democritus completed the interactive checkpoint and brought that result back into CLIFF's "
+                        "conscious layer. Open Result now shows the checkpoint, and Go deeper will launch the deeper "
+                        "causal extraction and corpus synthesis pass."
+                    )
             else:
                 note = (
                     (
@@ -637,19 +651,29 @@ def _run_cliff_session_query(
             result = _build_router_from_args_with_outdir(args, query=query, outdir=run_outdir).run()
             artifact_path = _artifact_path_for_result(result)
         conscious_report = report_to_cliff_consciousness(query, decision, artifact_path=artifact_path)
-        launcher.update_session_run(
-            run_id,
-            status="complete",
-            mind_layer="conscious",
-            route_name=decision.route_name,
-            note=(
+        if _should_pause_at_interactive_checkpoint(decision, execution_mode=getattr(args, "execution_mode", "quick")):
+            note = (
+                "Company similarity completed the interactive checkpoint and brought that result back into CLIFF's conscious layer. "
+                "Open Result now shows the checkpoint, and Go deeper will launch the deeper year-window comparison pass."
+                if decision.route_name == "company_similarity"
+                else "Democritus completed the interactive checkpoint and brought that result back into CLIFF's conscious layer. "
+                "Open Result now shows the checkpoint, and Go deeper will launch the deeper causal extraction and corpus synthesis pass."
+            )
+        else:
+            note = (
                 (
                     _cliff_cycle_complete_note(conscious_report)
                     if should_redispatch
                     else _cliff_complete_note(conscious_report)
                 )
                 + " The result is ready in the session list and won't open automatically."
-            ),
+            )
+        launcher.update_session_run(
+            run_id,
+            status="complete",
+            mind_layer="conscious",
+            route_name=decision.route_name,
+            note=note,
             artifact_path=artifact_path,
             outdir=run_outdir,
         )
@@ -757,6 +781,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--brand-name", default="")
     parser.add_argument("--analysis-question", default="")
     parser.add_argument("--product-discovery-only", action="store_true")
+    parser.add_argument("--company-similarity-year-start", type=int, default=None)
+    parser.add_argument("--company-similarity-year-end", type=int, default=None)
     parser.add_argument("--sec-target-filings", type=int, default=None)
     parser.add_argument(
         "--sec-retrieval-user-agent",

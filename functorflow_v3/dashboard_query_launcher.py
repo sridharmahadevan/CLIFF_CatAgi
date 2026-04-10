@@ -28,6 +28,9 @@ _DEMOCRITUS_CURATION_STATE = "user_curation.json"
 _DEMOCRITUS_CURATED_MANIFEST = "selected_documents_manifest.json"
 _DEMOCRITUS_CURATION_TELEMETRY = "user_curation_telemetry.jsonl"
 _DEMOCRITUS_CURATION_SUMMARY = "user_curation_summary.json"
+_COMPANY_SIMILARITY_CHECKPOINT_HTML = "company_similarity_checkpoint.html"
+_COMPANY_SIMILARITY_CHECKPOINT_MANIFEST = "company_similarity_checkpoint.json"
+_COMPANY_SIMILARITY_CURATION_STATE = "company_similarity_year_window.json"
 
 
 @dataclass(frozen=True)
@@ -261,6 +264,8 @@ class DashboardQueryLauncher:
         query_override: str | None = None,
         democritus_manifest_path: Path | None = None,
         democritus_target_docs: int | None = None,
+        company_similarity_year_start: int | None = None,
+        company_similarity_year_end: int | None = None,
     ) -> str | None:
         with self._lock:
             run_state = self._session_runs_by_id.get(run_id)
@@ -280,6 +285,10 @@ class DashboardQueryLauncher:
             submission_overrides["democritus_manifest"] = str(democritus_manifest_path.resolve())
         if democritus_target_docs is not None:
             submission_overrides["democritus_target_docs"] = max(1, int(democritus_target_docs))
+        if company_similarity_year_start is not None:
+            submission_overrides["company_similarity_year_start"] = int(company_similarity_year_start)
+        if company_similarity_year_end is not None:
+            submission_overrides["company_similarity_year_end"] = int(company_similarity_year_end)
         queued_note = (
             f"Queued as a deep follow-up to {run_id}."
             if not submission_overrides
@@ -326,6 +335,13 @@ class DashboardQueryLauncher:
         return manifest_path if manifest_path.exists() else None
 
     @staticmethod
+    def _company_similarity_checkpoint_manifest_for_html(artifact_path: Path) -> Path | None:
+        if artifact_path.name != _COMPANY_SIMILARITY_CHECKPOINT_HTML:
+            return None
+        manifest_path = artifact_path.with_name(_COMPANY_SIMILARITY_CHECKPOINT_MANIFEST)
+        return manifest_path if manifest_path.exists() else None
+
+    @staticmethod
     def _read_json_dict(path: Path) -> dict[str, object]:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -340,6 +356,14 @@ class DashboardQueryLauncher:
 
     def _load_democritus_checkpoint_payload(self, artifact_path: Path) -> dict[str, object]:
         manifest_path = self._checkpoint_manifest_for_html(artifact_path)
+        if manifest_path is None:
+            return {}
+        payload = self._read_json_dict(manifest_path)
+        payload["_manifest_path"] = str(manifest_path)
+        return payload
+
+    def _load_company_similarity_checkpoint_payload(self, artifact_path: Path) -> dict[str, object]:
+        manifest_path = self._company_similarity_checkpoint_manifest_for_html(artifact_path)
         if manifest_path is None:
             return {}
         payload = self._read_json_dict(manifest_path)
@@ -396,6 +420,48 @@ class DashboardQueryLauncher:
             {
                 "selected_pdf_paths": list(selected_pdf_paths),
                 "retrieval_refinement": retrieval_refinement,
+                "updated_at": time.time(),
+            },
+        )
+        return curation_path
+
+    def _company_similarity_checkpoint_curation_path(self, payload: dict[str, object]) -> Path | None:
+        manifest_path_raw = str(payload.get("_manifest_path") or "").strip()
+        if not manifest_path_raw:
+            return None
+        return Path(manifest_path_raw).resolve().with_name(_COMPANY_SIMILARITY_CURATION_STATE)
+
+    def _load_company_similarity_checkpoint_curation(self, payload: dict[str, object]) -> dict[str, int]:
+        suggested = dict(payload.get("suggested_year_window") or {})
+        default_start = int(suggested.get("start") or dict(payload.get("year_window") or {}).get("start") or 2002)
+        default_end = int(suggested.get("end") or dict(payload.get("year_window") or {}).get("end") or default_start)
+        curation_path = self._company_similarity_checkpoint_curation_path(payload)
+        if curation_path is None or not curation_path.exists():
+            return {"year_start": default_start, "year_end": default_end}
+        curation = self._read_json_dict(curation_path)
+        try:
+            return {
+                "year_start": int(curation.get("year_start") or default_start),
+                "year_end": int(curation.get("year_end") or default_end),
+            }
+        except (TypeError, ValueError):
+            return {"year_start": default_start, "year_end": default_end}
+
+    def _save_company_similarity_checkpoint_curation(
+        self,
+        payload: dict[str, object],
+        *,
+        year_start: int,
+        year_end: int,
+    ) -> Path | None:
+        curation_path = self._company_similarity_checkpoint_curation_path(payload)
+        if curation_path is None:
+            return None
+        self._write_json_file(
+            curation_path,
+            {
+                "year_start": int(year_start),
+                "year_end": int(year_end),
                 "updated_at": time.time(),
             },
         )
@@ -840,6 +906,245 @@ class DashboardQueryLauncher:
   </body>
 </html>"""
 
+    def _render_company_similarity_checkpoint_page(
+        self,
+        run_id: str,
+        *,
+        artifact_path: Path,
+        banner_message: str = "",
+        banner_tone: str = "info",
+    ) -> str:
+        payload = self._load_company_similarity_checkpoint_payload(artifact_path)
+        if not payload:
+            return artifact_path.read_text(encoding="utf-8", errors="replace")
+        curation = self._load_company_similarity_checkpoint_curation(payload)
+        year_start = int(curation.get("year_start") or 2002)
+        year_end = int(curation.get("year_end") or year_start)
+        suggested = dict(payload.get("suggested_year_window") or {})
+        default_window = dict(payload.get("year_window") or {})
+        overlap_years = [
+            int(year)
+            for year in list(payload.get("available_overlap_years") or [])
+            if str(year).strip()
+        ]
+        summary_text = str(payload.get("summary_text") or "").strip()
+        partial_preview = dict(payload.get("partial_preview") or {})
+        partial_status = html.escape(str(partial_preview.get("status") or "ready").replace("_", " "))
+        basis_size = html.escape(str(partial_preview.get("shared_edge_basis_size") or 0))
+        summary_path_raw = str(partial_preview.get("summary_path") or "").strip()
+        manifest_path_raw = str(partial_preview.get("manifest_path") or "").strip()
+        links_markup_parts = []
+        if summary_path_raw:
+            links_markup_parts.append(
+                '<a href="'
+                + html.escape(self._launcher_href_for_run_file(run_id, Path(summary_path_raw).resolve()))
+                + '" target="_blank" rel="noopener noreferrer">partial summary markdown</a>'
+            )
+        if manifest_path_raw:
+            links_markup_parts.append(
+                '<a href="'
+                + html.escape(self._launcher_href_for_run_file(run_id, Path(manifest_path_raw).resolve()))
+                + '" target="_blank" rel="noopener noreferrer">partial manifest</a>'
+            )
+        links_markup = (
+            '<p class="muted">' + ", ".join(links_markup_parts) + ".</p>"
+            if links_markup_parts
+            else ""
+        )
+        overlap_markup = (
+            "".join(f'<span class="chip">{html.escape(str(year))}</span>' for year in overlap_years[:20])
+            if overlap_years
+            else '<span class="chip">No overlap years detected yet</span>'
+        )
+        banner_markup = (
+            f'<section class="banner banner-{html.escape(banner_tone)}">{html.escape(banner_message)}</section>'
+            if banner_message
+            else ""
+        )
+        return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Company Similarity Interactive Checkpoint</title>
+    <style>
+      :root {{
+        --ink: #18222d;
+        --muted: #5b6874;
+        --paper: #f6f1e8;
+        --card: rgba(255,255,255,0.9);
+        --line: #d7ccb8;
+        --accent: #93451e;
+        --green: #1f6a56;
+        --soft: #f8ede0;
+        --ok: #e8f4ee;
+      }}
+      * {{ box-sizing: border-box; }}
+      body {{
+        margin: 0;
+        font-family: Georgia, "Iowan Old Style", serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(147,69,30,0.12), transparent 24%),
+          linear-gradient(180deg, #fbf7f0 0%, var(--paper) 100%);
+      }}
+      main {{ width: min(1180px, calc(100vw - 32px)); margin: 32px auto 48px; display: grid; gap: 18px; }}
+      .panel, .banner {{ background: var(--card); border: 1px solid var(--line); border-radius: 28px; padding: 24px; box-shadow: 0 24px 60px rgba(30,25,18,0.08); }}
+      .banner-info {{ background: #fdf8ef; }}
+      .banner-success {{ background: var(--ok); }}
+      .banner-warn {{ background: var(--soft); }}
+      .eyebrow {{ margin: 0 0 10px; text-transform: uppercase; letter-spacing: 0.16em; font-size: 12px; color: var(--accent); }}
+      .hero-grid, .control-grid {{ display: grid; gap: 18px; grid-template-columns: 1.2fr 1fr; }}
+      .trace {{ color: var(--muted); line-height: 1.6; }}
+      h1, h2, h3, p {{ margin: 0; }}
+      .chip-row {{ display: flex; flex-wrap: wrap; gap: 10px; min-width: 0; }}
+      .chip {{ border-radius: 999px; padding: 8px 12px; background: #efe7d9; font-size: 0.92rem; color: #64492b; }}
+      .control-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 18px; background: #fffdf9; display: grid; gap: 12px; }}
+      .field-grid {{ display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+      label {{ display: grid; gap: 8px; color: var(--muted); font-size: 0.92rem; }}
+      input {{
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 12px 14px;
+        font: inherit;
+        background: #fffdfa;
+        color: var(--ink);
+      }}
+      .form-actions {{ display: flex; flex-wrap: wrap; gap: 10px; }}
+      .primary-button, .secondary-button {{
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        padding: 10px 16px;
+        font: inherit;
+        cursor: pointer;
+      }}
+      .primary-button {{ background: #204d41; color: #fff; border-color: #204d41; }}
+      .secondary-button {{ background: #fff8ef; color: var(--ink); }}
+      pre {{
+        white-space: pre-wrap;
+        background: #fbf7ef;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 16px;
+        color: #425048;
+        line-height: 1.55;
+      }}
+      .muted {{ color: var(--muted); }}
+      a {{ color: var(--green); text-decoration: none; font-weight: 700; }}
+      @media (max-width: 900px) {{
+        .hero-grid, .control-grid, .field-grid {{ grid-template-columns: 1fr; }}
+      }}
+    </style>
+  </head>
+  <body>
+    <main>
+      {banner_markup}
+      <form method="post" action="/checkpoint-action">
+        <input type="hidden" name="run_id" value="{html.escape(run_id)}" />
+        <section class="panel">
+          <p class="eyebrow">Company Similarity Interactive Mode</p>
+          <div class="hero-grid">
+            <div>
+              <h1>{html.escape(str(payload.get("company_a") or "Company A"))} vs {html.escape(str(payload.get("company_b") or "Company B"))}</h1>
+              <p class="trace" style="margin-top:12px;">CLIFF paused after the initial similarity read. Adjust the fiscal-year window here before launching the deeper cross-company comparison.</p>
+              <div class="chip-row" style="margin-top:14px;">
+                <span class="chip">{partial_status}</span>
+                <span class="chip">{len(overlap_years)} overlap year{'s' if len(overlap_years) != 1 else ''}</span>
+                <span class="chip">{basis_size} shared basis edge{'s' if str(partial_preview.get("shared_edge_basis_size") or 0) != "1" else ''}</span>
+              </div>
+            </div>
+            <div class="control-card">
+              <p class="eyebrow">Suggested Window</p>
+              <p class="trace">Current checkpoint: <strong>{html.escape(str(default_window.get("start") or ""))}</strong> to <strong>{html.escape(str(default_window.get("end") or ""))}</strong>.</p>
+              <p class="trace">Suggested overlap: <strong>{html.escape(str(suggested.get("start") or year_start))}</strong> to <strong>{html.escape(str(suggested.get("end") or year_end))}</strong>.</p>
+            </div>
+          </div>
+        </section>
+        <section class="panel">
+          <p class="eyebrow">Choose Years</p>
+          <div class="control-grid">
+            <div class="control-card">
+              <div class="field-grid">
+                <label>Start year
+                  <input type="number" name="company_similarity_year_start" min="2002" max="2100" value="{year_start}" />
+                </label>
+                <label>End year
+                  <input type="number" name="company_similarity_year_end" min="2002" max="2100" value="{year_end}" />
+                </label>
+              </div>
+              <p class="trace">If the deeper run needs more years than the current cached branches cover, CLIFF will rebuild the missing range before the final comparison.</p>
+              <div class="form-actions">
+                <button type="submit" class="secondary-button" name="action_kind" value="save">Save year window</button>
+                <button type="submit" class="primary-button" name="action_kind" value="deepen">Go deeper on this window</button>
+              </div>
+            </div>
+            <div class="control-card">
+              <p class="eyebrow">Available Overlap</p>
+              <div class="chip-row">{overlap_markup}</div>
+            </div>
+          </div>
+        </section>
+      </form>
+      <section class="panel">
+        <p class="eyebrow">Initial Similarity Read</p>
+        <pre>{html.escape(summary_text or "No provisional summary text is available yet.")}</pre>
+        {links_markup}
+      </section>
+    </main>
+  </body>
+</html>"""
+
+    def _handle_company_similarity_checkpoint_action(
+        self,
+        *,
+        run_id: str,
+        artifact_path: Path,
+        action_kind: str,
+        year_start: int,
+        year_end: int,
+    ) -> tuple[str, HTTPStatus]:
+        payload = self._load_company_similarity_checkpoint_payload(artifact_path)
+        if not payload:
+            return self._render_text_file_as_html(
+                self.config.title,
+                "This company-similarity checkpoint is no longer available from the current session.",
+            ), HTTPStatus.NOT_FOUND
+        year_start = max(2002, int(year_start))
+        year_end = max(2002, int(year_end))
+        if year_start > year_end:
+            year_start, year_end = year_end, year_start
+        self._save_company_similarity_checkpoint_curation(
+            payload,
+            year_start=year_start,
+            year_end=year_end,
+        )
+        if action_kind == "save":
+            return self._render_company_similarity_checkpoint_page(
+                run_id,
+                artifact_path=artifact_path,
+                banner_message=f"Saved the year window {year_start} to {year_end} for this checkpoint.",
+                banner_tone="success",
+            ), HTTPStatus.OK
+        if action_kind == "deepen":
+            new_run_id = self.request_session_run_deepen(
+                run_id,
+                company_similarity_year_start=year_start,
+                company_similarity_year_end=year_end,
+            )
+            return self._render_checkpoint_followup_queued_page(
+                heading="Deep Company-Similarity Run Queued",
+                message=f"Queued a deep company comparison for fiscal years {year_start} through {year_end}.",
+                run_id=run_id,
+                new_run_id=new_run_id,
+            ), HTTPStatus.OK
+        return self._render_company_similarity_checkpoint_page(
+            run_id,
+            artifact_path=artifact_path,
+            banner_message="No checkpoint action was applied.",
+            banner_tone="warn",
+        ), HTTPStatus.BAD_REQUEST
+
     def _render_checkpoint_followup_queued_page(
         self,
         *,
@@ -896,6 +1201,8 @@ class DashboardQueryLauncher:
         selected_pdf_paths: tuple[str, ...],
         additional_documents: int,
         retrieval_refinement: str,
+        company_similarity_year_start: int | None = None,
+        company_similarity_year_end: int | None = None,
     ) -> tuple[str, HTTPStatus]:
         with self._lock:
             run_state = dict(self._session_runs_by_id.get(run_id) or {})
@@ -907,6 +1214,14 @@ class DashboardQueryLauncher:
                 "This interactive checkpoint is no longer available from the current session.",
             )
             return body, HTTPStatus.NOT_FOUND
+        if self._company_similarity_checkpoint_manifest_for_html(artifact_path) is not None:
+            return self._handle_company_similarity_checkpoint_action(
+                run_id=run_id,
+                artifact_path=artifact_path,
+                action_kind=action_kind,
+                year_start=int(company_similarity_year_start or 2002),
+                year_end=int(company_similarity_year_end or company_similarity_year_start or 2002),
+            )
         payload = self._load_democritus_checkpoint_payload(artifact_path)
         documents = list(payload.get("documents") or [])
         valid_paths = {
@@ -1090,12 +1405,24 @@ class DashboardQueryLauncher:
                     except ValueError:
                         additional_documents = 3
                     retrieval_refinement = parsed_payload.get("retrieval_refinement", [""])[0]
+                    year_start_raw = " ".join(parsed_payload.get("company_similarity_year_start", [""])[0].split()).strip()
+                    year_end_raw = " ".join(parsed_payload.get("company_similarity_year_end", [""])[0].split()).strip()
+                    try:
+                        company_similarity_year_start = int(year_start_raw) if year_start_raw else None
+                    except ValueError:
+                        company_similarity_year_start = None
+                    try:
+                        company_similarity_year_end = int(year_end_raw) if year_end_raw else None
+                    except ValueError:
+                        company_similarity_year_end = None
                     body, status = launcher._handle_checkpoint_action(
                         run_id=run_id,
                         action_kind=action_kind,
                         selected_pdf_paths=selected_pdf_paths,
                         additional_documents=additional_documents,
                         retrieval_refinement=retrieval_refinement,
+                        company_similarity_year_start=company_similarity_year_start,
+                        company_similarity_year_end=company_similarity_year_end,
                     )
                     self._send_html(body, status=status)
                     return
@@ -2458,6 +2785,9 @@ class DashboardQueryLauncher:
         checkpoint_manifest = self._checkpoint_manifest_for_html(file_path)
         if checkpoint_manifest is not None:
             return self._render_democritus_checkpoint_page(run_id, artifact_path=file_path)
+        company_checkpoint_manifest = self._company_similarity_checkpoint_manifest_for_html(file_path)
+        if company_checkpoint_manifest is not None:
+            return self._render_company_similarity_checkpoint_page(run_id, artifact_path=file_path)
         return self._rewrite_artifact_links(
             file_path.read_text(encoding="utf-8", errors="replace"),
             run_id=run_id,

@@ -461,6 +461,32 @@ def _existing_local_filing_manifest(record: _CompanyRecord) -> Path | None:
     return None
 
 
+def _local_filing_manifest_year_coverage(path: Path) -> tuple[int, int] | None:
+    suffix = path.suffix.lower()
+    years: list[int] = []
+    try:
+        if suffix == ".csv":
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                for row in csv.DictReader(handle):
+                    raw = str(row.get("fiscal_year", "")).strip()
+                    if raw:
+                        years.append(int(raw))
+        elif suffix == ".json":
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            rows = payload if isinstance(payload, list) else []
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                raw = str(item.get("fiscal_year", "")).strip()
+                if raw:
+                    years.append(int(raw))
+    except Exception:
+        return None
+    if not years:
+        return None
+    return min(years), max(years)
+
+
 def _existing_combined_dir(record: _CompanyRecord) -> Path | None:
     for candidate in _combined_dir_candidates(record):
         if candidate.exists():
@@ -674,6 +700,16 @@ def _ensure_company_analysis(
             "Add an index URL or EDGAR ticker to the company registry before requesting this comparison."
         )
     existing_filing_manifest = _existing_local_filing_manifest(record)
+    if existing_filing_manifest is not None:
+        manifest_coverage = _local_filing_manifest_year_coverage(existing_filing_manifest)
+        if (
+            manifest_coverage is not None
+            and not (
+                int(manifest_coverage[0]) <= int(profile["year_start"])
+                and int(profile["year_end"]) <= int(manifest_coverage[1])
+            )
+        ):
+            existing_filing_manifest = None
     command = [
         python_executable,
         "-m",
@@ -704,6 +740,7 @@ def _ensure_company_analysis(
         str(profile["year_start"]),
         "--year-end",
         str(profile["year_end"]),
+        "--filings-only",
     ]
     if existing_filing_manifest is not None:
         command.extend(["--manifest", str(existing_filing_manifest)])
@@ -768,21 +805,24 @@ def _preflight_company_similarity_backend(
     year_start: int | None = None,
     year_end: int | None = None,
 ) -> None:
-    resolved_start, resolved_end = _sanitize_company_similarity_year_window(
-        year_start,
-        year_end,
-        current_year=time.localtime().tm_year,
-    )
-    missing_cached_outputs = [
-        record
-        for record in records
-        if _existing_combined_dir_for_year_window(
-            record,
-            year_start=resolved_start,
-            year_end=resolved_end,
+    if year_start is None and year_end is None:
+        missing_cached_outputs = [record for record in records if _existing_combined_dir(record) is None]
+    else:
+        resolved_start, resolved_end = _sanitize_company_similarity_year_window(
+            year_start,
+            year_end,
+            current_year=time.localtime().tm_year,
         )
-        is None
-    ]
+        missing_cached_outputs = [
+            record
+            for record in records
+            if _existing_combined_dir_for_year_window(
+                record,
+                year_start=resolved_start,
+                year_end=resolved_end,
+            )
+            is None
+        ]
     if not missing_cached_outputs:
         return
     if os.environ.get("OPENAI_API_KEY", "").strip():
@@ -794,7 +834,7 @@ def _preflight_company_similarity_backend(
     )
     raise RuntimeError(
         "Company similarity needs either cached combined atlases or an OpenAI-compatible API key for a fresh Democritus build. "
-        f"No cached combined atlas was found for: {brands}. "
+        f"No cached combined atlas covering the requested years was found for: {brands}. "
         "Set OPENAI_API_KEY in the environment, or place the prebuilt atlas directories at: "
         f"{expected_dirs}."
     )

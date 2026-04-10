@@ -339,6 +339,26 @@ class CLIFFTests(unittest.TestCase):
         self.assertNotIn("second synthesis pass", launcher.updates[-1]["note"])
         build_synthesis.assert_not_called()
 
+    def test_interactive_company_similarity_is_treated_as_checkpoint(self) -> None:
+        decision = module.CLIFFRouteDecision(
+            route_name="company_similarity",
+            module_name="functorflow_v3.company_similarity_agentic",
+            rationale="test",
+        )
+
+        self.assertTrue(
+            module._should_pause_at_interactive_checkpoint(
+                decision,
+                execution_mode="interactive",
+            )
+        )
+        self.assertTrue(
+            worker_module._should_complete_interactive_checkpoint(
+                execution_mode="interactive",
+                route_name="company_similarity",
+            )
+        )
+
     def test_monitor_cliff_session_worker_re_dispatches_after_first_pass(self) -> None:
         class FakeLauncher:
             def __init__(self) -> None:

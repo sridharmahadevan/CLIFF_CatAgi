@@ -45,12 +45,14 @@ class CorpusRelationGroup:
     domain: str
     relation_class: str
     variants: tuple[CorpusClaim, ...]
+    domain_aliases: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
             "subj": self.subj,
             "obj": self.obj,
             "domain": self.domain,
+            "domain_aliases": list(self.domain_aliases),
             "relation_class": self.relation_class,
             "variants": [item.as_dict() for item in self.variants],
         }
@@ -431,23 +433,30 @@ def _coalesce_display_claims(
     claims: list[CorpusClaim],
     *,
     total_documents: int,
+    include_domain: bool = True,
+    relation_key_mode: str = "polarity",
 ) -> list[CorpusClaim]:
     if len(claims) <= 1:
         return claims
 
     grouped: dict[tuple[tuple[str, ...], str, tuple[str, ...], str], list[CorpusClaim]] = {}
     for item in claims:
-        domain_key = "" if total_documents <= 1 else _normalize_claim_text(item.domain)
+        domain_key = ""
+        if include_domain and total_documents > 1:
+            domain_key = _normalize_claim_text(item.domain)
+        relation_key = _relation_polarity(item.rel)
+        if relation_key_mode == "normalized":
+            relation_key = _normalize_relation(item.rel)
         key = (
             _token_signature(item.subj),
-            _relation_polarity(item.rel),
+            relation_key,
             _token_signature(item.obj),
             domain_key,
         )
         if not all(key[:3]):
             key = (
                 (item.subj.strip().lower(),),
-                _relation_polarity(item.rel),
+                relation_key,
                 (item.obj.strip().lower(),),
                 domain_key,
             )
@@ -504,6 +513,173 @@ def _coalesce_display_claims(
         )
     )
     return collapsed
+
+
+def _jaccard_similarity(left: tuple[str, ...], right: tuple[str, ...]) -> float:
+    if not left or not right:
+        return 0.0
+    left_set = set(left)
+    right_set = set(right)
+    union = left_set | right_set
+    if not union:
+        return 0.0
+    return len(left_set & right_set) / len(union)
+
+
+def _relation_group_polarity_key(item: CorpusRelationGroup) -> str:
+    polarities = sorted({_relation_polarity(variant.rel) for variant in item.variants})
+    return "|".join(polarities) or "unknown"
+
+
+def _relation_group_signature(item: CorpusRelationGroup) -> tuple[str, ...]:
+    representative = max(
+        item.variants,
+        key=lambda variant: (
+            int(variant.document_support),
+            int(variant.claim_count),
+            len(variant.statement),
+        ),
+    )
+    tokens: list[str] = []
+    tokens.extend(_token_signature(item.domain))
+    tokens.extend(_token_signature(representative.statement or representative.obj))
+    tokens.extend(_normalize_relation(variant.rel) for variant in item.variants if str(variant.rel or "").strip())
+    return tuple(sorted(dict.fromkeys(token for token in tokens if token)))
+
+
+def _merge_relation_group_component(
+    items: list[CorpusRelationGroup],
+    *,
+    total_documents: int,
+) -> CorpusRelationGroup:
+    representative = max(
+        items,
+        key=lambda item: (
+            max((int(variant.document_support) for variant in item.variants), default=0),
+            sum(int(variant.claim_count) for variant in item.variants),
+            _domain_rank(item.domain),
+        ),
+    )
+    domain_aliases = tuple(
+        dict.fromkeys(
+            domain
+            for item in items
+            for domain in ((item.domain,) + tuple(item.domain_aliases or ()))
+            if str(domain or "").strip()
+        )
+    )
+    domain_support: dict[str, int] = {}
+    for item in items:
+        item_support = max((int(variant.document_support) for variant in item.variants), default=0)
+        for domain in ((item.domain,) + tuple(item.domain_aliases or ())):
+            if not str(domain or "").strip():
+                continue
+            domain_support[str(domain)] = domain_support.get(str(domain), 0) + item_support
+    best_domain = max(
+        domain_support,
+        key=lambda domain: (domain_support[domain], _domain_rank(domain)),
+        default=representative.domain,
+    )
+    merged_variants = tuple(
+        _coalesce_display_claims(
+            [variant for item in items for variant in item.variants],
+            total_documents=total_documents,
+            include_domain=False,
+            relation_key_mode="normalized",
+        )
+    )
+    return CorpusRelationGroup(
+        subj=representative.subj,
+        obj=representative.obj,
+        domain=best_domain,
+        domain_aliases=domain_aliases,
+        relation_class=representative.relation_class,
+        variants=merged_variants,
+    )
+
+
+def _merge_equivalence_groups_knn(
+    groups: list[CorpusRelationGroup],
+    *,
+    total_documents: int,
+    k: int = 3,
+    min_similarity: float = 0.33,
+    mean_similarity_gate: float = 0.36,
+) -> list[CorpusRelationGroup]:
+    if len(groups) <= 1:
+        return groups
+
+    merged: list[CorpusRelationGroup] = []
+    buckets: dict[tuple[tuple[str, ...], tuple[str, ...], str], list[CorpusRelationGroup]] = {}
+    for item in groups:
+        key = (
+            _token_signature(item.subj) or (item.subj.strip().lower(),),
+            _token_signature(item.obj) or (item.obj.strip().lower(),),
+            _relation_group_polarity_key(item),
+        )
+        buckets.setdefault(key, []).append(item)
+
+    for bucket_items in buckets.values():
+        if len(bucket_items) <= 1:
+            merged.extend(bucket_items)
+            continue
+
+        signatures = [_relation_group_signature(item) for item in bucket_items]
+        neighbors: list[list[int]] = [[] for _ in bucket_items]
+        for left_index, left_item in enumerate(bucket_items):
+            scored_neighbors: list[tuple[float, int]] = []
+            for right_index, right_item in enumerate(bucket_items):
+                if left_index == right_index:
+                    continue
+                similarity = _jaccard_similarity(signatures[left_index], signatures[right_index])
+                if similarity < min_similarity:
+                    continue
+                right_support = max((int(variant.document_support) for variant in right_item.variants), default=0)
+                score = similarity * max(right_support, 1)
+                scored_neighbors.append((score, right_index))
+            scored_neighbors.sort(reverse=True)
+            chosen = scored_neighbors[: max(k, 1)]
+            if not chosen:
+                continue
+            mean_similarity = sum(
+                _jaccard_similarity(signatures[left_index], signatures[right_index])
+                for _score, right_index in chosen
+            ) / len(chosen)
+            if mean_similarity < mean_similarity_gate:
+                continue
+            neighbors[left_index] = [right_index for _score, right_index in chosen]
+
+        adjacency: list[set[int]] = [set() for _ in bucket_items]
+        for left_index, right_indexes in enumerate(neighbors):
+            for right_index in right_indexes:
+                if left_index in neighbors[right_index]:
+                    adjacency[left_index].add(right_index)
+                    adjacency[right_index].add(left_index)
+
+        seen: set[int] = set()
+        for start_index in range(len(bucket_items)):
+            if start_index in seen:
+                continue
+            stack = [start_index]
+            component_indexes: list[int] = []
+            while stack:
+                current = stack.pop()
+                if current in seen:
+                    continue
+                seen.add(current)
+                component_indexes.append(current)
+                stack.extend(sorted(adjacency[current] - seen))
+            component = [bucket_items[index] for index in sorted(component_indexes)]
+            if len(component) == 1:
+                merged.append(component[0])
+            else:
+                merged.append(
+                    _merge_relation_group_component(
+                        component,
+                        total_documents=total_documents,
+                    )
+                )
+    return merged
 
 
 def _load_relation_groups(
@@ -569,10 +745,15 @@ def _load_relation_groups(
                 subj=key[0],
                 obj=key[1],
                 domain=key[2],
+                domain_aliases=(key[2],),
                 relation_class=relation_class,
                 variants=tuple(items),
             )
         )
+    equivalence_classes = _merge_equivalence_groups_knn(
+        equivalence_classes,
+        total_documents=total_documents,
+    )
     equivalence_classes.sort(
         key=lambda item: (
             -max(variant.document_support for variant in item.variants),
@@ -670,6 +851,12 @@ def _render_equivalence_card(item: dict[str, object]) -> str:
     representative = _representative_variant(item)
     variant_count = len(variants)
     max_support = max((int(variant.get("document_support") or 0) for variant in variants), default=0)
+    domain_aliases = [
+        str(domain).strip()
+        for domain in (item.get("domain_aliases") or [])
+        if str(domain).strip()
+    ]
+    alternate_domains = [domain for domain in domain_aliases if domain != str(item.get("domain") or "")]
     relation_variants = ", ".join(
         str(variant.get("rel") or "")
         for variant in variants
@@ -699,6 +886,11 @@ def _render_equivalence_card(item: dict[str, object]) -> str:
             f'<p class="trace">Domain: {esc(item["domain"])} · Relation family: {esc(relation_variants)}</p>'
             if relation_variants
             else f'<p class="trace">Domain: {esc(item["domain"])}</p>'
+        )
+        + (
+            f'<p class="trace">Also seen under: {esc(" | ".join(alternate_domains[:3]))}</p>'
+            if alternate_domains
+            else ""
         )
         + variant_rows
         + "</article>"
