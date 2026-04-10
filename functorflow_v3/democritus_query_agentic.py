@@ -81,8 +81,15 @@ _STOPWORDS = {
     "these",
     "those",
     "they",
+    "their",
     "tell",
     "to",
+    "topic",
+    "topics",
+    "focus",
+    "avoid",
+    "recent",
+    "joint",
     "understand",
     "want",
     "what",
@@ -136,6 +143,93 @@ _GENERIC_RETRIEVAL_TOKENS = {
     "therapy",
     "treatment",
     "treatments",
+}
+
+_AMBIGUOUS_QUERY_TERMS: tuple[dict[str, object], ...] = (
+    {
+        "term": "inflation",
+        "reason": (
+            "The term 'inflation' is ambiguous here. In research corpora it can refer to "
+            "economic inflation, cosmological inflation, device or balloon inflation, and other contexts."
+        ),
+        "disambiguating_tokens": (
+            "economics",
+            "economic",
+            "macroeconomic",
+            "macro",
+            "prices",
+            "price",
+            "cpi",
+            "monetary",
+            "fed",
+            "reserve",
+            "wages",
+            "wage",
+            "unemployment",
+            "recession",
+            "cosmic",
+            "cosmology",
+            "cosmological",
+            "universe",
+            "primordial",
+            "balloon",
+            "tire",
+            "tyre",
+            "cuff",
+            "catheter",
+            "medical",
+        ),
+        "disambiguating_phrases": (
+            "inflation rate",
+            "consumer prices",
+            "price level",
+            "cost of living",
+            "purchasing power",
+            "early universe",
+            "big bang",
+            "tire inflation",
+            "balloon inflation",
+            "cuff inflation",
+        ),
+        "suggested_queries": (
+            "Analyze 20 recent studies on economic inflation and synthesize what they jointly support",
+            "Analyze 20 recent studies on cosmic inflation in cosmology and synthesize what they jointly support",
+            "Analyze 20 recent studies on balloon or device inflation and synthesize what they jointly support",
+        ),
+    },
+)
+
+_EXPLANATION_QUERY_PREFIXES: tuple[str, ...] = (
+    "explain ",
+    "what is ",
+    "what are ",
+    "how does ",
+    "how do ",
+    "help me understand ",
+    "teach me ",
+    "walk me through ",
+)
+
+_EVIDENCE_ACQUISITION_TOKENS = {
+    "study",
+    "studies",
+    "paper",
+    "papers",
+    "article",
+    "articles",
+    "document",
+    "documents",
+    "filing",
+    "filings",
+    "report",
+    "reports",
+    "pdf",
+    "corpus",
+    "evidence",
+    "source",
+    "sources",
+    "dataset",
+    "datasets",
 }
 
 _SEC_COMPANY_QUERY_STOPWORDS = {
@@ -329,6 +423,95 @@ def _path_to_file_uri(path_value: object) -> str:
         return ""
 
 
+def _checkpoint_query_focus_terms(query: str) -> tuple[str, ...]:
+    retrieval_query = _derive_retrieval_query(query)
+    ordered = list(_tokenize(retrieval_query))
+    focus_terms = [token for token in ordered if token not in _GENERIC_RETRIEVAL_TOKENS]
+    if not focus_terms:
+        focus_terms = ordered
+    return tuple(dict.fromkeys(focus_terms[:8]))
+
+
+def _normalized_topics(values: tuple[str, ...] | list[str] | object) -> tuple[str, ...]:
+    topics: list[str] = []
+    for value in tuple(values or ()):
+        normalized = " ".join(str(value or "").split()).strip()
+        if normalized:
+            topics.append(normalized)
+    return tuple(dict.fromkeys(topics))
+
+
+def _topic_alignment_diagnostics(
+    *,
+    query: str,
+    documents_payload: list[dict[str, object]],
+    top_topics: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    normalized_query = " ".join(str(query or "").lower().split())
+    focus_terms = _checkpoint_query_focus_terms(query)
+    topic_context: dict[str, list[str]] = {}
+    for document in documents_payload:
+        context_parts = [
+            str(document.get("title") or ""),
+            str(document.get("guide_summary") or ""),
+            str(document.get("causal_gestalt") or ""),
+        ]
+        context_text = " ".join(part for part in context_parts if part).strip()
+        for topic in list(document.get("topics") or []):
+            normalized_topic = " ".join(str(topic or "").split()).strip()
+            if not normalized_topic:
+                continue
+            topic_context.setdefault(normalized_topic, []).append(context_text)
+    diagnostics: list[dict[str, object]] = []
+    suspicious_topic_count = 0
+    aligned_topic_count = 0
+    alignment_total = 0.0
+    for item in top_topics:
+        topic = " ".join(str(dict(item).get("topic") or "").split()).strip()
+        if not topic:
+            continue
+        context_text = " ".join(topic_context.get(topic) or ())
+        context_tokens = set(_tokenize(" ".join(part for part in (topic, context_text) if part)))
+        matched_query_terms = tuple(term for term in focus_terms if term in context_tokens)
+        exact_phrase_match = bool(topic and topic.lower() in normalized_query)
+        alignment_score = float(len(matched_query_terms))
+        if exact_phrase_match:
+            alignment_score += 1.0
+        if focus_terms:
+            alignment_score = min(1.0, alignment_score / float(len(focus_terms)))
+        is_suspicious = bool(focus_terms) and not exact_phrase_match and not matched_query_terms
+        if matched_query_terms or exact_phrase_match:
+            aligned_topic_count += 1
+        if is_suspicious:
+            suspicious_topic_count += 1
+        alignment_total += alignment_score
+        diagnostics.append(
+            {
+                "topic": topic,
+                "document_count": int(dict(item).get("document_count") or 0),
+                "matched_query_terms": list(matched_query_terms),
+                "alignment_score": round(alignment_score, 3),
+                "exact_phrase_match": exact_phrase_match,
+                "is_suspicious_drift": is_suspicious,
+            }
+        )
+    total_topics = len(diagnostics)
+    drift_metrics = {
+        "total_topic_count": total_topics,
+        "aligned_topic_count": aligned_topic_count,
+        "suspicious_topic_count": suspicious_topic_count,
+        "aligned_topic_ratio": round(aligned_topic_count / total_topics, 3) if total_topics else 0.0,
+        "mean_alignment_score": round(alignment_total / total_topics, 3) if total_topics else 0.0,
+        "synthesis_readiness_proxy": round(alignment_total / total_topics, 3) if total_topics else 0.0,
+    }
+    return diagnostics, {
+        "query_focus_terms": list(focus_terms),
+        "topic_alignment": diagnostics,
+        "suspicious_topics": [item for item in diagnostics if bool(item.get("is_suspicious_drift"))],
+        "drift_metrics": drift_metrics,
+    }
+
+
 def _render_democritus_topic_checkpoint_html(payload: dict[str, object]) -> str:
     query = escape(str(payload.get("query") or "Democritus interactive checkpoint"))
     stage_label = escape(str(payload.get("stage_label") or "Topic checkpoint"))
@@ -336,10 +519,20 @@ def _render_democritus_topic_checkpoint_html(payload: dict[str, object]) -> str:
     n_documents = int(payload.get("n_documents") or 0)
     top_topics = list(payload.get("top_topics") or [])
     documents = list(payload.get("documents") or [])
+    suspicious_topics = list(payload.get("suspicious_topics") or [])
+    query_focus_terms = list(payload.get("query_focus_terms") or [])
     topic_chips = "".join(
         f'<span class="chip">{escape(str(item.get("topic") or ""))} · {escape(str(item.get("document_count") or 0))} docs</span>'
         for item in top_topics[:16]
     ) or '<span class="chip">No recurring topics detected yet</span>'
+    suspicious_chips = "".join(
+        f'<span class="chip drift">{escape(str(item.get("topic") or ""))}</span>'
+        for item in suspicious_topics[:8]
+    ) or '<span class="chip">No obvious drift topics were detected from query alignment.</span>'
+    focus_term_chips = "".join(
+        f'<span class="chip focus">{escape(str(term))}</span>'
+        for term in query_focus_terms[:8]
+    ) or '<span class="chip">No strong query anchors were extracted.</span>'
     document_cards = "".join(
         (
             '<article class="doc-card">'
@@ -400,6 +593,8 @@ def _render_democritus_topic_checkpoint_html(payload: dict[str, object]) -> str:
       .trace {{ color: var(--muted); line-height: 1.6; }}
       .chip-row, .topic-list {{ display: flex; flex-wrap: wrap; gap: 10px; min-width: 0; }}
       .chip, .topic-pill {{ border-radius: 999px; padding: 8px 12px; background: #efe7d9; font-size: 0.92rem; color: #64492b; }}
+      .chip.focus {{ background: #e8f4ee; color: #204d41; }}
+      .chip.drift {{ background: #f8ede0; color: #8b4a1f; }}
       .topic-pill {{ background: #f5efe4; max-width: 100%; overflow-wrap: anywhere; }}
       .doc-grid {{ display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); align-items: start; }}
       .doc-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 18px; background: #fffdf9; display: grid; gap: 12px; min-width: 0; align-content: start; overflow: hidden; }}
@@ -437,6 +632,12 @@ def _render_democritus_topic_checkpoint_html(payload: dict[str, object]) -> str:
         </div>
       </section>
       <section class="panel">
+        <p class="eyebrow">Atlas Drift Signal</p>
+        <p class="trace">Democritus now treats the atlas pass as an anti-drift checkpoint before deeper extraction. Query anchors and suspicious topics are surfaced here so you can tighten the corpus early.</p>
+        <div class="chip-row" style="margin-top:14px;">{focus_term_chips}</div>
+        <div class="chip-row" style="margin-top:12px;">{suspicious_chips}</div>
+      </section>
+      <section class="panel">
         <p class="eyebrow">Corpus Topic Atlas</p>
         <p class="trace">{n_documents} documents reached the root-topic frontier. These recurring themes are the first shared causal surface Democritus recovered.</p>
         <div class="chip-row" style="margin-top:14px;">{topic_chips}</div>
@@ -453,6 +654,10 @@ def _render_democritus_topic_checkpoint_html(payload: dict[str, object]) -> str:
 def _build_democritus_topic_checkpoint(
     *,
     query: str,
+    base_query: str,
+    selected_topics: tuple[str, ...] = (),
+    rejected_topics: tuple[str, ...] = (),
+    retrieval_refinement: str = "",
     outdir: Path,
     batch_runner: DemocritusBatchAgenticRunner,
 ) -> tuple[Path, Path]:
@@ -491,24 +696,304 @@ def _build_democritus_topic_checkpoint(
         {"topic": topic, "document_count": count}
         for topic, count in topic_counter.most_common(16)
     ]
+    focus_query = _retrieval_source_query(
+        base_query=base_query,
+        selected_topics=selected_topics,
+        retrieval_refinement=retrieval_refinement,
+        fallback_query=query,
+    )
+    alignment_payload, drift_payload = _topic_alignment_diagnostics(
+        query=focus_query,
+        documents_payload=documents_payload,
+        top_topics=top_topics,
+    )
     recurring = ", ".join(item["topic"] for item in top_topics[:4]) if top_topics else "no recurring topics yet"
+    suspicious_topics = list(drift_payload.get("suspicious_topics") or [])
+    drift_metrics = dict(drift_payload.get("drift_metrics") or {})
+    suspicious_count = int(drift_metrics.get("suspicious_topic_count") or 0)
     payload = {
         "query": query,
+        "base_query": base_query,
         "stage_id": "root_topics",
-        "stage_label": "Root Topic Checkpoint",
+        "stage_phase": "atlas_pass",
+        "stage_label": "Atlas Drift Checkpoint",
         "n_documents": len(documents_payload),
         "top_topics": top_topics,
+        "selected_topics": list(selected_topics),
+        "rejected_topics": list(rejected_topics),
+        "retrieval_refinement": retrieval_refinement,
+        "topic_alignment": alignment_payload,
+        "query_focus_terms": list(drift_payload.get("query_focus_terms") or []),
+        "suspicious_topics": suspicious_topics,
+        "drift_metrics": drift_metrics,
         "documents": documents_payload,
         "summary_text": (
-            "Democritus has finished topic extraction and built an initial corpus topic atlas around "
-            f"{recurring}. If the article set looks right, continue deeper to causal question generation, "
-            "statement extraction, and cross-document synthesis."
+            "Democritus has finished the atlas pass and built an anti-drift topic surface around "
+            f"{recurring}. "
+            + (
+                f"{suspicious_count} topic{'s look' if suspicious_count != 1 else ' looks'} weakly aligned to the query and may indicate corpus drift. "
+                if suspicious_count
+                else "No obvious off-scope atlas topics were detected from query alignment. "
+            )
+            + "Use the atlas to tighten retrieval before continuing into causal question generation, statement extraction, and cross-document synthesis."
         ),
-        "recommended_next_action": "continue_deeper",
+        "recommended_next_action": "review_atlas_drift",
     }
     _write_json(manifest_path, payload)
     dashboard_path.parent.mkdir(parents=True, exist_ok=True)
     dashboard_path.write_text(_render_democritus_topic_checkpoint_html(payload), encoding="utf-8")
+    return manifest_path, dashboard_path
+
+
+@dataclass(frozen=True)
+class QueryClarificationRequest:
+    """Clarification checkpoint emitted before retrieval when the query is ambiguous."""
+
+    summary_text: str
+    reason: str
+    suggested_queries: tuple[str, ...]
+    ambiguous_term: str = ""
+
+
+def _query_clarification_request(
+    query: str,
+    retrieval_query: str,
+    *,
+    has_direct_document_input: bool,
+) -> QueryClarificationRequest | None:
+    if has_direct_document_input:
+        return None
+    normalized_query = " ".join(_strip_urls(query.lower()).split())
+    retrieval_tokens = set(_tokenize(retrieval_query))
+    query_tokens = set(_tokenize(normalized_query))
+    for spec in _AMBIGUOUS_QUERY_TERMS:
+        term = str(spec.get("term") or "").strip().lower()
+        if not term or (term not in retrieval_tokens and term not in query_tokens):
+            continue
+        disambiguating_phrases = tuple(str(item).lower() for item in tuple(spec.get("disambiguating_phrases") or ()))
+        if any(phrase and phrase in normalized_query for phrase in disambiguating_phrases):
+            continue
+        disambiguating_tokens = {
+            str(item).strip().lower()
+            for item in tuple(spec.get("disambiguating_tokens") or ())
+            if str(item).strip()
+        }
+        if (query_tokens - {term}) & disambiguating_tokens:
+            continue
+        return QueryClarificationRequest(
+            summary_text=(
+                f"The term '{term}' needs a domain-specific meaning before Democritus can search for a reliable corpus."
+            ),
+            reason=str(spec.get("reason") or "").strip() or f"The term {term!r} needs clarification.",
+            suggested_queries=tuple(
+                str(item).strip()
+                for item in tuple(spec.get("suggested_queries") or ())
+                if str(item).strip()
+            ),
+            ambiguous_term=term,
+        )
+    return _query_intent_clarification_request(
+        query,
+        retrieval_query,
+        has_direct_document_input=has_direct_document_input,
+    )
+
+
+def _query_intent_clarification_request(
+    query: str,
+    retrieval_query: str,
+    *,
+    has_direct_document_input: bool,
+) -> QueryClarificationRequest | None:
+    if has_direct_document_input:
+        return None
+    normalized_query = " ".join(_strip_urls(str(query).lower()).split())
+    if not _looks_like_explanation_query(normalized_query):
+        return None
+    if _looks_like_evidence_acquisition_query(normalized_query):
+        return None
+    focus = _clarification_focus_text(query, retrieval_query=retrieval_query)
+    return QueryClarificationRequest(
+        summary_text=(
+            "This looks like an explanation or teaching request, not a scoped evidence-acquisition query."
+        ),
+        reason=(
+            "Democritus is strongest when the request names a document set or asks for studies, papers, filings, "
+            "or other evidence-backed sources. Pure explanation prompts can trigger a long retrieval run and still "
+            "return poor matches."
+        ),
+        suggested_queries=(
+            f"Explain {focus} and point me to the best course demo or textbook section",
+            f"Find 10 studies, papers, or documents on {focus} and synthesize what they jointly support",
+            f"Analyze the PDF or document set on {focus} that I provide explicitly",
+        ),
+    )
+
+
+def _looks_like_explanation_query(normalized_query: str) -> bool:
+    return normalized_query.startswith(_EXPLANATION_QUERY_PREFIXES) or any(
+        phrase in normalized_query for phrase in (" explain ", " teach me ", " understand ")
+    )
+
+
+def _looks_like_evidence_acquisition_query(normalized_query: str) -> bool:
+    query_tokens = set(_tokenize(normalized_query))
+    return bool(query_tokens & _EVIDENCE_ACQUISITION_TOKENS)
+
+
+def _clarification_focus_text(query: str, *, retrieval_query: str) -> str:
+    collapsed = " ".join(str(query or "").split()).strip().rstrip("?")
+    lowered = collapsed.lower()
+    for prefix in _EXPLANATION_QUERY_PREFIXES:
+        if lowered.startswith(prefix):
+            focus = collapsed[len(prefix) :].strip()
+            return focus or (retrieval_query or collapsed)
+    return retrieval_query or collapsed or "this topic"
+
+
+def _render_query_clarification_html(payload: dict[str, object]) -> str:
+    query = escape(str(payload.get("query") or "Democritus query clarification"))
+    stage_label = escape(str(payload.get("stage_label") or "Query Clarification"))
+    ambiguous_term = escape(str(payload.get("ambiguous_term") or "term"))
+    summary_text = escape(str(payload.get("summary_text") or "This query needs clarification before retrieval can begin."))
+    reason = escape(str(payload.get("reason") or "This query needs clarification before retrieval can begin."))
+    suggestions = tuple(str(item).strip() for item in tuple(payload.get("suggested_queries") or ()) if str(item).strip())
+    suggestion_markup = "".join(
+        (
+            '<article class="suggestion-card">'
+            f"<p class=\"suggestion-label\">Suggested rewrite</p>"
+            f"<pre>{escape(item)}</pre>"
+            f"<button type=\"button\" onclick=\"copySuggestion(this)\" data-query=\"{escape(item)}\">Copy query</button>"
+            "</article>"
+        )
+        for item in suggestions
+    ) or '<div class="empty">No suggested rewrites were generated.</div>'
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Democritus Query Clarification</title>
+    <style>
+      :root {{
+        --ink: #18222d;
+        --muted: #59646f;
+        --paper: #f6f1e8;
+        --card: rgba(255,255,255,0.92);
+        --line: #d7ccb8;
+        --accent: #93451e;
+        --accent-soft: #f6e5d7;
+        --green: #1f6a56;
+      }}
+      * {{ box-sizing: border-box; }}
+      body {{
+        margin: 0;
+        font-family: Georgia, "Iowan Old Style", serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(147,69,30,0.12), transparent 24%),
+          linear-gradient(180deg, #fbf7f0 0%, var(--paper) 100%);
+      }}
+      main {{ width: min(1080px, calc(100vw - 32px)); margin: 32px auto 48px; display: grid; gap: 18px; }}
+      .panel {{ background: var(--card); border: 1px solid var(--line); border-radius: 28px; padding: 24px; box-shadow: 0 24px 60px rgba(30,25,18,0.08); }}
+      .eyebrow {{ margin: 0 0 10px; text-transform: uppercase; letter-spacing: 0.16em; font-size: 12px; color: var(--accent); }}
+      h1, h2, p, pre {{ margin: 0; }}
+      .trace {{ color: var(--muted); line-height: 1.6; }}
+      .callout {{ background: var(--accent-soft); }}
+      .suggestion-grid {{ display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); }}
+      .suggestion-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 18px; background: #fffdf9; display: grid; gap: 12px; }}
+      .suggestion-label {{ font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.12em; color: var(--accent); }}
+      pre {{
+        white-space: pre-wrap;
+        word-break: break-word;
+        padding: 14px;
+        border-radius: 16px;
+        border: 1px solid var(--line);
+        background: #fbf6ef;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 13px;
+        line-height: 1.55;
+      }}
+      button {{
+        border: 0;
+        border-radius: 999px;
+        padding: 10px 14px;
+        background: var(--green);
+        color: white;
+        font-weight: 700;
+        cursor: pointer;
+      }}
+      button:hover {{ filter: brightness(0.96); }}
+      code {{
+        background: rgba(0,0,0,0.04);
+        padding: 2px 5px;
+        border-radius: 6px;
+      }}
+      .empty {{ color: var(--muted); line-height: 1.6; }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="panel">
+        <p class="eyebrow">Democritus Clarification Checkpoint</p>
+        <h1>{query}</h1>
+        <p class="trace">Democritus paused at the <strong>{stage_label}</strong> before retrieval. {("The term <code>" + ambiguous_term + "</code> needs a domain-specific meaning so the corpus search does not drift into unrelated literature.") if ambiguous_term else summary_text}</p>
+      </section>
+      <section class="panel callout">
+        <p class="eyebrow">Why CLIFF Paused</p>
+        <p class="trace">{reason}</p>
+        <p class="trace" style="margin-top:12px;">Copy one of the rewritten queries below, paste it back into the CLIFF session prompt, and rerun.</p>
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Suggested Queries</p>
+        <div class="suggestion-grid" style="margin-top:12px;">{suggestion_markup}</div>
+      </section>
+    </main>
+    <script>
+      function copySuggestion(button) {{
+        var query = button.getAttribute("data-query") || "";
+        if (!query) {{
+          return;
+        }}
+        navigator.clipboard.writeText(query).then(function () {{
+          button.textContent = "Copied";
+          window.setTimeout(function () {{
+            button.textContent = "Copy query";
+          }}, 1200);
+        }}).catch(function () {{
+          button.textContent = "Copy failed";
+          window.setTimeout(function () {{
+            button.textContent = "Copy query";
+          }}, 1200);
+        }});
+      }}
+    </script>
+  </body>
+</html>"""
+
+
+def _build_query_clarification_checkpoint(
+    *,
+    query: str,
+    outdir: Path,
+    clarification_request: QueryClarificationRequest,
+) -> tuple[Path, Path]:
+    checkpoint_dir = outdir / "query_clarification"
+    manifest_path = checkpoint_dir / "democritus_query_clarification.json"
+    dashboard_path = checkpoint_dir / "democritus_query_clarification.html"
+    payload = {
+        "query": query,
+        "stage_id": "query_clarification",
+        "stage_label": "Query Clarification",
+        "summary_text": clarification_request.summary_text,
+        "ambiguous_term": clarification_request.ambiguous_term,
+        "reason": clarification_request.reason,
+        "suggested_queries": list(clarification_request.suggested_queries),
+        "recommended_next_action": "resubmit_query",
+    }
+    _write_json(manifest_path, payload)
+    dashboard_path.parent.mkdir(parents=True, exist_ok=True)
+    dashboard_path.write_text(_render_query_clarification_html(payload), encoding="utf-8")
     return manifest_path, dashboard_path
 
 
@@ -705,13 +1190,18 @@ class QueryPlan:
     normalized_query: str
     keyword_tokens: tuple[str, ...]
     target_documents: int
+    base_query: str = ""
     requested_forms: tuple[str, ...] = ()
     retrieval_query: str = ""
+    selected_topics: tuple[str, ...] = ()
+    rejected_topics: tuple[str, ...] = ()
+    retrieval_refinement: str = ""
     sec_company_targets: tuple[tuple[str, ...], ...] = ()
     sec_cohort_mode: str = "ranked"
     direct_document_urls: tuple[str, ...] = ()
     direct_document_paths: tuple[str, ...] = ()
     direct_document_directories: tuple[str, ...] = ()
+    clarification_request: QueryClarificationRequest | None = None
 
 
 def _derive_retrieval_query(query: str) -> str:
@@ -748,6 +1238,41 @@ def _derive_retrieval_query(query: str) -> str:
     if had_url:
         return ""
     return normalized
+
+
+def _compose_structured_democritus_query(
+    *,
+    base_query: str,
+    selected_topics: tuple[str, ...],
+    rejected_topics: tuple[str, ...],
+    retrieval_refinement: str,
+) -> str:
+    parts = [" ".join(str(base_query or "").split()).strip()]
+    if selected_topics:
+        parts.append("focus on topics: " + "; ".join(selected_topics))
+    if rejected_topics:
+        parts.append("avoid topics: " + "; ".join(rejected_topics))
+    refinement = " ".join(str(retrieval_refinement or "").split()).strip()
+    if refinement:
+        parts.append(refinement)
+    return " ".join(part for part in parts if part).strip()
+
+
+def _retrieval_source_query(
+    *,
+    base_query: str,
+    selected_topics: tuple[str, ...],
+    retrieval_refinement: str,
+    fallback_query: str,
+) -> str:
+    parts = [" ".join(str(base_query or "").split()).strip()]
+    if selected_topics:
+        parts.append(" ".join(selected_topics))
+    refinement = " ".join(str(retrieval_refinement or "").split()).strip()
+    if refinement:
+        parts.append(refinement)
+    composed = " ".join(part for part in parts if part).strip()
+    return composed or " ".join(str(fallback_query or "").split()).strip()
 
 
 def _strip_urls(text: str) -> str:
@@ -1174,6 +1699,10 @@ class DemocritusQueryAgenticConfig:
     outdir: Path
     execution_mode: str = "quick"
     target_documents: int = 10
+    base_query: str = ""
+    selected_topics: tuple[str, ...] = ()
+    rejected_topics: tuple[str, ...] = ()
+    retrieval_refinement: str = ""
     input_pdf_path: Path | None = None
     input_pdf_dir: Path | None = None
     manifest_path: Path | None = None
@@ -1274,6 +1803,14 @@ class DemocritusQueryAgenticConfig:
             outdir=self.outdir.resolve(),
             execution_mode=execution_mode,
             target_documents=target_documents,
+            base_query=" ".join(str(self.base_query or "").split()).strip(),
+            selected_topics=_normalized_topics(self.selected_topics),
+            rejected_topics=tuple(
+                topic
+                for topic in _normalized_topics(self.rejected_topics)
+                if topic not in set(_normalized_topics(self.selected_topics))
+            ),
+            retrieval_refinement=" ".join(str(self.retrieval_refinement or "").split()).strip(),
             input_pdf_path=self.input_pdf_path.resolve() if self.input_pdf_path else None,
             input_pdf_dir=self.input_pdf_dir.resolve() if self.input_pdf_dir else None,
             manifest_path=self.manifest_path.resolve() if self.manifest_path else None,
@@ -1346,6 +1883,8 @@ class DemocritusQueryRunResult:
     corpus_synthesis_dashboard_path: Path | None = None
     checkpoint_manifest_path: Path | None = None
     checkpoint_dashboard_path: Path | None = None
+    clarification_manifest_path: Path | None = None
+    clarification_dashboard_path: Path | None = None
 
 
 class RetrievalBackend(Protocol):
@@ -1974,22 +2513,30 @@ class DemocritusQueryAgenticRunner:
 
     def run(self) -> DemocritusQueryRunResult:
         self.config.outdir.mkdir(parents=True, exist_ok=True)
+        plan = self._run_query_interpretation_agent()
         batch_runner: DemocritusBatchAgenticRunner | None = None
         batch_result: DemocritusBatchRunResult | None = None
         checkpoint_manifest_path: Path | None = None
         checkpoint_dashboard_path: Path | None = None
-        if not self.config.discovery_only and not self.config.dry_run:
-            batch_runner = self._build_batch_runner(streaming=True)
+        clarification_manifest_path: Path | None = None
+        clarification_dashboard_path: Path | None = None
         selected_documents: tuple[DiscoveredDocument, ...] = ()
         acquired: tuple[AcquiredCorpusDocument, ...] = ()
         analysis_iterations = 0
         consensus_reached = False
         convergence_assessment = None
+        if plan.clarification_request is not None:
+            clarification_manifest_path, clarification_dashboard_path = _build_query_clarification_checkpoint(
+                query=plan.query,
+                outdir=self.config.outdir,
+                clarification_request=plan.clarification_request,
+            )
+        elif not self.config.discovery_only and not self.config.dry_run:
+            batch_runner = self._build_batch_runner(streaming=True)
         if batch_runner is not None:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 batch_future = executor.submit(batch_runner.run_with_artifacts)
                 try:
-                    plan = self._run_query_interpretation_agent()
                     (
                         selected_documents,
                         acquired,
@@ -2005,8 +2552,7 @@ class DemocritusQueryAgenticRunner:
                 finally:
                     batch_runner.close_document_stream()
                 batch_result = batch_future.result()
-        else:
-            plan = self._run_query_interpretation_agent()
+        elif plan.clarification_request is None:
             if self.config.discovery_only:
                 discovered = self._run_document_discovery_agent(plan)
                 selected_documents = tuple(discovered[: plan.target_documents])
@@ -2028,6 +2574,10 @@ class DemocritusQueryAgenticRunner:
         if self.config.execution_mode == "interactive" and batch_runner is not None:
             checkpoint_manifest_path, checkpoint_dashboard_path = _build_democritus_topic_checkpoint(
                 query=plan.query,
+                base_query=plan.base_query,
+                selected_topics=plan.selected_topics,
+                rejected_topics=plan.rejected_topics,
+                retrieval_refinement=plan.retrieval_refinement,
                 outdir=self.config.outdir,
                 batch_runner=batch_runner,
             )
@@ -2056,20 +2606,26 @@ class DemocritusQueryAgenticRunner:
             ),
             checkpoint_manifest_path=checkpoint_manifest_path,
             checkpoint_dashboard_path=checkpoint_dashboard_path,
+            clarification_manifest_path=clarification_manifest_path,
+            clarification_dashboard_path=clarification_dashboard_path,
         )
+        self._write_run_summary(result)
+        return result
+
+    def _write_run_summary(self, result: DemocritusQueryRunResult) -> None:
         _write_json(
             self.summary_path,
             {
-                "query_plan": asdict(plan),
+                "query_plan": asdict(result.query_plan),
                 "execution_mode": self.config.execution_mode,
-                "selected_documents": [asdict(item) for item in selected_documents],
-                "acquired_documents": [asdict(item) for item in acquired],
-                "pdf_dir": str(self.pdf_dir),
-                "batch_outdir": str(self.batch_outdir),
-                "batch_records": len(batch_records),
-                "analysis_iterations": analysis_iterations,
-                "consensus_reached": consensus_reached,
-                "convergence_assessment": convergence_assessment,
+                "selected_documents": [asdict(item) for item in result.selected_documents],
+                "acquired_documents": [asdict(item) for item in result.acquired_documents],
+                "pdf_dir": str(result.pdf_dir),
+                "batch_outdir": str(result.batch_outdir),
+                "batch_records": len(result.batch_records),
+                "analysis_iterations": result.analysis_iterations,
+                "consensus_reached": result.consensus_reached,
+                "convergence_assessment": result.convergence_assessment,
                 "discovery_only": self.config.discovery_only,
                 "retrieval_backend": self._backend_name(),
                 "csql_sqlite_path": str(result.csql_sqlite_path) if result.csql_sqlite_path else None,
@@ -2094,9 +2650,18 @@ class DemocritusQueryAgenticRunner:
                     if result.checkpoint_dashboard_path
                     else None
                 ),
+                "clarification_manifest_path": (
+                    str(result.clarification_manifest_path)
+                    if result.clarification_manifest_path
+                    else None
+                ),
+                "clarification_dashboard_path": (
+                    str(result.clarification_dashboard_path)
+                    if result.clarification_dashboard_path
+                    else None
+                ),
             },
         )
-        return result
 
     def _build_batch_runner(self, *, streaming: bool) -> DemocritusBatchAgenticRunner:
         return DemocritusBatchAgenticRunner(
@@ -2151,22 +2716,40 @@ class DemocritusQueryAgenticRunner:
         (self.logs_dir / f"{agent_name}.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def _run_query_interpretation_agent(self) -> QueryPlan:
-        raw_normalized = " ".join(self.config.query.lower().split())
+        base_query = " ".join(str(self.config.base_query or self.config.query).split()).strip()
+        selected_topics = _normalized_topics(self.config.selected_topics)
+        rejected_topics = tuple(
+            topic for topic in _normalized_topics(self.config.rejected_topics) if topic not in set(selected_topics)
+        )
+        retrieval_refinement = " ".join(str(self.config.retrieval_refinement or "").split()).strip()
+        display_query = _compose_structured_democritus_query(
+            base_query=base_query,
+            selected_topics=selected_topics,
+            rejected_topics=rejected_topics,
+            retrieval_refinement=retrieval_refinement,
+        ) or self.config.query
+        retrieval_source = _retrieval_source_query(
+            base_query=base_query,
+            selected_topics=selected_topics,
+            retrieval_refinement=retrieval_refinement,
+            fallback_query=self.config.query,
+        )
+        raw_normalized = " ".join(display_query.lower().split())
         requested_forms = tuple(sorted(set(re.findall(r"\b(?:10-k|10-q|8-k)\b", raw_normalized))))
-        retrieval_query = _derive_retrieval_query(self.config.query)
-        sec_company_targets = _extract_sec_company_targets(self.config.query)
-        sec_cohort_mode = _infer_sec_cohort_mode(self.config.query, sec_company_targets)
-        direct_document_urls = _extract_direct_document_urls(self.config.query)
+        retrieval_query = _derive_retrieval_query(retrieval_source)
+        sec_company_targets = _extract_sec_company_targets(base_query)
+        sec_cohort_mode = _infer_sec_cohort_mode(base_query, sec_company_targets)
+        direct_document_urls = _extract_direct_document_urls(base_query)
         raw_direct_document_path_candidates = _direct_document_path_candidates(
-            self.config.query,
+            base_query,
             explicit_path=self.config.input_pdf_path,
         )
         direct_document_paths = _extract_direct_document_paths(
-            self.config.query,
+            base_query,
             explicit_path=self.config.input_pdf_path,
         )
         direct_document_directories = _extract_direct_document_directories(
-            self.config.query,
+            base_query,
             explicit_dir=self.config.input_pdf_dir,
         )
         if raw_direct_document_path_candidates and not direct_document_paths:
@@ -2176,8 +2759,17 @@ class DemocritusQueryAgenticRunner:
                 f"Tried: {joined_candidates}. Use an absolute path like `/Users/.../file.pdf` "
                 "or provide the uploaded file path explicitly."
             )
+        clarification_request = _query_clarification_request(
+            base_query,
+            retrieval_query,
+            has_direct_document_input=bool(
+                direct_document_paths
+                or direct_document_directories
+                or direct_document_urls
+            ),
+        )
         explicit_target_documents = infer_requested_result_count(
-            self.config.query,
+            base_query,
             nouns=("filing", "filings", "report", "reports", "document", "documents"),
         )
         if direct_document_paths:
@@ -2199,26 +2791,35 @@ class DemocritusQueryAgenticRunner:
         ):
             target_documents = min(target_documents, 3)
         plan = QueryPlan(
-            query=self.config.query,
+            query=display_query,
+            base_query=base_query,
             retrieval_query=retrieval_query,
             normalized_query=retrieval_query,
             keyword_tokens=_tokenize(retrieval_query),
             target_documents=target_documents,
+            selected_topics=selected_topics,
+            rejected_topics=rejected_topics,
+            retrieval_refinement=retrieval_refinement,
             requested_forms=tuple(form.upper() for form in requested_forms),
             sec_company_targets=sec_company_targets,
             sec_cohort_mode=sec_cohort_mode,
             direct_document_urls=direct_document_urls,
             direct_document_paths=direct_document_paths,
             direct_document_directories=direct_document_directories,
+            clarification_request=clarification_request,
         )
         _write_json(self.query_plan_path, asdict(plan))
         self._log(
             "query_interpretation_agent",
             [
-                f"[QUERY] {self.config.query}",
+                f"[QUERY] {display_query}",
+                f"[BASE_QUERY] {base_query}",
                 f"[RETRIEVAL_QUERY] {plan.retrieval_query}",
                 f"[NORMALIZED] {plan.normalized_query}",
                 f"[KEYWORDS] {', '.join(plan.keyword_tokens) if plan.keyword_tokens else '(none)'}",
+                f"[SELECTED_TOPICS] {' | '.join(plan.selected_topics) if plan.selected_topics else '(none)'}",
+                f"[REJECTED_TOPICS] {' | '.join(plan.rejected_topics) if plan.rejected_topics else '(none)'}",
+                f"[RETRIEVAL_REFINEMENT] {plan.retrieval_refinement or '(none)'}",
                 f"[EXECUTION_MODE] {self.config.execution_mode}",
                 f"[TARGET_DOCUMENTS] {plan.target_documents}",
                 f"[REQUESTED_FORMS] {', '.join(plan.requested_forms) if plan.requested_forms else '(none)'}",
@@ -2227,6 +2828,15 @@ class DemocritusQueryAgenticRunner:
                 f"[DIRECT_DOCUMENT_URLS] {' | '.join(plan.direct_document_urls) if plan.direct_document_urls else '(none)'}",
                 f"[DIRECT_DOCUMENT_PATHS] {' | '.join(plan.direct_document_paths) if plan.direct_document_paths else '(none)'}",
                 f"[DIRECT_DOCUMENT_DIRECTORIES] {' | '.join(plan.direct_document_directories) if plan.direct_document_directories else '(none)'}",
+                (
+                    "[CLARIFICATION] "
+                    + (
+                        f"term={plan.clarification_request.ambiguous_term} "
+                        f"reason={plan.clarification_request.reason}"
+                        if plan.clarification_request is not None
+                        else "(none)"
+                    )
+                ),
                 f"[RETRIEVAL_BACKEND] {self._backend_name()}",
             ],
         )

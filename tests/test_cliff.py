@@ -339,6 +339,83 @@ class CLIFFTests(unittest.TestCase):
         self.assertNotIn("second synthesis pass", launcher.updates[-1]["note"])
         build_synthesis.assert_not_called()
 
+    def test_run_cliff_session_query_stops_at_democritus_clarification_checkpoint(self) -> None:
+        class FakeLauncher:
+            def __init__(self) -> None:
+                self.updates: list[dict[str, object]] = []
+
+            def update_session_run(self, run_id: str, **kwargs) -> None:
+                payload = {"run_id": run_id}
+                payload.update(kwargs)
+                self.updates.append(payload)
+
+        clarification_path = Path("/tmp/democritus-query-clarification.html")
+        clarification_path.write_text("<html>clarification</html>", encoding="utf-8")
+        self.addCleanup(lambda: clarification_path.unlink(missing_ok=True))
+        launcher = FakeLauncher()
+        args = SimpleNamespace(
+            outdir="/tmp/cliff",
+            route="auto",
+            execution_mode="quick",
+            democritus_manifest="",
+            democritus_source_pdf_root="",
+            democritus_target_docs=None,
+            democritus_retrieval_backend="auto",
+            democritus_max_docs=None,
+            democritus_intra_document_shards=1,
+            democritus_discovery_only=False,
+            democritus_dry_run=False,
+            product_manifest="",
+            culinary_manifest="",
+            product_target_docs=None,
+            product_max_docs=None,
+            product_name="",
+            brand_name="",
+            analysis_question="",
+            product_discovery_only=False,
+            sec_target_filings=None,
+            sec_retrieval_user_agent="",
+            sec_form=[],
+            sec_company_limit=3,
+            sec_discovery_only=False,
+            sec_dry_run=False,
+        )
+
+        fake_result = module.CLIFFRouterRunResult(
+            route_decision=module.CLIFFRouteDecision(
+                route_name="democritus",
+                module_name="functorflow_v3.democritus_query_agentic",
+                rationale="test",
+            ),
+            route_outdir=Path("/tmp/cliff-run") / "democritus",
+            summary_path=Path("/tmp/cliff-run") / "ff2_query_router_summary.json",
+            democritus_result=SimpleNamespace(
+                query_plan=SimpleNamespace(
+                    clarification_request=SimpleNamespace(ambiguous_term="inflation"),
+                ),
+                clarification_dashboard_path=clarification_path,
+                checkpoint_dashboard_path=None,
+                corpus_synthesis_dashboard_path=None,
+                batch_outdir=Path("/tmp/cliff-run") / "democritus" / "democritus_runs",
+            ),
+        )
+
+        with patch.object(module, "_build_router_from_args_with_outdir") as build_router:
+            with patch.object(module, "_build_cliff_synthesis_from_first_pass") as build_synthesis:
+                build_router.return_value = SimpleNamespace(run=lambda: fake_result)
+                module._run_cliff_session_query(
+                    launcher,
+                    args,
+                    run_id="run-0008",
+                    query="Analyze 20 recent studies on inflation and synthesize their joint support",
+                )
+
+        self.assertEqual(launcher.updates[-1]["status"], "complete")
+        self.assertEqual(launcher.updates[-1]["artifact_path"], clarification_path)
+        self.assertIn("paused before retrieval", launcher.updates[-1]["note"])
+        self.assertNotIn("second synthesis pass", launcher.updates[-1]["note"])
+        build_synthesis.assert_not_called()
+
     def test_interactive_company_similarity_is_treated_as_checkpoint(self) -> None:
         decision = module.CLIFFRouteDecision(
             route_name="company_similarity",

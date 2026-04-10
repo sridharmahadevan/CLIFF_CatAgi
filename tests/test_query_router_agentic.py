@@ -87,6 +87,12 @@ class QueryRouterAgenticTests(unittest.TestCase):
         self.assertEqual(decision.route_name, "course_demo")
         self.assertIn("course demo", decision.rationale.lower())
 
+    def test_route_ff2_query_selects_course_demo_for_diagrammatic_backpropagation(self) -> None:
+        decision = module.route_ff2_query("Explain Diagrammatic Backpropagation")
+
+        self.assertEqual(decision.route_name, "course_demo")
+        self.assertIn("course demo", decision.rationale.lower())
+
     def test_route_ff2_query_selects_course_demo_for_democritus_manifold(self) -> None:
         decision = module.route_ff2_query("Show the Democritus causal manifold demo")
 
@@ -178,6 +184,43 @@ class QueryRouterAgenticTests(unittest.TestCase):
 
             self.assertTrue(target.exists())
             self.assertEqual(target.read_text(encoding="utf-8"), source.read_text(encoding="utf-8"))
+
+    def test_artifact_path_prefers_democritus_clarification_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            clarification_path = Path(tmpdir) / "democritus_query_clarification.html"
+            clarification_path.write_text("<html>clarification</html>", encoding="utf-8")
+            checkpoint_path = Path(tmpdir) / "democritus_topic_checkpoint.html"
+            checkpoint_path.write_text("<html>checkpoint</html>", encoding="utf-8")
+            plan = QueryPlan(
+                query="Analyze studies on inflation",
+                normalized_query="inflation",
+                keyword_tokens=("inflation",),
+                target_documents=20,
+            )
+            result = module.FF2QueryRouterRunResult(
+                route_decision=module.FF2RouteDecision(
+                    route_name="democritus",
+                    module_name="functorflow_v3.democritus_query_agentic",
+                    rationale="test",
+                ),
+                route_outdir=Path(tmpdir),
+                summary_path=Path(tmpdir) / "ff2_query_router_summary.json",
+                democritus_result=DemocritusQueryRunResult(
+                    query_plan=plan,
+                    selected_documents=(),
+                    acquired_documents=(),
+                    batch_records=(),
+                    pdf_dir=Path(tmpdir) / "pdfs",
+                    batch_outdir=Path(tmpdir) / "democritus_runs",
+                    summary_path=Path(tmpdir) / "query_run_summary.json",
+                    checkpoint_dashboard_path=checkpoint_path,
+                    clarification_dashboard_path=clarification_path,
+                ),
+            )
+
+            artifact_path = module._artifact_path_for_result(result)
+
+        self.assertEqual(artifact_path, clarification_path)
 
     def test_router_dispatches_to_democritus_runner(self) -> None:
         class FakeDemocritusRunner:

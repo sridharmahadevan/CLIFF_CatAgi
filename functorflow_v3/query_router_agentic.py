@@ -138,6 +138,10 @@ class FF2QueryRouterConfig:
     democritus_manifest_path: Path | None = None
     democritus_source_pdf_root: Path | None = None
     democritus_target_documents: int = 10
+    democritus_base_query: str = ""
+    democritus_selected_topics: tuple[str, ...] = ()
+    democritus_rejected_topics: tuple[str, ...] = ()
+    democritus_retrieval_refinement: str = ""
     democritus_retrieval_backend: str = "auto"
     democritus_max_docs: int = 0
     democritus_intra_document_shards: int = 1
@@ -201,6 +205,18 @@ class FF2QueryRouterConfig:
             democritus_manifest_path=self.democritus_manifest_path.resolve() if self.democritus_manifest_path else None,
             democritus_source_pdf_root=self.democritus_source_pdf_root.resolve() if self.democritus_source_pdf_root else None,
             democritus_target_documents=self.democritus_target_documents,
+            democritus_base_query=" ".join(str(self.democritus_base_query).split()).strip(),
+            democritus_selected_topics=tuple(
+                " ".join(str(topic).split()).strip()
+                for topic in tuple(self.democritus_selected_topics)
+                if " ".join(str(topic).split()).strip()
+            ),
+            democritus_rejected_topics=tuple(
+                " ".join(str(topic).split()).strip()
+                for topic in tuple(self.democritus_rejected_topics)
+                if " ".join(str(topic).split()).strip()
+            ),
+            democritus_retrieval_refinement=" ".join(str(self.democritus_retrieval_refinement).split()).strip(),
             democritus_retrieval_backend=self.democritus_retrieval_backend,
             democritus_max_docs=self.democritus_max_docs,
             democritus_intra_document_shards=max(1, int(self.democritus_intra_document_shards)),
@@ -417,6 +433,10 @@ class FF2QueryRouter:
                 query=self.config.query,
                 outdir=route_outdir,
                 target_documents=self.config.democritus_target_documents,
+                base_query=self.config.democritus_base_query,
+                selected_topics=self.config.democritus_selected_topics,
+                rejected_topics=self.config.democritus_rejected_topics,
+                retrieval_refinement=self.config.democritus_retrieval_refinement,
                 input_pdf_path=self.config.democritus_input_pdf_path,
                 input_pdf_dir=self.config.democritus_input_pdf_dir,
                 manifest_path=self.config.democritus_manifest_path,
@@ -598,17 +618,22 @@ def _artifact_path_for_result(result: FF2QueryRouterRunResult) -> Path | None:
     if result.course_demo_result:
         return result.course_demo_result.dashboard_path
     if result.democritus_result:
-        checkpoint_candidate = result.democritus_result.checkpoint_dashboard_path
+        clarification_candidate = getattr(result.democritus_result, "clarification_dashboard_path", None)
+        if clarification_candidate and clarification_candidate.exists():
+            return clarification_candidate
+        checkpoint_candidate = getattr(result.democritus_result, "checkpoint_dashboard_path", None)
         if checkpoint_candidate and checkpoint_candidate.exists():
             return checkpoint_candidate
-        corpus_candidate = result.democritus_result.corpus_synthesis_dashboard_path
+        corpus_candidate = getattr(result.democritus_result, "corpus_synthesis_dashboard_path", None)
         if corpus_candidate and corpus_candidate.exists():
             return corpus_candidate
-        gui_candidate = result.democritus_result.batch_outdir / "democritus_gui.html"
-        if gui_candidate.exists():
+        gui_candidate = getattr(result.democritus_result, "batch_outdir", None)
+        gui_candidate = gui_candidate / "democritus_gui.html" if gui_candidate else None
+        if gui_candidate and gui_candidate.exists():
             return gui_candidate
-        candidate = result.democritus_result.batch_outdir / "dashboard.html"
-        return candidate if candidate.exists() else None
+        candidate_root = getattr(result.democritus_result, "batch_outdir", None)
+        candidate = candidate_root / "dashboard.html" if candidate_root else None
+        return candidate if candidate and candidate.exists() else None
     if result.basket_rocket_sec_result:
         if (
             result.basket_rocket_sec_result.corpus_synthesis_dashboard_path
@@ -849,6 +874,10 @@ def _build_router_from_args_with_outdir(
             democritus_manifest_path=Path(args.democritus_manifest) if args.democritus_manifest else None,
             democritus_source_pdf_root=Path(args.democritus_source_pdf_root) if args.democritus_source_pdf_root else None,
             democritus_target_documents=democritus_target_documents,
+            democritus_base_query=getattr(args, "democritus_base_query", ""),
+            democritus_selected_topics=tuple(getattr(args, "democritus_selected_topics", ()) or ()),
+            democritus_rejected_topics=tuple(getattr(args, "democritus_rejected_topics", ()) or ()),
+            democritus_retrieval_refinement=getattr(args, "democritus_retrieval_refinement", ""),
             democritus_retrieval_backend=args.democritus_retrieval_backend,
             democritus_max_docs=democritus_max_docs,
             democritus_intra_document_shards=args.democritus_intra_document_shards,

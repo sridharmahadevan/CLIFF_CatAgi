@@ -91,6 +91,22 @@ class CourseDemoAgenticTests(unittest.TestCase):
             )
         )
 
+    def test_looks_like_course_demo_query_for_book_section_explanation(self) -> None:
+        self.assertTrue(module.looks_like_course_demo_query("Explain Diagrammatic Backpropagation"))
+
+    def test_recommend_course_learning_resources_for_diagrammatic_backpropagation(self) -> None:
+        topic, demos, book_sections, snippets, rationale = module.recommend_course_learning_resources(
+            "Explain Diagrammatic Backpropagation"
+        )
+
+        self.assertEqual(topic, "Diagrammatic Backpropagation")
+        self.assertGreaterEqual(len(book_sections), 1)
+        self.assertEqual(book_sections[0].section_id, "diagrammatic_backpropagation")
+        self.assertGreaterEqual(len(demos), 1)
+        self.assertTrue(any(demo.demo_id == "backprop_as_functor" for demo in demos))
+        self.assertIn("diagrammatic backpropagation", rationale.lower())
+        self.assertIsInstance(snippets, tuple)
+
     def test_explain_how_ket_works_counts_as_learning_request(self) -> None:
         self.assertTrue(module.is_course_learning_query("Explain how the Kan Extension Transformer works"))
 
@@ -114,6 +130,23 @@ class CourseDemoAgenticTests(unittest.TestCase):
         self.assertTrue(dashboard_exists)
         self.assertGreaterEqual(len(result.recommendation_demos), 2)
         self.assertGreaterEqual(len(result.book_recommendations), 1)
+
+    def test_course_demo_runner_learning_guide_handles_book_section_only_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = module.CourseDemoAgenticRunner(
+                module.CourseDemoAgenticConfig(
+                    query="Explain Diagrammatic Backpropagation",
+                    outdir=Path(tmpdir),
+                    execute_demo=True,
+                )
+            ).run()
+
+        self.assertEqual(result.response_mode, "learning_guide")
+        self.assertEqual(result.execution_status, "recommended")
+        self.assertFalse(result.execution_attempted)
+        self.assertGreaterEqual(len(result.book_recommendations), 1)
+        self.assertEqual(result.book_recommendations[0].section_id, "diagrammatic_backpropagation")
+        self.assertGreaterEqual(len(result.recommendation_demos), 1)
 
     def test_course_demo_runner_project_mode_skips_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

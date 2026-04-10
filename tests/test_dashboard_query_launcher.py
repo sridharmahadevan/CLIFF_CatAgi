@@ -88,6 +88,10 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         state = launcher._state_payload()
         self.assertEqual(state["runs"][0]["execution_mode"], "deep")
         self.assertEqual(state["runs"][0]["parent_run_id"], run_id)
+        self.assertEqual(
+            launcher.submission_overrides_for_run(str(deep_run_id)),
+            {"route": "democritus"},
+        )
 
     def test_request_session_run_deepen_accepts_completed_interactive_runs(self) -> None:
         launcher = DashboardQueryLauncher(
@@ -120,6 +124,10 @@ class DashboardQueryLauncherTests(unittest.TestCase):
 
         self.assertIsNotNone(deep_run_id)
         self.assertEqual(followup, (deep_run_id, "Find me 10 studies of minimum wage", "deep"))
+        self.assertEqual(
+            launcher.submission_overrides_for_run(str(deep_run_id)),
+            {"route": "democritus"},
+        )
 
     def test_request_session_run_deepen_stores_curated_manifest_overrides(self) -> None:
         launcher = DashboardQueryLauncher(
@@ -158,6 +166,7 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         self.assertEqual(
             launcher.submission_overrides_for_run(str(deep_run_id)),
             {
+                "route": "democritus",
                 "democritus_manifest": str(Path("/tmp/curated_manifest.json").resolve()),
                 "democritus_target_docs": 2,
             },
@@ -200,6 +209,7 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         self.assertEqual(
             launcher.submission_overrides_for_run(str(deep_run_id)),
             {
+                "route": "company_similarity",
                 "company_similarity_year_start": 2011,
                 "company_similarity_year_end": 2018,
             },
@@ -236,6 +246,16 @@ class DashboardQueryLauncherTests(unittest.TestCase):
                         "query": "Find me 10 studies of minimum wage",
                         "stage_label": "Root Topic Checkpoint",
                         "summary_text": "Checkpoint ready.",
+                        "query_focus_terms": ["minimum", "wage"],
+                        "suspicious_topics": [{"topic": "household income effects"}],
+                        "drift_metrics": {
+                            "total_topic_count": 3,
+                            "aligned_topic_count": 2,
+                            "suspicious_topic_count": 1,
+                            "aligned_topic_ratio": 0.667,
+                            "mean_alignment_score": 0.55,
+                            "synthesis_readiness_proxy": 0.55,
+                        },
                         "documents": [
                             {
                                 "run_name": "run_1",
@@ -276,6 +296,11 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         self.assertIn('/checkpoint-action', rendered)
         self.assertIn('Include in deeper analysis', rendered)
         self.assertIn('Retrieve more documents', rendered)
+        self.assertIn('Retrieve again from topic choices', rendered)
+        self.assertIn('data-topic-state="neutral"', rendered)
+        self.assertIn("selected_topic", rendered)
+        self.assertIn("Atlas Drift Signal", rendered)
+        self.assertIn("household income effects", rendered)
         self.assertIn('Inspect PDF', rendered)
         self.assertIn('/run-file?run_id=', rendered)
 
@@ -310,6 +335,14 @@ class DashboardQueryLauncherTests(unittest.TestCase):
                         "query": "Find me 10 studies of minimum wage",
                         "stage_label": "Root Topic Checkpoint",
                         "summary_text": "Checkpoint ready.",
+                        "drift_metrics": {
+                            "total_topic_count": 2,
+                            "aligned_topic_count": 1,
+                            "suspicious_topic_count": 1,
+                            "aligned_topic_ratio": 0.5,
+                            "mean_alignment_score": 0.5,
+                            "synthesis_readiness_proxy": 0.5,
+                        },
                         "documents": [
                             {
                                 "run_name": "run_1",
@@ -348,6 +381,8 @@ class DashboardQueryLauncherTests(unittest.TestCase):
                 run_id=run_id,
                 action_kind="deepen",
                 selected_pdf_paths=(str(alpha_pdf.resolve()),),
+                selected_topics=(),
+                rejected_topics=(),
                 additional_documents=3,
                 retrieval_refinement="",
             )
@@ -381,10 +416,316 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         self.assertEqual(telemetry_events[0]["rejected_count"], 1)
         self.assertEqual(telemetry_events[0]["topic_preference_signal"]["minimum wage increases"], 1)
         self.assertEqual(telemetry_events[0]["topic_preference_signal"]["household income effects"], -1)
+        self.assertEqual(telemetry_events[0]["atlas_drift_metrics"]["suspicious_topic_count"], 1)
         self.assertEqual(telemetry_summary["event_count"], 1)
         self.assertEqual(telemetry_summary["action_counts"]["deepen"], 1)
         self.assertEqual(telemetry_summary["cumulative_topic_preference_signal"]["minimum wage increases"], 1)
         self.assertEqual(telemetry_summary["cumulative_topic_preference_signal"]["household income effects"], -1)
+
+    def test_handle_checkpoint_action_topic_guided_retrieval_persists_topic_preferences_and_queues_followup(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Ask a question",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+                enable_execution_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            checkpoint_dir = root / "interactive_checkpoint"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            alpha_pdf = root / "alpha.pdf"
+            beta_pdf = root / "beta.pdf"
+            alpha_pdf.write_bytes(b"%PDF-1.4\nalpha\n")
+            beta_pdf.write_bytes(b"%PDF-1.4\nbeta\n")
+            artifact_path = checkpoint_dir / "democritus_topic_checkpoint.html"
+            artifact_path.write_text("<html>placeholder</html>", encoding="utf-8")
+            (checkpoint_dir / "democritus_topic_checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "query": "Find me 5 studies of unemployment in the tech sector",
+                        "stage_label": "Root Topic Checkpoint",
+                        "summary_text": "Checkpoint ready.",
+                        "documents": [
+                            {
+                                "run_name": "run_1",
+                                "title": "Alpha study",
+                                "pdf_path": str(alpha_pdf.resolve()),
+                                "topics": ["tech sector layoffs", "software hiring slowdown"],
+                                "guide_summary": "Alpha summary",
+                                "causal_gestalt": "Alpha gestalt",
+                            },
+                            {
+                                "run_name": "run_2",
+                                "title": "Beta study",
+                                "pdf_path": str(beta_pdf.resolve()),
+                                "topics": ["youth entrepreneurship", "software hiring slowdown"],
+                                "guide_summary": "Beta summary",
+                                "causal_gestalt": "Beta gestalt",
+                            },
+                        ],
+                        "top_topics": [
+                            {"topic": "tech sector layoffs", "document_count": 1},
+                            {"topic": "software hiring slowdown", "document_count": 2},
+                            {"topic": "youth entrepreneurship", "document_count": 1},
+                        ],
+                        "drift_metrics": {
+                            "total_topic_count": 3,
+                            "aligned_topic_count": 2,
+                            "suspicious_topic_count": 1,
+                            "aligned_topic_ratio": 0.667,
+                            "mean_alignment_score": 0.611,
+                            "synthesis_readiness_proxy": 0.611,
+                        },
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            run_id = launcher.submit_query(
+                "Find me 5 studies of unemployment in the tech sector",
+                execution_mode="interactive",
+            )
+            launcher.wait_for_next_submission(timeout=0.01)
+            launcher.update_session_run(
+                run_id,
+                status="complete",
+                route_name="democritus",
+                note="Interactive checkpoint ready.",
+                artifact_path=artifact_path,
+                outdir=root,
+            )
+
+            body, status = launcher._handle_checkpoint_action(
+                run_id=run_id,
+                action_kind="topic_guided_retrieval",
+                selected_pdf_paths=(str(alpha_pdf.resolve()), str(beta_pdf.resolve())),
+                selected_topics=("tech sector layoffs", "software hiring slowdown"),
+                rejected_topics=("youth entrepreneurship",),
+                additional_documents=4,
+                retrieval_refinement="peer reviewed longitudinal evidence",
+            )
+            followup = launcher.wait_for_next_submission(timeout=0.01)
+            curation_payload = json.loads(
+                (checkpoint_dir / module._DEMOCRITUS_CURATION_STATE).read_text(encoding="utf-8")
+            )
+            telemetry_log_path = checkpoint_dir / module._DEMOCRITUS_CURATION_TELEMETRY
+            telemetry_events = [
+                json.loads(line)
+                for line in telemetry_log_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+        self.assertEqual(status, module.HTTPStatus.OK)
+        self.assertIsNotNone(followup)
+        followup_run_id, followup_query, followup_mode = followup
+        self.assertEqual(followup_mode, "interactive")
+        self.assertIn("focus on topics: tech sector layoffs; software hiring slowdown", followup_query)
+        self.assertIn("avoid topics: youth entrepreneurship", followup_query)
+        self.assertIn("peer reviewed longitudinal evidence", followup_query)
+        self.assertIn("Topic-Guided Retrieval Queued", body)
+        overrides = launcher.submission_overrides_for_run(followup_run_id)
+        self.assertEqual(overrides["route"], "democritus")
+        self.assertEqual(overrides["democritus_target_docs"], 6)
+        self.assertEqual(overrides["democritus_atlas_baseline"]["suspicious_topic_count"], 1)
+        self.assertEqual(overrides["democritus_base_query"], "Find me 5 studies of unemployment in the tech sector")
+        self.assertEqual(
+            overrides["democritus_selected_topics"],
+            ["tech sector layoffs", "software hiring slowdown"],
+        )
+        self.assertEqual(overrides["democritus_rejected_topics"], ["youth entrepreneurship"])
+        self.assertEqual(overrides["democritus_retrieval_refinement"], "peer reviewed longitudinal evidence")
+        self.assertEqual(
+            curation_payload["selected_topics"],
+            ["tech sector layoffs", "software hiring slowdown"],
+        )
+        self.assertEqual(curation_payload["rejected_topics"], ["youth entrepreneurship"])
+        self.assertEqual(telemetry_events[0]["action_kind"], "topic_guided_retrieval")
+        self.assertEqual(
+            telemetry_events[0]["explicit_selected_topics"],
+            ["tech sector layoffs", "software hiring slowdown"],
+        )
+        self.assertEqual(telemetry_events[0]["explicit_rejected_topics"], ["youth entrepreneurship"])
+        self.assertEqual(telemetry_events[0]["topic_preference_signal"]["tech sector layoffs"], 2)
+
+    def test_render_run_artifact_page_reports_drift_reduction_against_prior_atlas_baseline(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Ask a question",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+                enable_execution_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            checkpoint_dir = root / "interactive_checkpoint"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            artifact_path = checkpoint_dir / "democritus_topic_checkpoint.html"
+            artifact_path.write_text("<html>placeholder</html>", encoding="utf-8")
+            (checkpoint_dir / "democritus_topic_checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "query": "Analyze five studies of climate change",
+                        "stage_label": "Atlas Drift Checkpoint",
+                        "summary_text": "Checkpoint ready.",
+                        "query_focus_terms": ["climate", "change"],
+                        "suspicious_topics": [],
+                        "drift_metrics": {
+                            "total_topic_count": 3,
+                            "aligned_topic_count": 3,
+                            "suspicious_topic_count": 0,
+                            "aligned_topic_ratio": 1.0,
+                            "mean_alignment_score": 0.8,
+                            "synthesis_readiness_proxy": 0.8,
+                        },
+                        "documents": [],
+                        "top_topics": [{"topic": "climate adaptation", "document_count": 2}],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            run_id = launcher.submit_query(
+                "Analyze five studies of climate change",
+                execution_mode="interactive",
+                submission_overrides={
+                    "democritus_atlas_baseline": {
+                        "total_topic_count": 4,
+                        "aligned_topic_count": 2,
+                        "suspicious_topic_count": 2,
+                        "aligned_topic_ratio": 0.5,
+                        "mean_alignment_score": 0.45,
+                        "synthesis_readiness_proxy": 0.45,
+                    }
+                },
+            )
+            launcher.wait_for_next_submission(timeout=0.01)
+            launcher.update_session_run(
+                run_id,
+                status="complete",
+                route_name="democritus",
+                note="Interactive checkpoint ready.",
+                artifact_path=artifact_path,
+                outdir=root,
+            )
+
+            rendered = launcher._render_run_artifact_page(run_id)
+
+        self.assertIn("Drift tightened from 2 suspicious topics to 0.", rendered)
+        self.assertIn("alignment 0.5", rendered)
+        self.assertIn("readiness 0.45", rendered)
+
+    def test_second_pass_checkpoint_telemetry_logs_drift_comparison(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Ask a question",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+                enable_execution_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            checkpoint_dir = root / "interactive_checkpoint"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            alpha_pdf = root / "alpha.pdf"
+            alpha_pdf.write_bytes(b"%PDF-1.4\nalpha\n")
+            artifact_path = checkpoint_dir / "democritus_topic_checkpoint.html"
+            artifact_path.write_text("<html>placeholder</html>", encoding="utf-8")
+            (checkpoint_dir / "democritus_topic_checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "query": "Analyze five studies of climate change",
+                        "stage_label": "Atlas Drift Checkpoint",
+                        "summary_text": "Checkpoint ready.",
+                        "query_focus_terms": ["climate", "change"],
+                        "suspicious_topics": [],
+                        "drift_metrics": {
+                            "total_topic_count": 2,
+                            "aligned_topic_count": 2,
+                            "suspicious_topic_count": 0,
+                            "aligned_topic_ratio": 1.0,
+                            "mean_alignment_score": 0.8,
+                            "synthesis_readiness_proxy": 0.8,
+                        },
+                        "documents": [
+                            {
+                                "run_name": "run_1",
+                                "title": "Alpha climate study",
+                                "pdf_path": str(alpha_pdf.resolve()),
+                                "topics": ["climate adaptation"],
+                                "guide_summary": "Alpha summary",
+                                "causal_gestalt": "Alpha gestalt",
+                            }
+                        ],
+                        "top_topics": [{"topic": "climate adaptation", "document_count": 1}],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            run_id = launcher.submit_query(
+                "Analyze five studies of climate change",
+                execution_mode="interactive",
+                submission_overrides={
+                    "democritus_atlas_baseline": {
+                        "total_topic_count": 3,
+                        "aligned_topic_count": 1,
+                        "suspicious_topic_count": 2,
+                        "aligned_topic_ratio": 0.333,
+                        "mean_alignment_score": 0.35,
+                        "synthesis_readiness_proxy": 0.35,
+                    }
+                },
+            )
+            launcher.wait_for_next_submission(timeout=0.01)
+            launcher.update_session_run(
+                run_id,
+                status="complete",
+                route_name="democritus",
+                note="Interactive checkpoint ready.",
+                artifact_path=artifact_path,
+                outdir=root,
+            )
+
+            launcher._handle_checkpoint_action(
+                run_id=run_id,
+                action_kind="save",
+                selected_pdf_paths=(str(alpha_pdf.resolve()),),
+                selected_topics=(),
+                rejected_topics=(),
+                additional_documents=2,
+                retrieval_refinement="",
+            )
+            telemetry_log_path = checkpoint_dir / module._DEMOCRITUS_CURATION_TELEMETRY
+            telemetry_events = [
+                json.loads(line)
+                for line in telemetry_log_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+        self.assertTrue(telemetry_events[0]["atlas_drift_comparison"]["reduced_drift"])
+        self.assertEqual(telemetry_events[0]["atlas_drift_comparison"]["suspicious_topic_delta"], 2)
 
     def test_render_run_artifact_page_for_company_similarity_checkpoint_includes_year_controls(self) -> None:
         launcher = DashboardQueryLauncher(
@@ -493,6 +834,8 @@ class DashboardQueryLauncherTests(unittest.TestCase):
                 run_id=run_id,
                 action_kind="deepen",
                 selected_pdf_paths=(),
+                selected_topics=(),
+                rejected_topics=(),
                 additional_documents=3,
                 retrieval_refinement="",
                 company_similarity_year_start=2014,
@@ -509,6 +852,7 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         self.assertEqual(
             launcher.submission_overrides_for_run(deep_run_id),
             {
+                "route": "company_similarity",
                 "company_similarity_year_start": 2014,
                 "company_similarity_year_end": 2018,
             },

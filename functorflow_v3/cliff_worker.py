@@ -32,6 +32,11 @@ def _should_complete_interactive_checkpoint(*, execution_mode: object, route_nam
     )
 
 
+def _result_needs_clarification(result: object) -> bool:
+    democritus_result = getattr(result, "democritus_result", None)
+    return bool(getattr(democritus_result, "clarification_dashboard_path", None))
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one unconscious CLIFF query worker.")
     parser.add_argument("--query", required=True)
@@ -118,6 +123,9 @@ def main() -> None:
         else:
             result = _build_router_from_args_with_outdir(args, query=args.query, outdir=outdir).run()
             artifact_path = _artifact_path_for_result(result)
+            needs_clarification = _result_needs_clarification(result)
+            clarification_request = getattr(getattr(result, "democritus_result", None), "query_plan", None)
+            clarification_request = getattr(clarification_request, "clarification_request", None)
             should_complete_interactive_checkpoint = _should_complete_interactive_checkpoint(
                 execution_mode=args.execution_mode,
                 route_name=result.route_decision.route_name,
@@ -125,7 +133,7 @@ def main() -> None:
             payload = {
                 "status": (
                     "complete"
-                    if should_complete_interactive_checkpoint
+                    if needs_clarification or should_complete_interactive_checkpoint
                     else (
                         "phase1_complete"
                         if args.cliff_defer_final_synthesis and _decision_supports_conscious_redispatch(result.route_decision)
@@ -138,6 +146,8 @@ def main() -> None:
                 "route_outdir": str(result.route_outdir),
                 "summary_path": str(result.summary_path),
                 "artifact_path": str(artifact_path) if artifact_path else None,
+                "needs_clarification": needs_clarification,
+                "clarification_term": getattr(clarification_request, "ambiguous_term", None),
             }
         result_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         print(json.dumps(payload, indent=2), flush=True)

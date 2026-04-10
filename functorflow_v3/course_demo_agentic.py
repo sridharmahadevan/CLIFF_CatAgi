@@ -625,6 +625,29 @@ _DEMO_TO_BOOK_SECTIONS: dict[str, tuple[str, ...]] = {
     "julia_sudoku_gt_lux": ("geometric_transformers", "diagrammatic_backpropagation"),
 }
 
+_BOOK_SECTION_TO_DEMO_IDS: dict[str, tuple[str, ...]] = {}
+for _demo_id, _section_ids in _DEMO_TO_BOOK_SECTIONS.items():
+    for _section_id in _section_ids:
+        _BOOK_SECTION_TO_DEMO_IDS.setdefault(_section_id, ())
+        if _demo_id not in _BOOK_SECTION_TO_DEMO_IDS[_section_id]:
+            _BOOK_SECTION_TO_DEMO_IDS[_section_id] = _BOOK_SECTION_TO_DEMO_IDS[_section_id] + (_demo_id,)
+
+_BOOK_SECTION_TO_TOPIC_KEY: dict[str, str] = {
+    "diagrammatic_backpropagation": "geometric_transformers",
+    "geometric_transformers": "geometric_transformers",
+    "categorical_deep_learning": "kan_extension_transformers",
+    "information_regimes_gt": "language_modeling",
+    "kan_extension_transformers": "kan_extension_transformers",
+    "structured_language_modeling": "language_modeling",
+    "manifold_learning_gt": "democritus_manifolds",
+    "causality_from_language": "causality",
+    "agentic_systems_ket": "kan_extension_transformers",
+    "topos_causal_models": "sheaves_topos",
+    "judo_calculus": "causality",
+    "universal_reinforcement_learning": "coalgebra_rl",
+    "deep_url_gt": "coalgebra_rl",
+}
+
 _JULIA_DEMOS: tuple[JuliaDemoSpec, ...] = (
     _julia_demo(
         demo_id="julia_ket_block",
@@ -1071,6 +1094,8 @@ def looks_like_course_demo_query(query: str) -> bool:
         return True
     if is_course_learning_query(query) and recommend_course_learning_resources(query)[0]:
         return True
+    if is_course_learning_query(query) and recommend_book_sections(query)[0]:
+        return True
     if is_course_recommendation_query(query) and (recommend_course_demos(query) or recommend_julia_demos(query)):
         return True
     if match_julia_demo(query) is not None:
@@ -1142,7 +1167,7 @@ def is_course_learning_query(query: str) -> bool:
     if any(cue in normalized for cue in _LEARNING_CUES):
         return True
     if (
-        normalized.startswith("explain the ")
+        normalized.startswith("explain ")
         and " on " not in normalized
         and " problem" not in normalized
         and " demo" not in normalized
@@ -1308,6 +1333,7 @@ def recommend_course_learning_resources(
 ) -> tuple[str, tuple[CourseDemoSpec, ...], tuple[BookSectionSpec, ...], tuple[CourseCodeSnippet, ...], str]:
     normalized = _normalize_query_text(query)
     topic_title, demos, rationale = recommend_course_demos(query)
+    book_sections: tuple[BookSectionSpec, ...] = ()
     if not topic_title:
         project_topic, _, starter_demo, project_book_sections, project_rationale = recommend_course_project_ideas(query)
         if project_topic:
@@ -1316,7 +1342,12 @@ def recommend_course_learning_resources(
             rationale = project_rationale
             book_sections = project_book_sections
         else:
-            return "", (), (), (), ""
+            book_sections, book_rationale = recommend_book_sections(query)
+            if not book_sections:
+                return "", (), (), (), ""
+            topic_title = book_sections[0].title
+            demos = _recommended_demos_for_book_sections(book_sections)
+            rationale = book_rationale
     else:
         matched_demo_id = demos[0].demo_id if demos else ""
         book_sections, _ = recommend_book_sections(query, matched_demo_id=matched_demo_id, topic_title=topic_title)
@@ -1328,12 +1359,27 @@ def recommend_course_learning_resources(
             break
     if not topic_key and demos:
         topic_key = next((guide.topic_id for guide in _COURSE_PROJECT_GUIDES if guide.starter_demo_id == demos[0].demo_id), "")
+    if not topic_key and book_sections:
+        topic_key = _BOOK_SECTION_TO_TOPIC_KEY.get(book_sections[0].section_id, "")
     snippets = tuple(snippet for snippet in _COURSE_CODE_SNIPPETS if snippet.topic_id == topic_key)
     if not snippets and topic_title == "Language Modeling":
         snippets = tuple(snippet for snippet in _COURSE_CODE_SNIPPETS if snippet.topic_id == "kan_extension_transformers")
     if not snippets:
         return topic_title, demos, book_sections, (), rationale
     return topic_title, demos, book_sections, snippets, rationale
+
+
+def _recommended_demos_for_book_sections(
+    book_sections: tuple[BookSectionSpec, ...],
+    *,
+    limit: int = 3,
+) -> tuple[CourseDemoSpec, ...]:
+    ranked_demo_ids: list[str] = []
+    for section in book_sections:
+        for demo_id in _BOOK_SECTION_TO_DEMO_IDS.get(section.section_id, ()):
+            if demo_id in _COURSE_DEMOS_BY_ID and demo_id not in ranked_demo_ids:
+                ranked_demo_ids.append(demo_id)
+    return tuple(_COURSE_DEMOS_BY_ID[demo_id] for demo_id in ranked_demo_ids[:limit])
 
 
 def _normalize_query_text(value: str) -> str:

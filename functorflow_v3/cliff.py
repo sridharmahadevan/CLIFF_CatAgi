@@ -127,6 +127,23 @@ def _should_pause_at_interactive_checkpoint(
     )
 
 
+def _democritus_result_needs_clarification(democritus_result: object) -> bool:
+    clarification_path = getattr(democritus_result, "clarification_dashboard_path", None)
+    return bool(clarification_path)
+
+
+def _clarification_note(*, ambiguous_term: object | None = None) -> str:
+    if ambiguous_term:
+        return (
+            "CLIFF paused before retrieval because the query uses the ambiguous term "
+            f"{ambiguous_term!r}. Open Result to choose a more specific rewrite, then resubmit it from the session prompt."
+        )
+    return (
+        "CLIFF paused before retrieval because the query needs clarification. Open Result to choose a more "
+        "specific rewrite, then resubmit it from the session prompt."
+    )
+
+
 def _synthesis_artifact_path_for_decision(run_outdir: Path, decision: CLIFFRouteDecision) -> Path | None:
     route_outdir = run_outdir / decision.route_name
     if decision.route_name == "democritus":
@@ -448,7 +465,9 @@ def _monitor_cliff_session_worker(
             artifact_value = str(payload.get("artifact_path") or "").strip()
             artifact_path = Path(artifact_value) if artifact_value else None
             conscious_report = report_to_cliff_consciousness(query, decision, artifact_path=artifact_path)
-            if _should_pause_at_interactive_checkpoint(decision, execution_mode=getattr(args, "execution_mode", "quick")):
+            if payload.get("needs_clarification"):
+                note = _clarification_note(ambiguous_term=payload.get("clarification_term"))
+            elif _should_pause_at_interactive_checkpoint(decision, execution_mode=getattr(args, "execution_mode", "quick")):
                 if decision.route_name == "company_similarity":
                     note = (
                         "Company similarity completed the interactive checkpoint and brought that result back into CLIFF's "
@@ -629,29 +648,38 @@ def _run_cliff_session_query(
             first_pass_args = argparse.Namespace(**vars(args), cliff_defer_final_synthesis=True)
             result = _build_router_from_args_with_outdir(first_pass_args, query=query, outdir=run_outdir).run()
             first_pass_artifact_path = _artifact_path_for_result(result)
-            launcher.update_session_run(
-                run_id,
-                status="routing",
-                mind_layer="conscious",
-                route_name=decision.route_name,
-                note=(
-                    "The unconscious orchestrator completed a first pass and reported its partial result into "
-                    "CLIFF's conscious layer. Consciousness is now initiating a second unconscious synthesis pass."
-                ),
-                artifact_path=first_pass_artifact_path,
-                outdir=run_outdir,
-            )
-            synthesis_artifact_path = _build_cliff_synthesis_from_first_pass(
-                query=query,
-                decision=decision,
-                run_outdir=run_outdir,
-            )
-            artifact_path = synthesis_artifact_path or first_pass_artifact_path
+            if _democritus_result_needs_clarification(result.democritus_result):
+                should_redispatch = False
+                artifact_path = first_pass_artifact_path
+            else:
+                launcher.update_session_run(
+                    run_id,
+                    status="routing",
+                    mind_layer="conscious",
+                    route_name=decision.route_name,
+                    note=(
+                        "The unconscious orchestrator completed a first pass and reported its partial result into "
+                        "CLIFF's conscious layer. Consciousness is now initiating a second unconscious synthesis pass."
+                    ),
+                    artifact_path=first_pass_artifact_path,
+                    outdir=run_outdir,
+                )
+                synthesis_artifact_path = _build_cliff_synthesis_from_first_pass(
+                    query=query,
+                    decision=decision,
+                    run_outdir=run_outdir,
+                )
+                artifact_path = synthesis_artifact_path or first_pass_artifact_path
         else:
             result = _build_router_from_args_with_outdir(args, query=query, outdir=run_outdir).run()
             artifact_path = _artifact_path_for_result(result)
         conscious_report = report_to_cliff_consciousness(query, decision, artifact_path=artifact_path)
-        if _should_pause_at_interactive_checkpoint(decision, execution_mode=getattr(args, "execution_mode", "quick")):
+        if result.democritus_result and _democritus_result_needs_clarification(result.democritus_result):
+            clarification_request = getattr(getattr(result.democritus_result, "query_plan", None), "clarification_request", None)
+            note = _clarification_note(
+                ambiguous_term=getattr(clarification_request, "ambiguous_term", None),
+            )
+        elif _should_pause_at_interactive_checkpoint(decision, execution_mode=getattr(args, "execution_mode", "quick")):
             note = (
                 "Company similarity completed the interactive checkpoint and brought that result back into CLIFF's conscious layer. "
                 "Open Result now shows the checkpoint, and Go deeper will launch the deeper year-window comparison pass."

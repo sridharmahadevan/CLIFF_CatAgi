@@ -59,6 +59,10 @@ The first public-facing note for that transition is:
 
 - `docs/agentic_kan_architecture.md`
 
+The current design note for the next Democritus/CLIFF synthesis milestone is:
+
+- `docs/homotopy_aware_synthesis.md`
+
 If you are new to the repo, start here first:
 
 - `docs/first_10_minutes.md`

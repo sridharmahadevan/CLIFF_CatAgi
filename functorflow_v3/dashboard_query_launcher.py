@@ -264,6 +264,10 @@ class DashboardQueryLauncher:
         query_override: str | None = None,
         democritus_manifest_path: Path | None = None,
         democritus_target_docs: int | None = None,
+        democritus_base_query: str | None = None,
+        democritus_selected_topics: tuple[str, ...] = (),
+        democritus_rejected_topics: tuple[str, ...] = (),
+        democritus_retrieval_refinement: str = "",
         company_similarity_year_start: int | None = None,
         company_similarity_year_end: int | None = None,
     ) -> str | None:
@@ -275,16 +279,27 @@ class DashboardQueryLauncher:
                 return None
             if self._normalize_execution_mode(run_state.get("execution_mode")) not in {"quick", "interactive"}:
                 return None
-            if str(run_state.get("route_name") or "") not in {"democritus", "company_similarity"}:
+            route_name = str(run_state.get("route_name") or "")
+            if route_name not in {"democritus", "company_similarity"}:
                 return None
             query = " ".join(str(query_override or run_state.get("query") or "").split()).strip()
         if not query:
             return None
-        submission_overrides: dict[str, object] = {}
+        submission_overrides: dict[str, object] = {"route": route_name}
         if democritus_manifest_path is not None:
             submission_overrides["democritus_manifest"] = str(democritus_manifest_path.resolve())
         if democritus_target_docs is not None:
             submission_overrides["democritus_target_docs"] = max(1, int(democritus_target_docs))
+        if democritus_base_query:
+            submission_overrides["democritus_base_query"] = " ".join(str(democritus_base_query).split()).strip()
+        if democritus_selected_topics:
+            submission_overrides["democritus_selected_topics"] = list(democritus_selected_topics)
+        if democritus_rejected_topics:
+            submission_overrides["democritus_rejected_topics"] = list(democritus_rejected_topics)
+        if democritus_retrieval_refinement:
+            submission_overrides["democritus_retrieval_refinement"] = " ".join(
+                str(democritus_retrieval_refinement).split()
+            ).strip()
         if company_similarity_year_start is not None:
             submission_overrides["company_similarity_year_start"] = int(company_similarity_year_start)
         if company_similarity_year_end is not None:
@@ -308,6 +323,11 @@ class DashboardQueryLauncher:
         *,
         query_override: str | None = None,
         democritus_target_docs: int,
+        democritus_atlas_baseline: dict[str, object] | None = None,
+        democritus_base_query: str | None = None,
+        democritus_selected_topics: tuple[str, ...] = (),
+        democritus_rejected_topics: tuple[str, ...] = (),
+        democritus_retrieval_refinement: str = "",
     ) -> str | None:
         with self._lock:
             run_state = self._session_runs_by_id.get(run_id)
@@ -319,11 +339,27 @@ class DashboardQueryLauncher:
             query = " ".join(str(query_override or run_state.get("query") or "").split()).strip()
         if not query:
             return None
+        submission_overrides: dict[str, object] = {
+            "route": "democritus",
+            "democritus_target_docs": max(1, int(democritus_target_docs)),
+        }
+        if democritus_atlas_baseline:
+            submission_overrides["democritus_atlas_baseline"] = dict(democritus_atlas_baseline)
+        if democritus_base_query:
+            submission_overrides["democritus_base_query"] = " ".join(str(democritus_base_query).split()).strip()
+        if democritus_selected_topics:
+            submission_overrides["democritus_selected_topics"] = list(democritus_selected_topics)
+        if democritus_rejected_topics:
+            submission_overrides["democritus_rejected_topics"] = list(democritus_rejected_topics)
+        if democritus_retrieval_refinement:
+            submission_overrides["democritus_retrieval_refinement"] = " ".join(
+                str(democritus_retrieval_refinement).split()
+            ).strip()
         return self.submit_query(
             query,
             execution_mode="interactive",
             parent_run_id=run_id,
-            submission_overrides={"democritus_target_docs": max(1, int(democritus_target_docs))},
+            submission_overrides=submission_overrides,
             queued_note=f"Queued to retrieve more Democritus evidence after {run_id}.",
         )
 
@@ -390,6 +426,8 @@ class DashboardQueryLauncher:
         if curation_path is None or not curation_path.exists():
             return {
                 "selected_pdf_paths": list(selected_defaults),
+                "selected_topics": [],
+                "rejected_topics": [],
                 "retrieval_refinement": "",
             }
         curation = self._read_json_dict(curation_path)
@@ -400,8 +438,15 @@ class DashboardQueryLauncher:
         ]
         if "selected_pdf_paths" not in curation:
             selected_paths = list(selected_defaults)
+        selected_topics = self._unique_checkpoint_topics(list(curation.get("selected_topics") or []))
+        rejected_topics = tuple(
+            topic for topic in self._unique_checkpoint_topics(list(curation.get("rejected_topics") or []))
+            if topic not in set(selected_topics)
+        )
         return {
             "selected_pdf_paths": list(dict.fromkeys(selected_paths)),
+            "selected_topics": list(selected_topics),
+            "rejected_topics": list(rejected_topics),
             "retrieval_refinement": " ".join(str(curation.get("retrieval_refinement") or "").split()).strip(),
         }
 
@@ -410,6 +455,8 @@ class DashboardQueryLauncher:
         payload: dict[str, object],
         *,
         selected_pdf_paths: tuple[str, ...],
+        selected_topics: tuple[str, ...] = (),
+        rejected_topics: tuple[str, ...] = (),
         retrieval_refinement: str = "",
     ) -> Path | None:
         curation_path = self._checkpoint_curation_path(payload)
@@ -419,6 +466,8 @@ class DashboardQueryLauncher:
             curation_path,
             {
                 "selected_pdf_paths": list(selected_pdf_paths),
+                "selected_topics": list(selected_topics),
+                "rejected_topics": list(rejected_topics),
                 "retrieval_refinement": retrieval_refinement,
                 "updated_at": time.time(),
             },
@@ -523,17 +572,123 @@ class DashboardQueryLauncher:
     def _topic_counter_payload(counter: Counter[str], *, limit: int = 24) -> dict[str, int]:
         return {topic: int(count) for topic, count in counter.most_common(limit)}
 
+    @staticmethod
+    def _atlas_drift_metrics(payload: dict[str, object]) -> dict[str, object]:
+        metrics = dict(payload.get("drift_metrics") or {})
+        return {
+            "total_topic_count": int(metrics.get("total_topic_count") or 0),
+            "aligned_topic_count": int(metrics.get("aligned_topic_count") or 0),
+            "suspicious_topic_count": int(metrics.get("suspicious_topic_count") or 0),
+            "aligned_topic_ratio": float(metrics.get("aligned_topic_ratio") or 0.0),
+            "mean_alignment_score": float(metrics.get("mean_alignment_score") or 0.0),
+            "synthesis_readiness_proxy": float(metrics.get("synthesis_readiness_proxy") or 0.0),
+        }
+
+    def _atlas_drift_comparison(
+        self,
+        *,
+        payload: dict[str, object],
+        run_state: dict[str, object],
+    ) -> dict[str, object]:
+        overrides = dict(run_state.get("submission_overrides") or {})
+        baseline_raw = dict(overrides.get("democritus_atlas_baseline") or {})
+        if not baseline_raw:
+            return {}
+        current = self._atlas_drift_metrics(payload)
+        previous = {
+            "total_topic_count": int(baseline_raw.get("total_topic_count") or 0),
+            "aligned_topic_count": int(baseline_raw.get("aligned_topic_count") or 0),
+            "suspicious_topic_count": int(baseline_raw.get("suspicious_topic_count") or 0),
+            "aligned_topic_ratio": float(baseline_raw.get("aligned_topic_ratio") or 0.0),
+            "mean_alignment_score": float(baseline_raw.get("mean_alignment_score") or 0.0),
+            "synthesis_readiness_proxy": float(baseline_raw.get("synthesis_readiness_proxy") or 0.0),
+        }
+        suspicious_delta = previous["suspicious_topic_count"] - current["suspicious_topic_count"]
+        alignment_delta = round(current["aligned_topic_ratio"] - previous["aligned_topic_ratio"], 3)
+        readiness_delta = round(
+            current["synthesis_readiness_proxy"] - previous["synthesis_readiness_proxy"],
+            3,
+        )
+        reduced_drift = suspicious_delta > 0 or alignment_delta > 0.0 or readiness_delta > 0.0
+        return {
+            "previous": previous,
+            "current": current,
+            "suspicious_topic_delta": suspicious_delta,
+            "alignment_ratio_delta": alignment_delta,
+            "synthesis_readiness_delta": readiness_delta,
+            "reduced_drift": reduced_drift,
+        }
+
+    @staticmethod
+    def _normalize_checkpoint_topic(value: object) -> str:
+        return " ".join(str(value or "").split()).strip()
+
+    def _unique_checkpoint_topics(self, values: list[object] | tuple[object, ...]) -> tuple[str, ...]:
+        topics: list[str] = []
+        for value in values:
+            normalized = self._normalize_checkpoint_topic(value)
+            if normalized:
+                topics.append(normalized)
+        return tuple(dict.fromkeys(topics))
+
+    def _available_checkpoint_topics(self, payload: dict[str, object]) -> tuple[str, ...]:
+        topics: list[str] = []
+        for item in list(payload.get("top_topics") or []):
+            topic = self._normalize_checkpoint_topic(dict(item).get("topic"))
+            if topic:
+                topics.append(topic)
+        for item in list(payload.get("documents") or []):
+            for topic in list(dict(item).get("topics") or []):
+                normalized = self._normalize_checkpoint_topic(topic)
+                if normalized:
+                    topics.append(normalized)
+        return tuple(dict.fromkeys(topics))
+
+    def _filter_checkpoint_topics(
+        self,
+        payload: dict[str, object],
+        *,
+        selected_topics: tuple[str, ...],
+        rejected_topics: tuple[str, ...],
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        valid_topics = set(self._available_checkpoint_topics(payload))
+        filtered_selected = tuple(topic for topic in selected_topics if topic in valid_topics)
+        filtered_selected_lookup = set(filtered_selected)
+        filtered_rejected = tuple(
+            topic for topic in rejected_topics if topic in valid_topics and topic not in filtered_selected_lookup
+        )
+        return filtered_selected, filtered_rejected
+
+    def _topic_guidance_refinement(
+        self,
+        *,
+        selected_topics: tuple[str, ...],
+        rejected_topics: tuple[str, ...],
+        retrieval_refinement: str,
+    ) -> str:
+        parts: list[str] = []
+        if selected_topics:
+            parts.append("focus on topics: " + "; ".join(selected_topics))
+        if rejected_topics:
+            parts.append("avoid topics: " + "; ".join(rejected_topics))
+        normalized_refinement = " ".join(str(retrieval_refinement or "").split()).strip()
+        if normalized_refinement:
+            parts.append(normalized_refinement)
+        return ". ".join(part for part in parts if part)
+
     def _democritus_checkpoint_selection_snapshot(
         self,
         payload: dict[str, object],
         *,
         selected_pdf_paths: tuple[str, ...],
+        selected_topics: tuple[str, ...] = (),
+        rejected_topics: tuple[str, ...] = (),
     ) -> dict[str, object]:
         selected_lookup = {path for path in selected_pdf_paths if path}
         selected_docs: list[dict[str, object]] = []
         rejected_docs: list[dict[str, object]] = []
-        selected_topics: Counter[str] = Counter()
-        rejected_topics: Counter[str] = Counter()
+        selected_topic_counts: Counter[str] = Counter()
+        rejected_topic_counts: Counter[str] = Counter()
         for item in list(payload.get("documents") or []):
             record = dict(item)
             pdf_path = " ".join(str(record.get("pdf_path") or "").split()).strip()
@@ -551,18 +706,29 @@ class DashboardQueryLauncher:
             if pdf_path in selected_lookup:
                 selected_docs.append(normalized_record)
                 for topic in normalized_topics:
-                    selected_topics[topic] += 1
+                    selected_topic_counts[topic] += 1
             else:
                 rejected_docs.append(normalized_record)
                 for topic in normalized_topics:
-                    rejected_topics[topic] += 1
-        topic_preference_signal = Counter(selected_topics)
-        topic_preference_signal.subtract(rejected_topics)
+                    rejected_topic_counts[topic] += 1
+        explicit_selected_topics = self._unique_checkpoint_topics(selected_topics)
+        explicit_rejected_topics = tuple(
+            topic for topic in self._unique_checkpoint_topics(rejected_topics)
+            if topic not in set(explicit_selected_topics)
+        )
+        for topic in explicit_selected_topics:
+            selected_topic_counts[topic] += 1
+        for topic in explicit_rejected_topics:
+            rejected_topic_counts[topic] += 1
+        topic_preference_signal = Counter(selected_topic_counts)
+        topic_preference_signal.subtract(rejected_topic_counts)
         return {
             "selected_documents": selected_docs,
             "rejected_documents": rejected_docs,
-            "selected_topic_counts": self._topic_counter_payload(selected_topics),
-            "rejected_topic_counts": self._topic_counter_payload(rejected_topics),
+            "explicit_selected_topics": list(explicit_selected_topics),
+            "explicit_rejected_topics": list(explicit_rejected_topics),
+            "selected_topic_counts": self._topic_counter_payload(selected_topic_counts),
+            "rejected_topic_counts": self._topic_counter_payload(rejected_topic_counts),
             "topic_preference_signal": {
                 topic: int(value)
                 for topic, value in topic_preference_signal.items()
@@ -578,6 +744,8 @@ class DashboardQueryLauncher:
         action_kind: str,
         action_status: str,
         selected_pdf_paths: tuple[str, ...],
+        selected_topics: tuple[str, ...],
+        rejected_topics: tuple[str, ...],
         retrieval_refinement: str,
         additional_documents: int,
         queued_followup_run_id: str | None = None,
@@ -590,9 +758,13 @@ class DashboardQueryLauncher:
         snapshot = self._democritus_checkpoint_selection_snapshot(
             payload,
             selected_pdf_paths=selected_pdf_paths,
+            selected_topics=selected_topics,
+            rejected_topics=rejected_topics,
         )
         selected_documents = list(snapshot.get("selected_documents") or [])
         rejected_documents = list(snapshot.get("rejected_documents") or [])
+        atlas_drift_metrics = self._atlas_drift_metrics(payload)
+        atlas_drift_comparison = self._atlas_drift_comparison(payload=payload, run_state=run_state)
         event = {
             "timestamp": time.time(),
             "run_id": str(run_state.get("run_id") or ""),
@@ -607,9 +779,13 @@ class DashboardQueryLauncher:
             "rejected_count": len(rejected_documents),
             "selected_documents": selected_documents,
             "rejected_documents": rejected_documents,
+            "explicit_selected_topics": list(snapshot.get("explicit_selected_topics") or []),
+            "explicit_rejected_topics": list(snapshot.get("explicit_rejected_topics") or []),
             "selected_topic_counts": dict(snapshot.get("selected_topic_counts") or {}),
             "rejected_topic_counts": dict(snapshot.get("rejected_topic_counts") or {}),
             "topic_preference_signal": dict(snapshot.get("topic_preference_signal") or {}),
+            "atlas_drift_metrics": atlas_drift_metrics,
+            "atlas_drift_comparison": atlas_drift_comparison,
             "retrieval_refinement": retrieval_refinement,
             "additional_documents_requested": int(max(1, additional_documents)),
             "queued_followup_run_id": str(queued_followup_run_id or ""),
@@ -675,6 +851,8 @@ class DashboardQueryLauncher:
             "latest_selected_count": len(selected_documents),
             "latest_rejected_count": len(rejected_documents),
             "latest_retrieval_refinement": retrieval_refinement,
+            "latest_atlas_drift_metrics": atlas_drift_metrics,
+            "latest_atlas_drift_comparison": atlas_drift_comparison,
             "cumulative_topic_preference_signal": dict(topic_preferences),
             "document_selection_counts": dict(document_selection_counts),
             "document_rejection_counts": dict(rejected_document_counts),
@@ -691,6 +869,37 @@ class DashboardQueryLauncher:
             return suffix
         return f"{base} {suffix}"
 
+    @staticmethod
+    def _canonical_guided_query(
+        *,
+        base_query: str,
+        selected_topics: tuple[str, ...],
+        rejected_topics: tuple[str, ...],
+        retrieval_refinement: str,
+    ) -> str:
+        parts = [" ".join(str(base_query or "").split()).strip()]
+        if selected_topics:
+            parts.append("focus on topics: " + "; ".join(selected_topics))
+        if rejected_topics:
+            parts.append("avoid topics: " + "; ".join(rejected_topics))
+        refinement = " ".join(str(retrieval_refinement or "").split()).strip()
+        if refinement:
+            parts.append(refinement)
+        return " ".join(part for part in parts if part).strip()
+
+    @staticmethod
+    def _democritus_base_query(payload: dict[str, object], run_state: dict[str, object]) -> str:
+        overrides = dict(run_state.get("submission_overrides") or {})
+        return " ".join(
+            str(
+                overrides.get("democritus_base_query")
+                or payload.get("base_query")
+                or run_state.get("query")
+                or payload.get("query")
+                or ""
+            ).split()
+        ).strip()
+
     def _render_democritus_checkpoint_page(
         self,
         run_id: str,
@@ -702,8 +911,16 @@ class DashboardQueryLauncher:
         payload = self._load_democritus_checkpoint_payload(artifact_path)
         if not payload:
             return artifact_path.read_text(encoding="utf-8", errors="replace")
+        with self._lock:
+            run_state = dict(self._session_runs_by_id.get(run_id) or {})
         curation = self._load_democritus_checkpoint_curation(payload)
         selected_pdf_paths = set(str(item) for item in list(curation.get("selected_pdf_paths") or []))
+        selected_topics = set(
+            self._unique_checkpoint_topics(list(curation.get("selected_topics") or []))
+        )
+        rejected_topics = set(
+            self._unique_checkpoint_topics(list(curation.get("rejected_topics") or []))
+        )
         documents = list(payload.get("documents") or [])
         n_documents = len(documents)
         selected_count = sum(
@@ -714,10 +931,91 @@ class DashboardQueryLauncher:
         query = html.escape(str(payload.get("query") or "Democritus interactive checkpoint"))
         stage_label = html.escape(str(payload.get("stage_label") or "Topic checkpoint"))
         summary_text = html.escape(str(payload.get("summary_text") or ""))
-        top_topics = list(payload.get("top_topics") or [])
+        query_focus_terms = list(payload.get("query_focus_terms") or [])
+        suspicious_topics = list(payload.get("suspicious_topics") or [])
+        drift_metrics = self._atlas_drift_metrics(payload)
+        drift_comparison = self._atlas_drift_comparison(payload=payload, run_state=run_state)
+        topic_counts: Counter[str] = Counter()
+        for item in documents:
+            for topic in list(dict(item).get("topics") or []):
+                normalized = self._normalize_checkpoint_topic(topic)
+                if normalized:
+                    topic_counts[normalized] += 1
+        atlas_topics: list[tuple[str, int]] = []
+        seen_topics: set[str] = set()
+        for item in list(payload.get("top_topics") or []):
+            topic = self._normalize_checkpoint_topic(dict(item).get("topic"))
+            if not topic or topic in seen_topics:
+                continue
+            count = int(dict(item).get("document_count") or topic_counts.get(topic) or 0)
+            atlas_topics.append((topic, count))
+            seen_topics.add(topic)
+        for topic, count in topic_counts.most_common(16):
+            if topic in seen_topics:
+                continue
+            atlas_topics.append((topic, int(count)))
+            seen_topics.add(topic)
+        for topic in list(selected_topics) + list(rejected_topics):
+            if topic in seen_topics:
+                continue
+            atlas_topics.append((topic, int(topic_counts.get(topic) or 0)))
+            seen_topics.add(topic)
+        topic_hidden_inputs = "".join(
+            f'<input type="hidden" name="selected_topic" value="{html.escape(topic)}" data-topic-hidden="selected" />'
+            for topic in selected_topics
+        ) + "".join(
+            f'<input type="hidden" name="rejected_topic" value="{html.escape(topic)}" data-topic-hidden="rejected" />'
+            for topic in rejected_topics
+        )
+        suspicious_lookup = {
+            self._normalize_checkpoint_topic(dict(item).get("topic")) for item in suspicious_topics
+        }
+        focus_term_markup = "".join(
+            f'<span class="checkpoint-chip checkpoint-chip-focus">{html.escape(str(term))}</span>'
+            for term in query_focus_terms[:8]
+        ) or '<span class="checkpoint-chip">No strong query anchors extracted</span>'
+        suspicious_topic_markup = "".join(
+            f'<span class="checkpoint-chip checkpoint-chip-warn">{html.escape(str(dict(item).get("topic") or ""))}</span>'
+            for item in suspicious_topics[:8]
+            if str(dict(item).get("topic") or "").strip()
+        ) or '<span class="checkpoint-chip">No obvious off-scope topics flagged</span>'
+        drift_comparison_markup = ""
+        if drift_comparison:
+            previous = dict(drift_comparison.get("previous") or {})
+            current = dict(drift_comparison.get("current") or {})
+            reduced_drift = bool(drift_comparison.get("reduced_drift"))
+            drift_tone_class = "checkpoint-chip-focus" if reduced_drift else "checkpoint-chip-warn"
+            drift_message = (
+                f"Drift tightened from {int(previous.get('suspicious_topic_count') or 0)} suspicious topics to "
+                f"{int(current.get('suspicious_topic_count') or 0)}."
+                if reduced_drift
+                else f"Drift did not tighten yet: {int(previous.get('suspicious_topic_count') or 0)} suspicious topics before, "
+                f"{int(current.get('suspicious_topic_count') or 0)} now."
+            )
+            drift_comparison_markup = (
+                '<div class="checkpoint-chips" style="margin-top:14px;">'
+                f'<span class="checkpoint-chip {drift_tone_class}">{html.escape(drift_message)}</span>'
+                f'<span class="checkpoint-chip">alignment {html.escape(str(previous.get("aligned_topic_ratio") or 0.0))} → {html.escape(str(current.get("aligned_topic_ratio") or 0.0))}</span>'
+                f'<span class="checkpoint-chip">readiness {html.escape(str(previous.get("synthesis_readiness_proxy") or 0.0))} → {html.escape(str(current.get("synthesis_readiness_proxy") or 0.0))}</span>'
+                '</div>'
+            )
         topic_chips = "".join(
-            f'<span class="chip">{html.escape(str(item.get("topic") or ""))} · {html.escape(str(item.get("document_count") or 0))} docs</span>'
-            for item in top_topics[:16]
+            '<button type="button" class="topic-chip-button'
+            + (
+                ' is-selected'
+                if topic in selected_topics
+                else ' is-rejected'
+                if topic in rejected_topics
+                else ' is-suspicious'
+                if topic in suspicious_lookup
+                else ''
+            )
+            + f'" data-topic="{html.escape(topic)}"'
+            + f' data-topic-state="{html.escape("selected" if topic in selected_topics else "rejected" if topic in rejected_topics else "neutral")}">'
+            + f'<span class="topic-chip-label">{html.escape(topic)}</span>'
+            + f'<span class="topic-chip-count">{html.escape(str(count))} doc{"s" if int(count) != 1 else ""}</span>'
+            + "</button>"
+            for topic, count in atlas_topics[:24]
         ) or '<span class="chip">No recurring topics detected yet</span>'
         document_cards = []
         for item in documents:
@@ -803,6 +1101,26 @@ class DashboardQueryLauncher:
       .chip, .topic-pill, .checkpoint-chip {{ border-radius: 999px; padding: 8px 12px; background: #efe7d9; font-size: 0.92rem; color: #64492b; }}
       .topic-pill {{ background: #f5efe4; max-width: 100%; overflow-wrap: anywhere; }}
       .checkpoint-chip {{ background: #f6f0e5; }}
+      .checkpoint-chip-focus {{ background: #e8f4ee; color: #204d41; }}
+      .checkpoint-chip-warn {{ background: #f8ede0; color: #8b4a1f; }}
+      .topic-chip-button {{
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 10px 14px;
+        background: #fff8ef;
+        color: #5c4128;
+        font: inherit;
+        display: inline-flex;
+        gap: 10px;
+        align-items: center;
+        cursor: pointer;
+      }}
+      .topic-chip-button.is-selected {{ background: #e8f4ee; border-color: #8eb7aa; color: #204d41; }}
+      .topic-chip-button.is-rejected {{ background: #f8ede0; border-color: #d1aa8b; color: #8b4a1f; }}
+      .topic-chip-button.is-suspicious {{ border-style: dashed; border-color: #d1aa8b; }}
+      .topic-chip-label {{ font-weight: 700; }}
+      .topic-chip-count {{ font-size: 0.84rem; opacity: 0.85; }}
+      .legend {{ color: var(--muted); font-size: 0.92rem; line-height: 1.55; }}
       .controls-grid {{ display: grid; gap: 16px; grid-template-columns: 1.2fr 1fr; }}
       .control-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 18px; background: #fffdf9; display: grid; gap: 12px; }}
       .control-label {{ font-size: 0.86rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }}
@@ -862,17 +1180,33 @@ class DashboardQueryLauncher:
             <div class="checkpoint-chips" style="margin-top:14px;">
               <span class="checkpoint-chip">{selected_count} selected</span>
               <span class="checkpoint-chip">{n_documents} retrieved</span>
+              <span class="checkpoint-chip">{len(selected_topics)} topics included</span>
+              <span class="checkpoint-chip">{len(rejected_topics)} topics excluded</span>
             </div>
           </div>
           <div class="panel callout">
             <p class="eyebrow">Next Step</p>
             <p class="trace">{summary_text}</p>
             <p class="trace" style="margin-top:12px;">Use <strong>Go deeper on selected</strong> to run the longer Democritus pass only on the documents you keep.</p>
+            {drift_comparison_markup}
           </div>
+        </section>
+        <section class="panel">
+          <p class="eyebrow">Atlas Drift Signal</p>
+          <p class="trace">This atlas pass is now the explicit anti-drift stage in Democritus. Suspicious topics are weakly aligned to the query anchors below and are good candidates to exclude before the deep run.</p>
+          <div class="checkpoint-chips" style="margin-top:14px;">
+            <span class="checkpoint-chip">{int(drift_metrics.get("suspicious_topic_count") or 0)} suspicious topic{'s' if int(drift_metrics.get("suspicious_topic_count") or 0) != 1 else ''}</span>
+            <span class="checkpoint-chip">{int(drift_metrics.get("aligned_topic_count") or 0)} aligned topic{'s' if int(drift_metrics.get("aligned_topic_count") or 0) != 1 else ''}</span>
+            <span class="checkpoint-chip">readiness {html.escape(str(drift_metrics.get("synthesis_readiness_proxy") or 0.0))}</span>
+          </div>
+          <div class="checkpoint-chips" style="margin-top:12px;">{focus_term_markup}</div>
+          <div class="checkpoint-chips" style="margin-top:12px;">{suspicious_topic_markup}</div>
         </section>
         <section class="panel">
           <p class="eyebrow">Corpus Topic Atlas</p>
           <p class="trace">{n_documents} documents reached the root-topic frontier. These recurring themes are the first shared causal surface Democritus recovered.</p>
+          <p class="legend" style="margin-top:12px;">Click a topic once to include it in the next retrieval, twice to exclude it, and a third time to clear it.</p>
+          <div id="topic-guidance-inputs">{topic_hidden_inputs}</div>
           <div class="chip-row" style="margin-top:14px;">{topic_chips}</div>
         </section>
         <section class="panel">
@@ -887,11 +1221,12 @@ class DashboardQueryLauncher:
               </div>
             </div>
             <div class="control-card">
-              <span class="control-label">Retrieve More</span>
-              <p class="control-copy">Queue another interactive pass with more documents. Optional refinement text is appended to the original query to steer the next retrieval.</p>
+              <span class="control-label">Guided Retrieval</span>
+              <p class="control-copy">Queue another interactive pass with more documents. Topic choices become soft guidance for the next retrieval, and the optional refinement text still appends to the original query.</p>
               <input class="additional-input" type="number" name="additional_documents" min="1" max="25" step="1" value="3" />
               <input class="refinement-input" type="text" name="retrieval_refinement" value="{refinement_value}" placeholder="Optional retrieval refinement, e.g. peer reviewed natural experiments" />
               <div class="form-actions">
+                <button type="submit" class="primary-button" name="action_kind" value="topic_guided_retrieval">Retrieve again from topic choices</button>
                 <button type="submit" class="secondary-button" name="action_kind" value="retrieve_more">Retrieve more documents</button>
               </div>
             </div>
@@ -902,6 +1237,62 @@ class DashboardQueryLauncher:
           <div class="doc-grid" style="margin-top:12px;">{''.join(document_cards) or '<div class="empty">Root topics have not been materialized yet.</div>'}</div>
         </section>
       </form>
+      <script>
+        (() => {{
+          const hiddenRoot = document.getElementById('topic-guidance-inputs');
+          const buttons = Array.from(document.querySelectorAll('.topic-chip-button[data-topic]'));
+          if (!hiddenRoot || !buttons.length) {{
+            return;
+          }}
+          const stateByTopic = new Map();
+          const cycleState = (current) => {{
+            if (current === 'selected') {{
+              return 'rejected';
+            }}
+            if (current === 'rejected') {{
+              return 'neutral';
+            }}
+            return 'selected';
+          }};
+          hiddenRoot.querySelectorAll('input[data-topic-hidden]').forEach((node) => {{
+            const topic = (node.getAttribute('value') || '').trim();
+            const state = (node.getAttribute('data-topic-hidden') || '').trim();
+            if (topic && state) {{
+              stateByTopic.set(topic, state);
+            }}
+          }});
+          const render = () => {{
+            hiddenRoot.innerHTML = '';
+            buttons.forEach((button) => {{
+              const topic = (button.getAttribute('data-topic') || '').trim();
+              const state = stateByTopic.get(topic) || 'neutral';
+              button.setAttribute('data-topic-state', state);
+              button.classList.toggle('is-selected', state === 'selected');
+              button.classList.toggle('is-rejected', state === 'rejected');
+              if (state === 'neutral') {{
+                return;
+              }}
+              const input = document.createElement('input');
+              input.type = 'hidden';
+              input.name = state === 'selected' ? 'selected_topic' : 'rejected_topic';
+              input.value = topic;
+              input.setAttribute('data-topic-hidden', state);
+              hiddenRoot.appendChild(input);
+            }});
+          }};
+          buttons.forEach((button) => {{
+            button.addEventListener('click', () => {{
+              const topic = (button.getAttribute('data-topic') || '').trim();
+              if (!topic) {{
+                return;
+              }}
+              stateByTopic.set(topic, cycleState(stateByTopic.get(topic) || button.getAttribute('data-topic-state') || 'neutral'));
+              render();
+            }});
+          }});
+          render();
+        }})();
+      </script>
     </main>
   </body>
 </html>"""
@@ -1199,6 +1590,8 @@ class DashboardQueryLauncher:
         run_id: str,
         action_kind: str,
         selected_pdf_paths: tuple[str, ...],
+        selected_topics: tuple[str, ...],
+        rejected_topics: tuple[str, ...],
         additional_documents: int,
         retrieval_refinement: str,
         company_similarity_year_start: int | None = None,
@@ -1233,9 +1626,16 @@ class DashboardQueryLauncher:
             path for path in dict.fromkeys(selected_pdf_paths) if path in valid_paths
         )
         refinement = " ".join(str(retrieval_refinement or "").split()).strip()
+        filtered_selected_topics, filtered_rejected_topics = self._filter_checkpoint_topics(
+            payload,
+            selected_topics=self._unique_checkpoint_topics(selected_topics),
+            rejected_topics=self._unique_checkpoint_topics(rejected_topics),
+        )
         self._save_democritus_checkpoint_curation(
             payload,
             selected_pdf_paths=filtered_selected,
+            selected_topics=filtered_selected_topics,
+            rejected_topics=filtered_rejected_topics,
             retrieval_refinement=refinement,
         )
         if action_kind == "save":
@@ -1252,6 +1652,8 @@ class DashboardQueryLauncher:
                 action_kind="save",
                 action_status=("saved" if count else "empty_selection"),
                 selected_pdf_paths=filtered_selected,
+                selected_topics=filtered_selected_topics,
+                rejected_topics=filtered_rejected_topics,
                 retrieval_refinement=refinement,
                 additional_documents=additional_documents,
             )
@@ -1269,6 +1671,8 @@ class DashboardQueryLauncher:
                     action_kind="deepen",
                     action_status="blocked_empty_selection",
                     selected_pdf_paths=filtered_selected,
+                    selected_topics=filtered_selected_topics,
+                    rejected_topics=filtered_rejected_topics,
                     retrieval_refinement=refinement,
                     additional_documents=additional_documents,
                 )
@@ -1282,10 +1686,15 @@ class DashboardQueryLauncher:
                 payload,
                 selected_pdf_paths=filtered_selected,
             )
+            base_query = self._democritus_base_query(payload, run_state)
             new_run_id = self.request_session_run_deepen(
                 run_id,
                 democritus_manifest_path=curated_manifest_path,
                 democritus_target_docs=len(filtered_selected),
+                democritus_base_query=base_query,
+                democritus_selected_topics=filtered_selected_topics,
+                democritus_rejected_topics=filtered_rejected_topics,
+                democritus_retrieval_refinement=refinement,
             )
             self._record_democritus_checkpoint_telemetry(
                 payload,
@@ -1293,6 +1702,8 @@ class DashboardQueryLauncher:
                 action_kind="deepen",
                 action_status=("queued" if new_run_id else "not_queued"),
                 selected_pdf_paths=filtered_selected,
+                selected_topics=filtered_selected_topics,
+                rejected_topics=filtered_rejected_topics,
                 retrieval_refinement=refinement,
                 additional_documents=additional_documents,
                 queued_followup_run_id=new_run_id,
@@ -1304,14 +1715,82 @@ class DashboardQueryLauncher:
                 run_id=run_id,
                 new_run_id=new_run_id,
             ), HTTPStatus.OK
-        if action_kind == "retrieve_more":
+        if action_kind == "topic_guided_retrieval":
+            base_query = self._democritus_base_query(payload, run_state)
+            if not (filtered_selected_topics or filtered_rejected_topics or refinement):
+                self._record_democritus_checkpoint_telemetry(
+                    payload,
+                    run_state=run_state,
+                    action_kind="topic_guided_retrieval",
+                    action_status="blocked_missing_guidance",
+                    selected_pdf_paths=filtered_selected,
+                    selected_topics=filtered_selected_topics,
+                    rejected_topics=filtered_rejected_topics,
+                    retrieval_refinement=refinement,
+                    additional_documents=additional_documents,
+                )
+                return self._render_democritus_checkpoint_page(
+                    run_id,
+                    artifact_path=artifact_path,
+                    banner_message="Choose at least one topic or add refinement text before launching a topic-guided retrieval.",
+                    banner_tone="warn",
+                ), HTTPStatus.BAD_REQUEST
             base_count = max(1, len(documents))
             target_documents = base_count + max(1, int(additional_documents or 1))
-            query = self._combine_query_with_refinement(str(run_state.get("query") or ""), refinement)
+            query = self._canonical_guided_query(
+                base_query=base_query,
+                selected_topics=filtered_selected_topics,
+                rejected_topics=filtered_rejected_topics,
+                retrieval_refinement=refinement,
+            )
             new_run_id = self.request_session_run_retrieve_more(
                 run_id,
                 query_override=query,
                 democritus_target_docs=target_documents,
+                democritus_atlas_baseline=self._atlas_drift_metrics(payload),
+                democritus_base_query=base_query,
+                democritus_selected_topics=filtered_selected_topics,
+                democritus_rejected_topics=filtered_rejected_topics,
+                democritus_retrieval_refinement=refinement,
+            )
+            self._record_democritus_checkpoint_telemetry(
+                payload,
+                run_state=run_state,
+                action_kind="topic_guided_retrieval",
+                action_status=("queued" if new_run_id else "not_queued"),
+                selected_pdf_paths=filtered_selected,
+                selected_topics=filtered_selected_topics,
+                rejected_topics=filtered_rejected_topics,
+                retrieval_refinement=refinement,
+                additional_documents=additional_documents,
+                queued_followup_run_id=new_run_id,
+            )
+            return self._render_checkpoint_followup_queued_page(
+                heading="Topic-Guided Retrieval Queued",
+                message=(
+                    f"Queued another interactive run targeting {target_documents} documents"
+                    + (" using your topic guidance." if filtered_selected_topics or filtered_rejected_topics else ".")
+                ),
+                run_id=run_id,
+                new_run_id=new_run_id,
+            ), HTTPStatus.OK
+        if action_kind == "retrieve_more":
+            base_count = max(1, len(documents))
+            target_documents = base_count + max(1, int(additional_documents or 1))
+            base_query = self._democritus_base_query(payload, run_state)
+            query = self._canonical_guided_query(
+                base_query=base_query,
+                selected_topics=(),
+                rejected_topics=(),
+                retrieval_refinement=refinement,
+            )
+            new_run_id = self.request_session_run_retrieve_more(
+                run_id,
+                query_override=query,
+                democritus_target_docs=target_documents,
+                democritus_atlas_baseline=self._atlas_drift_metrics(payload),
+                democritus_base_query=base_query,
+                democritus_retrieval_refinement=refinement,
             )
             self._record_democritus_checkpoint_telemetry(
                 payload,
@@ -1319,6 +1798,8 @@ class DashboardQueryLauncher:
                 action_kind="retrieve_more",
                 action_status=("queued" if new_run_id else "not_queued"),
                 selected_pdf_paths=filtered_selected,
+                selected_topics=filtered_selected_topics,
+                rejected_topics=filtered_rejected_topics,
                 retrieval_refinement=refinement,
                 additional_documents=additional_documents,
                 queued_followup_run_id=new_run_id,
@@ -1399,6 +1880,16 @@ class DashboardQueryLauncher:
                         for item in parsed_payload.get("selected_pdf_path", [])
                         if " ".join(item.split()).strip()
                     )
+                    selected_topics = tuple(
+                        " ".join(item.split()).strip()
+                        for item in parsed_payload.get("selected_topic", [])
+                        if " ".join(item.split()).strip()
+                    )
+                    rejected_topics = tuple(
+                        " ".join(item.split()).strip()
+                        for item in parsed_payload.get("rejected_topic", [])
+                        if " ".join(item.split()).strip()
+                    )
                     additional_raw = " ".join(parsed_payload.get("additional_documents", ["3"])[0].split()).strip()
                     try:
                         additional_documents = max(1, int(additional_raw or "3"))
@@ -1419,6 +1910,8 @@ class DashboardQueryLauncher:
                         run_id=run_id,
                         action_kind=action_kind,
                         selected_pdf_paths=selected_pdf_paths,
+                        selected_topics=selected_topics,
+                        rejected_topics=rejected_topics,
                         additional_documents=additional_documents,
                         retrieval_refinement=retrieval_refinement,
                         company_similarity_year_start=company_similarity_year_start,

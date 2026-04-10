@@ -82,6 +82,25 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
         self.assertIn("minmax(min(100%, 360px), 1fr)", html)
         self.assertIn("max-width: 68ch", html)
 
+    def test_topic_checkpoint_html_surfaces_atlas_drift_signal(self) -> None:
+        html = democritus_query_agentic_module._render_democritus_topic_checkpoint_html(
+            {
+                "query": "Analyze five studies of climate change",
+                "stage_label": "Atlas Drift Checkpoint",
+                "summary_text": "Review suspicious topics before going deeper.",
+                "n_documents": 3,
+                "query_focus_terms": ["climate", "change"],
+                "suspicious_topics": [{"topic": "air conditioning adoption"}],
+                "top_topics": [{"topic": "air conditioning adoption", "document_count": 1}],
+                "documents": [],
+            }
+        )
+
+        self.assertIn("Atlas Drift Signal", html)
+        self.assertIn("air conditioning adoption", html)
+        self.assertIn("class=\"chip focus\"", html)
+        self.assertIn("class=\"chip drift\"", html)
+
     def test_query_config_defaults_to_eight_workers(self) -> None:
         config = DemocritusQueryAgenticConfig(
             query="find me 10 recent studies on glp-1",
@@ -291,6 +310,132 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
         retrieval_query = _derive_retrieval_query(query)
 
         self.assertEqual(retrieval_query, "weight loss drug glp-1")
+
+    def test_query_interpretation_uses_structured_topics_without_polluting_anchor_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query=(
+                        "Analyze 5 recent studies of global warming and synthesize their joint support "
+                        "focus on topics: climate change feedback loops"
+                    ),
+                    base_query="Analyze 5 recent studies of global warming and synthesize their joint support",
+                    selected_topics=(
+                        "Climate change feedback loops",
+                        "Global warming temperature projections",
+                    ),
+                    rejected_topics=("Greenhouse gas emissions from AC",),
+                    retrieval_refinement="peer reviewed climate modeling",
+                    outdir=Path(tmpdir) / "query_run",
+                    retrieval_backend="manifest",
+                    dry_run=True,
+                )
+            )
+
+            plan = runner._run_query_interpretation_agent()
+
+            self.assertEqual(
+                plan.query,
+                "Analyze 5 recent studies of global warming and synthesize their joint support focus on topics: Climate change feedback loops; Global warming temperature projections avoid topics: Greenhouse gas emissions from AC peer reviewed climate modeling",
+            )
+            self.assertEqual(
+                plan.retrieval_query,
+                "global warming climate change feedback loops global warming temperature projections peer reviewed climate modeling",
+            )
+            self.assertEqual(plan.base_query, "Analyze 5 recent studies of global warming and synthesize their joint support")
+            self.assertEqual(
+                plan.selected_topics,
+                ("Climate change feedback loops", "Global warming temperature projections"),
+            )
+            self.assertEqual(plan.rejected_topics, ("Greenhouse gas emissions from AC",))
+            self.assertNotIn("focus", plan.keyword_tokens)
+            self.assertNotIn("topics", plan.keyword_tokens)
+            self.assertNotIn("joint", plan.keyword_tokens)
+
+    def test_query_interpretation_requests_clarification_for_ambiguous_inflation_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query="Analyze 20 recent studies on inflation and synthesize what they jointly support",
+                    outdir=Path(tmpdir) / "query_run",
+                    execution_mode="deep",
+                    target_documents=20,
+                    dry_run=True,
+                )
+            )
+
+            plan = runner._run_query_interpretation_agent()
+
+            self.assertIsNotNone(plan.clarification_request)
+            self.assertEqual(plan.clarification_request.ambiguous_term, "inflation")
+            self.assertEqual(plan.target_documents, 20)
+            self.assertTrue(any("economic inflation" in item for item in plan.clarification_request.suggested_queries))
+
+    def test_query_interpretation_allows_disambiguated_economic_inflation_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query="Analyze 20 recent studies on economic inflation and wage growth",
+                    outdir=Path(tmpdir) / "query_run",
+                    dry_run=True,
+                )
+            )
+
+            plan = runner._run_query_interpretation_agent()
+
+            self.assertIsNone(plan.clarification_request)
+
+    def test_query_interpretation_requests_clarification_for_explanation_style_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = DemocritusQueryAgenticRunner(
+                DemocritusQueryAgenticConfig(
+                    query="Explain quantum entanglement",
+                    outdir=Path(tmpdir) / "query_run",
+                    dry_run=True,
+                )
+            )
+
+            plan = runner._run_query_interpretation_agent()
+
+            self.assertIsNotNone(plan.clarification_request)
+            self.assertEqual(plan.clarification_request.ambiguous_term, "")
+            self.assertIn("explanation or teaching request", plan.clarification_request.summary_text.lower())
+            self.assertTrue(any("course demo or textbook section" in item.lower() for item in plan.clarification_request.suggested_queries))
+
+    def test_query_runner_materializes_clarification_checkpoint_before_retrieval(self) -> None:
+        class ClarificationRunner(DemocritusQueryAgenticRunner):
+            def _provider(self):
+                raise AssertionError("retrieval should not start before clarification")
+
+            def _build_batch_runner(self, *, streaming: bool):
+                raise AssertionError("batch runner should not start before clarification")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "query_run"
+            runner = ClarificationRunner(
+                DemocritusQueryAgenticConfig(
+                    query="Analyze 20 recent studies on inflation and synthesize what they jointly support",
+                    outdir=outdir,
+                )
+            )
+
+            result = runner.run()
+
+            self.assertIsNotNone(result.clarification_manifest_path)
+            self.assertIsNotNone(result.clarification_dashboard_path)
+            self.assertTrue(result.clarification_manifest_path.exists())
+            self.assertTrue(result.clarification_dashboard_path.exists())
+            self.assertEqual(result.selected_documents, ())
+            self.assertEqual(result.acquired_documents, ())
+            payload = json.loads(result.clarification_manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["stage_id"], "query_clarification")
+            self.assertEqual(payload["ambiguous_term"], "inflation")
+            clarification_html = result.clarification_dashboard_path.read_text(encoding="utf-8")
+            self.assertIn("Copy query", clarification_html)
+            self.assertIn("economic inflation", clarification_html)
+            summary = json.loads((outdir / "query_run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["clarification_dashboard_path"], str(result.clarification_dashboard_path))
+            self.assertEqual(summary["batch_records"], 0)
 
     def test_derive_retrieval_query_drops_direct_document_url_only_boilerplate(self) -> None:
         query = "Analyze the document at https://example.org/news/story-about-water"
@@ -2045,16 +2190,53 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
             self.assertIsNone(result.corpus_synthesis_dashboard_path)
             payload = json.loads(result.checkpoint_manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["stage_id"], "root_topics")
+            self.assertEqual(payload["stage_phase"], "atlas_pass")
+            self.assertEqual(payload["stage_label"], "Atlas Drift Checkpoint")
             self.assertEqual(payload["n_documents"], 2)
             self.assertTrue(any(item["topic"] == "minimum wage increases" for item in payload["top_topics"]))
+            self.assertEqual(payload["query_focus_terms"], ["minimum", "wage"])
+            self.assertIn("drift_metrics", payload)
+            self.assertEqual(payload["drift_metrics"]["suspicious_topic_count"], 0)
             checkpoint_html = result.checkpoint_dashboard_path.read_text(encoding="utf-8")
             alpha_pdf_uri = (outdir / "acquired_pdfs" / "alpha_minimum_wage.pdf").resolve().as_uri()
             self.assertIn('class="doc-title"', checkpoint_html)
             self.assertIn("Inspect PDF", checkpoint_html)
             self.assertIn(alpha_pdf_uri, checkpoint_html)
+            self.assertIn("Atlas Drift Signal", checkpoint_html)
             summary = json.loads((outdir / "query_run_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["execution_mode"], "interactive")
             self.assertEqual(summary["checkpoint_manifest_path"], str(result.checkpoint_manifest_path))
+
+    def test_topic_alignment_diagnostics_flags_weakly_aligned_topics(self) -> None:
+        diagnostics, payload = democritus_query_agentic_module._topic_alignment_diagnostics(
+            query="Analyze five studies of climate change",
+            documents_payload=[
+                {
+                    "title": "Cooling demand in urban buildings",
+                    "guide_summary": "Air-conditioning adoption rises with income and building retrofits.",
+                    "causal_gestalt": "Cooling technology adoption follows household demand and appliance access.",
+                    "topics": ["air conditioning adoption"],
+                },
+                {
+                    "title": "Climate adaptation and heat risk",
+                    "guide_summary": "Climate change intensifies heat exposure in cities.",
+                    "causal_gestalt": "Climate adaptation policies respond to heat stress and warming.",
+                    "topics": ["climate adaptation"],
+                },
+            ],
+            top_topics=[
+                {"topic": "air conditioning adoption", "document_count": 1},
+                {"topic": "climate adaptation", "document_count": 1},
+            ],
+        )
+
+        self.assertEqual(payload["query_focus_terms"], ["climate", "change"])
+        suspicious = {item["topic"] for item in payload["suspicious_topics"]}
+        self.assertIn("air conditioning adoption", suspicious)
+        self.assertNotIn("climate adaptation", suspicious)
+        by_topic = {item["topic"]: item for item in diagnostics}
+        self.assertTrue(by_topic["air conditioning adoption"]["is_suspicious_drift"])
+        self.assertFalse(by_topic["climate adaptation"]["is_suspicious_drift"])
 
     def test_query_runner_stops_after_democlritus_retrieval_state_stabilizes(self) -> None:
         class FakeBatchRunner:
