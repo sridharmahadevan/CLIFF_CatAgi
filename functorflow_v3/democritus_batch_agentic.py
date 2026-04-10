@@ -25,6 +25,8 @@ from .democritus_corpus_synthesis import (
 )
 from .repo_layout import resolve_democritus_seed_pdf_root
 
+_GUI_REFRESH_SECONDS = 15
+
 
 def _default_pdf_dir() -> Path:
     return resolve_democritus_seed_pdf_root()
@@ -1362,7 +1364,7 @@ class DemocritusBatchAgenticRunner:
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="refresh" content="5">
+  <meta http-equiv="refresh" content="{_GUI_REFRESH_SECONDS}">
   <title>Democritus Batch Dashboard</title>
   <style>
     body {{
@@ -1416,7 +1418,7 @@ class DemocritusBatchAgenticRunner:
 </head>
 <body>
   <h1>Democritus Batch Dashboard</h1>
-  <p class="note">Auto-refreshes every 5 seconds. JSON source: <code>{esc(self.telemetry_path)}</code></p>
+  <p class="note">Auto-refreshes every {_GUI_REFRESH_SECONDS} seconds. JSON source: <code>{esc(self.telemetry_path)}</code></p>
   <div class="grid">
     <div class="card">
       <h2>Run Summary</h2>
@@ -2015,7 +2017,11 @@ class DemocritusBatchAgenticRunner:
                 )
             )
 
-        refresh_meta = '<meta http-equiv="refresh" content="5">' if snapshot.get("status") != "complete" else ""
+        refresh_meta = (
+            f'<meta http-equiv="refresh" content="{_GUI_REFRESH_SECONDS}">'
+            if snapshot.get("status") != "complete"
+            else ""
+        )
         return f"""<!DOCTYPE html>
 <html lang="en">
 <head>

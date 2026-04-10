@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+_ARTIFACT_REFRESH_SECONDS = 15
+_ARTIFACT_REFRESH_MS = _ARTIFACT_REFRESH_SECONDS * 1000
+_SESSION_REFRESH_SECONDS = 5
+_SESSION_REFRESH_MS = _SESSION_REFRESH_SECONDS * 1000
+
 
 @dataclass(frozen=True)
 class DashboardQueryLauncherConfig:
@@ -460,7 +465,7 @@ class DashboardQueryLauncher:
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta http-equiv="refresh" content="3" />
+    <meta http-equiv="refresh" content="{_ARTIFACT_REFRESH_SECONDS}" />
     <title>{title}</title>
     <style>
       :root {{
@@ -1403,7 +1408,7 @@ class DashboardQueryLauncher:
             window.location.replace("/run-artifact?run_id=" + encodeURIComponent({json.dumps(run_id)}) + "&ts=" + Date.now());
           }})
           .catch(function () {{}});
-      }}, 3000);
+      }}, {_ARTIFACT_REFRESH_MS});
     </script>
   </body>
 </html>
@@ -1507,7 +1512,7 @@ class DashboardQueryLauncher:
             frame.src = "{html.escape(iframe_src)}" + "&ts=" + Date.now();
           }})
           .catch(function () {{}});
-      }}, 3000);
+      }}, {_ARTIFACT_REFRESH_MS});
     </script>
   </body>
 </html>
@@ -1879,7 +1884,7 @@ class DashboardQueryLauncher:
                   container.innerHTML = renderRuns(payload.runs || []);
                 }})
                 .catch(function () {{}});
-            }}, 2000);
+            }}, {_SESSION_REFRESH_MS});
           </script>
         """
         elif query_received:
@@ -1912,7 +1917,7 @@ class DashboardQueryLauncher:
                   frame.src = "/artifact?ts=" + Date.now();
                 }})
                 .catch(function () {{}});
-            }}, 3000);
+            }}, {_ARTIFACT_REFRESH_MS});
           </script>
         """
         return f"""<!doctype html>
