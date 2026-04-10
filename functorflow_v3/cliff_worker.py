@@ -25,12 +25,19 @@ def _worker_result_path(run_outdir: Path) -> Path:
     return run_outdir / _WORKER_RESULT_FILENAME
 
 
+def _should_complete_interactive_checkpoint(*, execution_mode: object, route_name: object) -> bool:
+    return (
+        str(execution_mode).strip().lower() == "interactive"
+        and str(route_name).strip() in {"democritus", "company_similarity"}
+    )
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one unconscious CLIFF query worker.")
     parser.add_argument("--query", required=True)
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--cycle-stage", choices=("first_pass", "synthesis_pass"), default="first_pass")
-    parser.add_argument("--execution-mode", choices=("quick", "deep"), default="quick")
+    parser.add_argument("--execution-mode", choices=("quick", "interactive", "deep"), default="quick")
     parser.add_argument("--cliff-defer-final-synthesis", action="store_true")
     parser.add_argument("--route", choices=("auto", "democritus", "basket_rocket_sec", "culinary_tour", "product_feedback", "company_similarity", "course_demo"), default="auto")
     parser.add_argument("--democritus-input-pdf", default="")
@@ -71,6 +78,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--brand-name", default="")
     parser.add_argument("--analysis-question", default="")
     parser.add_argument("--product-discovery-only", action="store_true")
+    parser.add_argument("--company-similarity-year-start", type=int, default=None)
+    parser.add_argument("--company-similarity-year-end", type=int, default=None)
     parser.add_argument("--sec-target-filings", type=int, default=None)
     parser.add_argument("--sec-retrieval-user-agent", default="")
     parser.add_argument("--sec-form", action="append", default=[])
@@ -109,11 +118,19 @@ def main() -> None:
         else:
             result = _build_router_from_args_with_outdir(args, query=args.query, outdir=outdir).run()
             artifact_path = _artifact_path_for_result(result)
+            should_complete_interactive_checkpoint = _should_complete_interactive_checkpoint(
+                execution_mode=args.execution_mode,
+                route_name=result.route_decision.route_name,
+            )
             payload = {
                 "status": (
-                    "phase1_complete"
-                    if args.cliff_defer_final_synthesis and _decision_supports_conscious_redispatch(result.route_decision)
-                    else "complete"
+                    "complete"
+                    if should_complete_interactive_checkpoint
+                    else (
+                        "phase1_complete"
+                        if args.cliff_defer_final_synthesis and _decision_supports_conscious_redispatch(result.route_decision)
+                        else "complete"
+                    )
                 ),
                 "system_name": "CLIFF",
                 "query": args.query,

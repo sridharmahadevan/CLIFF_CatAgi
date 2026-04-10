@@ -473,6 +473,78 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             synthesis_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
             self.assertIn("Climate change effects on species", synthesis_html)
 
+    def test_corpus_synthesis_surfaces_causal_equivalence_classes_separately_from_disagreements(self) -> None:
+        class FakeRunner:
+            def __init__(self, outdir: Path, name: str) -> None:
+                self.outdir = outdir
+                self.name = name
+
+            def _execute_agent(self, agent_name: str, frontier_index: int):
+                triples_path = self.outdir / "relational_triples.jsonl"
+                triples_path.parent.mkdir(parents=True, exist_ok=True)
+                payload_by_name = {
+                    "run_0": (
+                        '{"topic":"red wine polyphenols","path":["red wine polyphenols"],"question":"q","statement":"Moderate red wine consumption increases the intake of polyphenolic compounds such as resveratrol.","subj":"moderate red wine consumption","rel":"increases","obj":"the intake of polyphenolic compounds such as resveratrol","domain":"Moderate red wine consumption"}'
+                    ),
+                    "run_1": (
+                        '{"topic":"red wine polyphenols","path":["red wine polyphenols"],"question":"q","statement":"Moderate red wine consumption leads to the intake of polyphenolic compounds such as resveratrol.","subj":"moderate red wine consumption","rel":"leads_to","obj":"the intake of polyphenolic compounds such as resveratrol","domain":"Moderate red wine consumption"}'
+                    ),
+                }
+                triples_path.write_text(payload_by_name[self.name] + "\n", encoding="utf-8")
+                return DemocritusAgentRecord(
+                    agent_name=agent_name,
+                    frontier_index=frontier_index,
+                    status="ok",
+                    started_at=0.0,
+                    ended_at=1.0,
+                    outputs=(str(triples_path),),
+                    log_path=None,
+                    notes="",
+                )
+
+        class FakeBatchRunner(DemocritusBatchAgenticRunner):
+            def _discover_documents(self):
+                documents = []
+                for index in range(2):
+                    run_name = f"run_{index}"
+                    outdir = Path(self.config.outdir) / run_name
+                    documents.append(
+                        DemocritusBatchDocument(
+                            index=index,
+                            pdf_path=Path(f"/tmp/{run_name}.pdf"),
+                            run_name=run_name,
+                            outdir=outdir,
+                            runner=FakeRunner(outdir, run_name),
+                            plan=((SimpleNamespace(name="triple_extraction_agent"),),),
+                        )
+                    )
+                return tuple(documents)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = FakeBatchRunner(
+                DemocritusBatchConfig(
+                    pdf_dir=Path(tmpdir),
+                    outdir=Path(tmpdir) / "runs",
+                    max_workers=2,
+                    dry_run=False,
+                )
+            )
+            result = runner.run_with_artifacts()
+
+            self.assertIsNotNone(result.corpus_synthesis)
+            synthesis_payload = json.loads(result.corpus_synthesis.summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(synthesis_payload["weakly_supported"]), 1)
+            self.assertEqual(len(synthesis_payload["equivalence_classes"]), 1)
+            self.assertEqual(synthesis_payload["disagreements"], [])
+            equivalence_class = synthesis_payload["equivalence_classes"][0]
+            self.assertEqual(equivalence_class["subj"], "moderate red wine consumption")
+            self.assertEqual(len(equivalence_class["variants"]), 2)
+            synthesis_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
+            self.assertIn("Causal Equivalence Classes", synthesis_html)
+            self.assertIn("Backbone claim:", synthesis_html)
+            self.assertIn("same-direction variant", synthesis_html)
+            self.assertIn("Disagreements", synthesis_html)
+
     def test_incremental_corpus_synthesis_refreshes_only_when_new_triple_documents_arrive(self) -> None:
         class FakeRunner:
             def _execute_agent(self, agent_name: str, frontier_index: int):

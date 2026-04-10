@@ -89,6 +89,261 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         self.assertEqual(state["runs"][0]["execution_mode"], "deep")
         self.assertEqual(state["runs"][0]["parent_run_id"], run_id)
 
+    def test_request_session_run_deepen_accepts_completed_interactive_runs(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Find me 10 studies of minimum wage",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+                enable_execution_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        run_id = launcher.submit_query("Find me 10 studies of minimum wage", execution_mode="interactive")
+        launcher.wait_for_next_submission(timeout=0.01)
+        launcher.update_session_run(
+            run_id,
+            status="complete",
+            route_name="democritus",
+            note="Interactive checkpoint ready.",
+            artifact_path=Path("/tmp/checkpoint.html"),
+            outdir=Path("/tmp/ff2-run-0002"),
+        )
+
+        deep_run_id = launcher.request_session_run_deepen(run_id)
+        followup = launcher.wait_for_next_submission(timeout=0.01)
+
+        self.assertIsNotNone(deep_run_id)
+        self.assertEqual(followup, (deep_run_id, "Find me 10 studies of minimum wage", "deep"))
+
+    def test_request_session_run_deepen_stores_curated_manifest_overrides(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Find me 10 studies of minimum wage",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+                enable_execution_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        run_id = launcher.submit_query("Find me 10 studies of minimum wage", execution_mode="interactive")
+        launcher.wait_for_next_submission(timeout=0.01)
+        launcher.update_session_run(
+            run_id,
+            status="complete",
+            route_name="democritus",
+            note="Interactive checkpoint ready.",
+            artifact_path=Path("/tmp/checkpoint.html"),
+            outdir=Path("/tmp/ff2-run-0002"),
+        )
+
+        deep_run_id = launcher.request_session_run_deepen(
+            run_id,
+            democritus_manifest_path=Path("/tmp/curated_manifest.json"),
+            democritus_target_docs=2,
+        )
+        followup = launcher.wait_for_next_submission(timeout=0.01)
+
+        self.assertEqual(followup, (deep_run_id, "Find me 10 studies of minimum wage", "deep"))
+        self.assertEqual(
+            launcher.submission_overrides_for_run(str(deep_run_id)),
+            {
+                "democritus_manifest": str(Path("/tmp/curated_manifest.json").resolve()),
+                "democritus_target_docs": 2,
+            },
+        )
+
+    def test_render_run_artifact_page_for_democritus_checkpoint_includes_curation_controls(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Ask a question",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+                enable_execution_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            checkpoint_dir = root / "interactive_checkpoint"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            alpha_pdf = root / "alpha.pdf"
+            beta_pdf = root / "beta.pdf"
+            alpha_pdf.write_bytes(b"%PDF-1.4\nalpha\n")
+            beta_pdf.write_bytes(b"%PDF-1.4\nbeta\n")
+            artifact_path = checkpoint_dir / "democritus_topic_checkpoint.html"
+            artifact_path.write_text("<html>placeholder</html>", encoding="utf-8")
+            (checkpoint_dir / "democritus_topic_checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "query": "Find me 10 studies of minimum wage",
+                        "stage_label": "Root Topic Checkpoint",
+                        "summary_text": "Checkpoint ready.",
+                        "documents": [
+                            {
+                                "run_name": "run_1",
+                                "title": "Alpha study of minimum wage policy",
+                                "pdf_path": str(alpha_pdf.resolve()),
+                                "topics": ["minimum wage increases", "employment floor effects"],
+                                "guide_summary": "Alpha summary",
+                                "causal_gestalt": "Alpha gestalt",
+                            },
+                            {
+                                "run_name": "run_2",
+                                "title": "Beta study of household income effects",
+                                "pdf_path": str(beta_pdf.resolve()),
+                                "topics": ["minimum wage increases", "household income effects"],
+                                "guide_summary": "Beta summary",
+                                "causal_gestalt": "Beta gestalt",
+                            },
+                        ],
+                        "top_topics": [{"topic": "minimum wage increases", "document_count": 2}],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            run_id = launcher.submit_query("Find me 10 studies of minimum wage", execution_mode="interactive")
+            launcher.wait_for_next_submission(timeout=0.01)
+            launcher.update_session_run(
+                run_id,
+                status="complete",
+                route_name="democritus",
+                note="Interactive checkpoint ready.",
+                artifact_path=artifact_path,
+                outdir=root,
+            )
+
+            rendered = launcher._render_run_artifact_page(run_id)
+
+        self.assertIn('/checkpoint-action', rendered)
+        self.assertIn('Include in deeper analysis', rendered)
+        self.assertIn('Retrieve more documents', rendered)
+        self.assertIn('Inspect PDF', rendered)
+        self.assertIn('/run-file?run_id=', rendered)
+
+    def test_handle_checkpoint_action_deepen_writes_curated_manifest_and_queues_followup(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Ask a question",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+                enable_execution_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            checkpoint_dir = root / "interactive_checkpoint"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            alpha_pdf = root / "alpha.pdf"
+            beta_pdf = root / "beta.pdf"
+            alpha_pdf.write_bytes(b"%PDF-1.4\nalpha\n")
+            beta_pdf.write_bytes(b"%PDF-1.4\nbeta\n")
+            artifact_path = checkpoint_dir / "democritus_topic_checkpoint.html"
+            artifact_path.write_text("<html>placeholder</html>", encoding="utf-8")
+            (checkpoint_dir / "democritus_topic_checkpoint.json").write_text(
+                json.dumps(
+                    {
+                        "query": "Find me 10 studies of minimum wage",
+                        "stage_label": "Root Topic Checkpoint",
+                        "summary_text": "Checkpoint ready.",
+                        "documents": [
+                            {
+                                "run_name": "run_1",
+                                "title": "Alpha study",
+                                "pdf_path": str(alpha_pdf.resolve()),
+                                "topics": ["minimum wage increases"],
+                                "guide_summary": "Alpha summary",
+                                "causal_gestalt": "Alpha gestalt",
+                            },
+                            {
+                                "run_name": "run_2",
+                                "title": "Beta study",
+                                "pdf_path": str(beta_pdf.resolve()),
+                                "topics": ["household income effects"],
+                                "guide_summary": "Beta summary",
+                                "causal_gestalt": "Beta gestalt",
+                            },
+                        ],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            run_id = launcher.submit_query("Find me 10 studies of minimum wage", execution_mode="interactive")
+            launcher.wait_for_next_submission(timeout=0.01)
+            launcher.update_session_run(
+                run_id,
+                status="complete",
+                route_name="democritus",
+                note="Interactive checkpoint ready.",
+                artifact_path=artifact_path,
+                outdir=root,
+            )
+
+            body, status = launcher._handle_checkpoint_action(
+                run_id=run_id,
+                action_kind="deepen",
+                selected_pdf_paths=(str(alpha_pdf.resolve()),),
+                additional_documents=3,
+                retrieval_refinement="",
+            )
+            followup = launcher.wait_for_next_submission(timeout=0.01)
+
+            self.assertEqual(status, module.HTTPStatus.OK)
+            self.assertIsNotNone(followup)
+            deep_run_id, followup_query, followup_mode = followup
+            self.assertEqual(followup_query, "Find me 10 studies of minimum wage")
+            self.assertEqual(followup_mode, "deep")
+            self.assertIn("Deep Democritus Run Queued", body)
+            overrides = launcher.submission_overrides_for_run(deep_run_id)
+            curated_manifest_path = Path(str(overrides["democritus_manifest"]))
+            payload = json.loads(curated_manifest_path.read_text(encoding="utf-8"))
+            telemetry_log_path = checkpoint_dir / module._DEMOCRITUS_CURATION_TELEMETRY
+            telemetry_summary_path = checkpoint_dir / module._DEMOCRITUS_CURATION_SUMMARY
+            telemetry_events = [
+                json.loads(line)
+                for line in telemetry_log_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            telemetry_summary = json.loads(telemetry_summary_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(overrides["democritus_target_docs"], 1)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["pdf_path"], str(alpha_pdf.resolve()))
+        self.assertEqual(len(telemetry_events), 1)
+        self.assertEqual(telemetry_events[0]["action_kind"], "deepen")
+        self.assertEqual(telemetry_events[0]["action_status"], "queued")
+        self.assertEqual(telemetry_events[0]["selected_count"], 1)
+        self.assertEqual(telemetry_events[0]["rejected_count"], 1)
+        self.assertEqual(telemetry_events[0]["topic_preference_signal"]["minimum wage increases"], 1)
+        self.assertEqual(telemetry_events[0]["topic_preference_signal"]["household income effects"], -1)
+        self.assertEqual(telemetry_summary["event_count"], 1)
+        self.assertEqual(telemetry_summary["action_counts"]["deepen"], 1)
+        self.assertEqual(telemetry_summary["cumulative_topic_preference_signal"]["minimum wage increases"], 1)
+        self.assertEqual(telemetry_summary["cumulative_topic_preference_signal"]["household income effects"], -1)
+
     def test_render_launcher_page_includes_demo_tour_queries(self) -> None:
         launcher = DashboardQueryLauncher(
             DashboardQueryLauncherConfig(

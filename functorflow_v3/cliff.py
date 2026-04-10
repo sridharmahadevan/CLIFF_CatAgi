@@ -116,6 +116,14 @@ def _decision_supports_conscious_redispatch(decision: CLIFFRouteDecision) -> boo
     return decision.route_name in _REDISPATCHABLE_ROUTES
 
 
+def _should_pause_at_interactive_checkpoint(
+    decision: CLIFFRouteDecision,
+    *,
+    execution_mode: object,
+) -> bool:
+    return decision.route_name == "democritus" and str(execution_mode).strip().lower() == "interactive"
+
+
 def _synthesis_artifact_path_for_decision(run_outdir: Path, decision: CLIFFRouteDecision) -> Path | None:
     route_outdir = run_outdir / decision.route_name
     if decision.route_name == "democritus":
@@ -433,19 +441,27 @@ def _monitor_cliff_session_worker(
             artifact_value = str(payload.get("artifact_path") or "").strip()
             artifact_path = Path(artifact_value) if artifact_value else None
             conscious_report = report_to_cliff_consciousness(query, decision, artifact_path=artifact_path)
-            launcher.update_session_run(
-                run_id,
-                status="complete",
-                mind_layer="conscious",
-                route_name=decision.route_name,
-                note=(
+            if _should_pause_at_interactive_checkpoint(decision, execution_mode=getattr(args, "execution_mode", "quick")):
+                note = (
+                    "Democritus completed the interactive checkpoint and brought that result back into CLIFF's "
+                    "conscious layer. Open Result now shows the checkpoint, and Go deeper will launch the deeper "
+                    "causal extraction and corpus synthesis pass."
+                )
+            else:
+                note = (
                     (
                         _cliff_cycle_complete_note(conscious_report)
                         if worker.stage == "synthesis_pass"
                         else _cliff_complete_note(conscious_report)
                     )
                     + " The result is ready in the session list and won't open automatically."
-                ),
+                )
+            launcher.update_session_run(
+                run_id,
+                status="complete",
+                mind_layer="conscious",
+                route_name=decision.route_name,
+                note=note,
                 artifact_path=artifact_path,
                 outdir=worker.run_outdir,
             )
@@ -591,7 +607,11 @@ def _run_cliff_session_query(
             artifact_path=predicted_artifact_path,
             outdir=run_outdir,
         )
-        if _decision_supports_conscious_redispatch(decision):
+        should_redispatch = _decision_supports_conscious_redispatch(decision) and not _should_pause_at_interactive_checkpoint(
+            decision,
+            execution_mode=getattr(args, "execution_mode", "quick"),
+        )
+        if should_redispatch:
             first_pass_args = argparse.Namespace(**vars(args), cliff_defer_final_synthesis=True)
             result = _build_router_from_args_with_outdir(first_pass_args, query=query, outdir=run_outdir).run()
             first_pass_artifact_path = _artifact_path_for_result(result)
@@ -625,7 +645,7 @@ def _run_cliff_session_query(
             note=(
                 (
                     _cliff_cycle_complete_note(conscious_report)
-                    if _decision_supports_conscious_redispatch(decision)
+                    if should_redispatch
                     else _cliff_complete_note(conscious_report)
                 )
                 + " The result is ready in the session list and won't open automatically."
@@ -697,7 +717,7 @@ def _parse_args() -> argparse.Namespace:
         help="Natural-language request for CLIFF. If omitted, CLIFF opens its GUI conscious interface.",
     )
     parser.add_argument("--outdir", required=True)
-    parser.add_argument("--execution-mode", choices=("quick", "deep"), default="quick")
+    parser.add_argument("--execution-mode", choices=("quick", "interactive", "deep"), default="quick")
     parser.add_argument("--route", choices=("auto", "democritus", "basket_rocket_sec", "culinary_tour", "product_feedback", "company_similarity", "course_demo"), default="auto")
     parser.add_argument("--democritus-input-pdf", default="")
     parser.add_argument("--democritus-input-pdf-dir", default="")
@@ -834,9 +854,10 @@ def main() -> None:
                     if submission is None:
                         continue
                     run_id, query, execution_mode = submission
+                    submission_overrides = launcher.submission_overrides_for_run(run_id)
                     _start_cliff_session_query(
                         launcher,
-                        argparse.Namespace(**dict(vars(args), execution_mode=execution_mode)),
+                        argparse.Namespace(**dict(vars(args), execution_mode=execution_mode, **submission_overrides)),
                         run_id=run_id,
                         query=query,
                         active_runs=active_runs,

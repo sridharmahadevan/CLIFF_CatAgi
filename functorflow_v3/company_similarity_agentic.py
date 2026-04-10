@@ -117,6 +117,8 @@ class CompanySimilarityRunResult:
     artifact_path: Path | None
     company_a_manifest_path: Path | None
     company_b_manifest_path: Path | None
+    checkpoint_manifest_path: Path | None = None
+    checkpoint_dashboard_path: Path | None = None
 
 
 def _format_duration(seconds: float) -> str:
@@ -189,32 +191,70 @@ def _company_similarity_current_stage_label(
     return "Warming up"
 
 
-def _company_similarity_mode_profile(execution_mode: str) -> dict[str, int | str]:
-    normalized_mode = "deep" if str(execution_mode).strip().lower() == "deep" else "quick"
+def _normalize_company_similarity_execution_mode(execution_mode: object) -> str:
+    normalized_mode = str(execution_mode).strip().lower()
+    if normalized_mode == "deep":
+        return "deep"
+    if normalized_mode == "interactive":
+        return "interactive"
+    return "quick"
+
+
+def _sanitize_company_similarity_year_window(
+    year_start: int | None,
+    year_end: int | None,
+    *,
+    current_year: int,
+) -> tuple[int, int]:
+    start = int(year_start) if year_start is not None else 2002
+    end = int(year_end) if year_end is not None else current_year
+    start = max(2002, min(start, current_year))
+    end = max(2002, min(end, current_year))
+    if start > end:
+        start, end = end, start
+    return start, end
+
+
+def _company_similarity_mode_profile(
+    execution_mode: str,
+    *,
+    year_start: int | None = None,
+    year_end: int | None = None,
+) -> dict[str, int | str]:
+    normalized_mode = _normalize_company_similarity_execution_mode(execution_mode)
     current_year = time.localtime().tm_year
     if normalized_mode == "deep":
-        return {
+        profile: dict[str, int | str] = {
             "execution_mode": normalized_mode,
-            "year_start": 2002,
-            "year_end": current_year,
             "jobs": 1,
             "llm_jobs": 1,
             "filings_profile": "fast",
             "epochs": 3,
             "batch_size": 4,
         }
-    return {
-        "execution_mode": normalized_mode,
-        "year_start": max(2002, current_year - 2),
-        "year_end": current_year,
-        "jobs": 3,
-        "llm_jobs": 3,
-        "filings_profile": "fast",
-        "epochs": 1,
-        "batch_size": 6,
-        "skip_visualization": 1,
-        "skip_branch_visuals": 1,
-    }
+        default_start = 2002
+        default_end = current_year
+    else:
+        profile = {
+            "execution_mode": normalized_mode,
+            "jobs": 3,
+            "llm_jobs": 3,
+            "filings_profile": "fast",
+            "epochs": 1,
+            "batch_size": 6,
+            "skip_visualization": 1,
+            "skip_branch_visuals": 1,
+        }
+        default_start = max(2002, current_year - 2)
+        default_end = current_year
+    resolved_year_start, resolved_year_end = _sanitize_company_similarity_year_window(
+        year_start if year_start is not None else default_start,
+        year_end if year_end is not None else default_end,
+        current_year=current_year,
+    )
+    profile["year_start"] = resolved_year_start
+    profile["year_end"] = resolved_year_end
+    return profile
 
 
 def looks_like_company_similarity_query(query: str) -> bool:
@@ -436,6 +476,47 @@ def _existing_combined_dir(record: _CompanyRecord) -> Path | None:
     return None
 
 
+def _company_analysis_year_coverage(record: _CompanyRecord) -> tuple[int, int] | None:
+    manifest_path = _manifest_path(record)
+    if manifest_path.exists():
+        payload = _safe_read_json(manifest_path)
+        summary_path_raw = str(payload.get("temporal_summary_path", "")).strip()
+        if summary_path_raw:
+            summary = _safe_read_json(Path(summary_path_raw).expanduser())
+            year_min = summary.get("year_min")
+            year_max = summary.get("year_max")
+            try:
+                if year_min is not None and year_max is not None:
+                    resolved_min = int(year_min)
+                    resolved_max = int(year_max)
+                    if resolved_min <= resolved_max:
+                        return resolved_min, resolved_max
+            except (TypeError, ValueError):
+                pass
+    atlas_years = _atlas_dir_years(_available_yearly_atlas_dirs(record))
+    if atlas_years:
+        return int(min(atlas_years)), int(max(atlas_years))
+    return None
+
+
+def _existing_combined_dir_for_year_window(
+    record: _CompanyRecord,
+    *,
+    year_start: int,
+    year_end: int,
+) -> Path | None:
+    combined_dir = _existing_combined_dir(record)
+    if combined_dir is None:
+        return None
+    coverage = _company_analysis_year_coverage(record)
+    if coverage is None:
+        return combined_dir
+    covered_start, covered_end = coverage
+    if covered_start <= int(year_start) and int(year_end) <= covered_end:
+        return combined_dir
+    return None
+
+
 def _financial_filings_outdir(record: _CompanyRecord) -> Path | None:
     if record.outdir is None:
         return None
@@ -569,8 +650,19 @@ def _ensure_company_analysis(
     workspace_root: Path,
     python_executable: str,
     execution_mode: str,
+    year_start: int | None = None,
+    year_end: int | None = None,
 ) -> tuple[Path, Path | None]:
-    combined_dir = _existing_combined_dir(record)
+    profile = _company_similarity_mode_profile(
+        execution_mode,
+        year_start=year_start,
+        year_end=year_end,
+    )
+    combined_dir = _existing_combined_dir_for_year_window(
+        record,
+        year_start=int(profile["year_start"]),
+        year_end=int(profile["year_end"]),
+    )
     manifest_path = _manifest_path(record)
     if combined_dir is not None:
         return combined_dir, manifest_path if manifest_path.exists() else None
@@ -582,7 +674,6 @@ def _ensure_company_analysis(
             "Add an index URL or EDGAR ticker to the company registry before requesting this comparison."
         )
     existing_filing_manifest = _existing_local_filing_manifest(record)
-    profile = _company_similarity_mode_profile(execution_mode)
     command = [
         python_executable,
         "-m",
@@ -638,6 +729,8 @@ def _ensure_company_analyses(
     workspace_root: Path,
     python_executable: str,
     execution_mode: str,
+    year_start: int | None = None,
+    year_end: int | None = None,
     log: Callable[[str], None] | None = None,
     on_record_complete: Callable[[_CompanyRecord, Path], None] | None = None,
 ) -> dict[str, tuple[Path, Path | None]]:
@@ -654,6 +747,8 @@ def _ensure_company_analyses(
                 workspace_root=workspace_root,
                 python_executable=python_executable,
                 execution_mode=execution_mode,
+                year_start=year_start,
+                year_end=year_end,
             )
             futures[future] = record
         for future in as_completed(futures):
@@ -667,8 +762,27 @@ def _ensure_company_analyses(
     return results
 
 
-def _preflight_company_similarity_backend(records: tuple[_CompanyRecord, ...]) -> None:
-    missing_cached_outputs = [record for record in records if _existing_combined_dir(record) is None]
+def _preflight_company_similarity_backend(
+    records: tuple[_CompanyRecord, ...],
+    *,
+    year_start: int | None = None,
+    year_end: int | None = None,
+) -> None:
+    resolved_start, resolved_end = _sanitize_company_similarity_year_window(
+        year_start,
+        year_end,
+        current_year=time.localtime().tm_year,
+    )
+    missing_cached_outputs = [
+        record
+        for record in records
+        if _existing_combined_dir_for_year_window(
+            record,
+            year_start=resolved_start,
+            year_end=resolved_end,
+        )
+        is None
+    ]
     if not missing_cached_outputs:
         return
     if os.environ.get("OPENAI_API_KEY", "").strip():
@@ -1006,14 +1120,172 @@ def _write_html_report(
     return artifact_path
 
 
+def _render_company_similarity_checkpoint_html(payload: dict[str, object]) -> str:
+    company_a = html.escape(str(payload.get("company_a") or "Company A"))
+    company_b = html.escape(str(payload.get("company_b") or "Company B"))
+    query = html.escape(str(payload.get("query") or "Company similarity interactive checkpoint"))
+    stage_label = html.escape(str(payload.get("stage_label") or "Similarity checkpoint"))
+    overlap_years = list(payload.get("available_overlap_years") or ())
+    suggested = dict(payload.get("suggested_year_window") or {})
+    summary_text = html.escape(str(payload.get("summary_text") or ""))
+    overlap_label = (
+        ", ".join(str(int(year)) for year in overlap_years[:10]) + (" ..." if len(overlap_years) > 10 else "")
+        if overlap_years
+        else "No overlapping years detected yet"
+    )
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Company Similarity Interactive Checkpoint</title>
+    <style>
+      body {{
+        margin: 0;
+        font-family: Georgia, "Iowan Old Style", serif;
+        background: #f7f1e5;
+        color: #1f2320;
+      }}
+      main {{
+        max-width: 900px;
+        margin: 36px auto;
+        padding: 0 18px 40px;
+      }}
+      .card {{
+        background: rgba(255, 252, 246, 0.96);
+        border: 1px solid #d5c8af;
+        border-radius: 24px;
+        padding: 22px;
+        box-shadow: 0 18px 48px rgba(42, 31, 12, 0.10);
+        margin-bottom: 18px;
+      }}
+      .eyebrow {{
+        margin: 0 0 8px 0;
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        font-size: 12px;
+        color: #9a5a12;
+      }}
+      .chip-row {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 14px;
+      }}
+      .chip {{
+        border-radius: 999px;
+        padding: 8px 12px;
+        background: #efe7d9;
+        font-size: 0.92rem;
+        color: #64492b;
+      }}
+      pre {{
+        white-space: pre-wrap;
+        background: #fbf7ef;
+        border: 1px solid #d5c8af;
+        border-radius: 18px;
+        padding: 16px;
+        color: #5d685f;
+        line-height: 1.5;
+      }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="card">
+        <p class="eyebrow">CLIFF Company Similarity</p>
+        <h1>{company_a} vs {company_b}</h1>
+        <p>{query}</p>
+        <p>{stage_label}</p>
+        <div class="chip-row">
+          <span class="chip">Suggested years: {html.escape(str(suggested.get("start") or ""))} to {html.escape(str(suggested.get("end") or ""))}</span>
+          <span class="chip">Overlap: {html.escape(overlap_label)}</span>
+        </div>
+      </section>
+      <section class="card">
+        <p class="eyebrow">Initial Similarity Read</p>
+        <pre>{summary_text or "No provisional summary text is available yet."}</pre>
+      </section>
+    </main>
+  </body>
+</html>
+"""
+
+
+def _build_company_similarity_checkpoint(
+    *,
+    query: str,
+    outdir: Path,
+    plan: CompanySimilarityQueryPlan,
+    record_a: _CompanyRecord,
+    record_b: _CompanyRecord,
+    mode_profile: dict[str, int | str],
+    partial_preview: dict[str, object],
+) -> tuple[Path, Path]:
+    checkpoint_dir = outdir / "interactive_checkpoint"
+    manifest_path = checkpoint_dir / "company_similarity_checkpoint.json"
+    dashboard_path = checkpoint_dir / "company_similarity_checkpoint.html"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    overlap_years = [
+        int(year)
+        for year in list(partial_preview.get("overlap_years") or [])
+        if str(year).strip()
+    ]
+    if not overlap_years:
+        overlap_years = sorted(
+            set(_atlas_dir_years(_available_yearly_atlas_dirs(record_a)))
+            & set(_atlas_dir_years(_available_yearly_atlas_dirs(record_b)))
+        )
+    default_start = int(mode_profile["year_start"])
+    default_end = int(mode_profile["year_end"])
+    suggested_start = min(overlap_years) if overlap_years else default_start
+    suggested_end = max(overlap_years) if overlap_years else default_end
+    summary_path_raw = str(partial_preview.get("summary_path") or "").strip()
+    summary_text = ""
+    if summary_path_raw:
+        try:
+            summary_text = Path(summary_path_raw).expanduser().resolve().read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            summary_text = ""
+    payload = {
+        "query": query,
+        "company_a": plan.company_a,
+        "company_b": plan.company_b,
+        "company_a_slug": plan.company_a_slug,
+        "company_b_slug": plan.company_b_slug,
+        "stage_id": "initial_similarity",
+        "stage_label": "Initial similarity checkpoint",
+        "year_window": {"start": default_start, "end": default_end},
+        "suggested_year_window": {"start": suggested_start, "end": suggested_end},
+        "available_overlap_years": overlap_years,
+        "summary_text": summary_text,
+        "partial_preview": dict(partial_preview),
+        "recommended_next_action": "continue_deeper",
+    }
+    manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    dashboard_path.write_text(_render_company_similarity_checkpoint_html(payload), encoding="utf-8")
+    return manifest_path, dashboard_path
+
+
 class CompanySimilarityAgenticRunner:
     _telemetry_heartbeat_interval_seconds = 2.0
 
-    def __init__(self, query: str, outdir: Path, *, sec_user_agent: str = "", execution_mode: str = "quick") -> None:
+    def __init__(
+        self,
+        query: str,
+        outdir: Path,
+        *,
+        sec_user_agent: str = "",
+        execution_mode: str = "quick",
+        year_start: int | None = None,
+        year_end: int | None = None,
+    ) -> None:
         self.query = " ".join(query.split())
         self.outdir = outdir.resolve()
         self.sec_user_agent = sec_user_agent
-        self.execution_mode = "deep" if str(execution_mode).strip().lower() == "deep" else "quick"
+        self.execution_mode = _normalize_company_similarity_execution_mode(execution_mode)
+        self.year_start = int(year_start) if year_start is not None else None
+        self.year_end = int(year_end) if year_end is not None else None
         if not self.query:
             raise ValueError("A non-empty company similarity query is required.")
 
@@ -1086,11 +1358,14 @@ class CompanySimilarityAgenticRunner:
                     observed_work_seconds / elapsed_seconds,
                 ),
             )
-        current_stage_label = _company_similarity_current_stage_label(
-            active_stages,
-            pending_stages,
-            status=status,
-        )
+        if str(status).lower() == "complete" and not active_stages and pending_stages:
+            current_stage_label = "Checkpoint ready"
+        else:
+            current_stage_label = _company_similarity_current_stage_label(
+                active_stages,
+                pending_stages,
+                status=status,
+            )
         peak_parallelism = max(
             observed_parallelism,
             _company_similarity_peak_parallelism(stage_state, now=now),
@@ -1339,7 +1614,11 @@ class CompanySimilarityAgenticRunner:
         workspace_root = repo_root().parents[0]
         pipeline_python = _select_python_for_brand_pipeline()
         plan = interpret_company_similarity_query(self.query)
-        mode_profile = _company_similarity_mode_profile(self.execution_mode)
+        mode_profile = _company_similarity_mode_profile(
+            self.execution_mode,
+            year_start=self.year_start,
+            year_end=self.year_end,
+        )
         started_at = time.time()
         telemetry_path = self.outdir / "company_similarity_telemetry.json"
         performance_dashboard_path = self.outdir / "company_similarity_performance.html"
@@ -1401,7 +1680,11 @@ class CompanySimilarityAgenticRunner:
             ),
         )
         try:
-            _preflight_company_similarity_backend((record_a, record_b))
+            _preflight_company_similarity_backend(
+                (record_a, record_b),
+                year_start=int(mode_profile["year_start"]),
+                year_end=int(mode_profile["year_end"]),
+            )
             self._log(f"starting parallel company analysis for {record_a.brand} and {record_b.brand}")
             stage_state["company_a_analysis"]["status"] = "active"
             stage_state["company_a_analysis"]["started_at_epoch"] = time.time()
@@ -1424,6 +1707,8 @@ class CompanySimilarityAgenticRunner:
                 workspace_root=workspace_root,
                 python_executable=pipeline_python,
                 execution_mode=self.execution_mode,
+                year_start=int(mode_profile["year_start"]),
+                year_end=int(mode_profile["year_end"]),
                 log=self._log,
                 on_record_complete=lambda record, combined_dir: (
                     stage_state.__setitem__(
@@ -1452,6 +1737,71 @@ class CompanySimilarityAgenticRunner:
             )
             combined_a, manifest_a = analysis_results[record_a.slug]
             combined_b, manifest_b = analysis_results[record_b.slug]
+            self._refresh_partial_similarity_preview(
+                record_a=record_a,
+                record_b=record_b,
+                workspace_root=workspace_root,
+                python_executable=pipeline_python,
+                mode_profile=mode_profile,
+                analysis_dir=analysis_dir,
+                stage_state=stage_state,
+                partial_preview_state=partial_preview_state,
+            )
+            if self.execution_mode == "interactive":
+                heartbeat_state["status"] = "complete"
+                heartbeat_state["note"] = (
+                    "CLIFF paused at the company-similarity checkpoint. Review the initial read and choose the year window before going deeper."
+                )
+                checkpoint_manifest_path, checkpoint_dashboard_path = _build_company_similarity_checkpoint(
+                    query=self.query,
+                    outdir=self.outdir,
+                    plan=plan,
+                    record_a=record_a,
+                    record_b=record_b,
+                    mode_profile=mode_profile,
+                    partial_preview=partial_preview_state,
+                )
+                performance_payload = self._write_telemetry(
+                    telemetry_path=telemetry_path,
+                    performance_dashboard_path=performance_dashboard_path,
+                    plan=plan,
+                    started_at=started_at,
+                    stage_state=stage_state,
+                    status=heartbeat_state["status"],
+                    note=heartbeat_state["note"],
+                    partial_preview=partial_preview_state,
+                )
+                payload = {
+                    "query_plan": asdict(plan),
+                    "execution_mode": self.execution_mode,
+                    "year_window": {
+                        "start": mode_profile["year_start"],
+                        "end": mode_profile["year_end"],
+                    },
+                    "analysis_dir": str(analysis_dir),
+                    "artifact_path": str(checkpoint_dashboard_path),
+                    "checkpoint_manifest_path": str(checkpoint_manifest_path),
+                    "checkpoint_dashboard_path": str(checkpoint_dashboard_path),
+                    "company_a_manifest_path": str(manifest_a) if manifest_a else None,
+                    "company_b_manifest_path": str(manifest_b) if manifest_b else None,
+                    "performance_dashboard_path": str(performance_dashboard_path),
+                    "telemetry_path": str(telemetry_path),
+                    "partial_preview": dict(partial_preview_state),
+                    "performance_timing": dict(performance_payload.get("timing") or {}),
+                }
+                summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                self._log(f"company similarity checkpoint ready: {checkpoint_dashboard_path}")
+                return CompanySimilarityRunResult(
+                    query_plan=plan,
+                    route_outdir=self.outdir,
+                    analysis_dir=analysis_dir,
+                    summary_path=summary_path,
+                    artifact_path=checkpoint_dashboard_path,
+                    company_a_manifest_path=manifest_a,
+                    company_b_manifest_path=manifest_b,
+                    checkpoint_manifest_path=checkpoint_manifest_path,
+                    checkpoint_dashboard_path=checkpoint_dashboard_path,
+                )
             self._log(f"running cross-company functor analysis in {analysis_dir}")
             stage_state["functor_analysis"]["status"] = "active"
             stage_state["functor_analysis"]["started_at_epoch"] = time.time()

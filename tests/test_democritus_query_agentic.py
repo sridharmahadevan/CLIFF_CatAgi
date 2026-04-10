@@ -19,6 +19,7 @@ try:
     from functorflow_v3.democritus_batch_agentic import DemocritusBatchRecord, DemocritusBatchRunResult
     from functorflow_v3.democritus_query_agentic import (
         CrossrefRetrievalBackend,
+        AcquiredCorpusDocument,
         DemocritusEvidenceSnapshot,
         DirectFileRetrievalBackend,
         DirectURLRetrievalBackend,
@@ -40,6 +41,7 @@ except ModuleNotFoundError:
     from ..functorflow_v3.democritus_batch_agentic import DemocritusBatchRecord, DemocritusBatchRunResult
     from ..functorflow_v3.democritus_query_agentic import (
         CrossrefRetrievalBackend,
+        AcquiredCorpusDocument,
         DemocritusEvidenceSnapshot,
         DirectFileRetrievalBackend,
         DirectURLRetrievalBackend,
@@ -129,6 +131,21 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
         self.assertEqual(config.statement_batch_size, 16)
         self.assertEqual(config.statement_max_tokens, 192)
         self.assertEqual(config.intra_document_shards, 1)
+
+    def test_query_config_interactive_mode_keeps_requested_corpus_size_and_pauses_before_deep_stages(self) -> None:
+        config = DemocritusQueryAgenticConfig(
+            query="find me 10 recent studies on minimum wage",
+            outdir=Path("/tmp/democritus-query"),
+            execution_mode="interactive",
+            target_documents=10,
+            max_docs=15,
+        ).resolved()
+
+        self.assertEqual(config.execution_mode, "interactive")
+        self.assertEqual(config.target_documents, 10)
+        self.assertEqual(config.max_docs, 12)
+        self.assertFalse(config.include_phase2)
+        self.assertEqual(config.root_topic_strategy, "summary_guided")
 
     def test_resolve_query_for_main_uses_cli_query_when_present(self) -> None:
         try:
@@ -1881,6 +1898,141 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
             self.assertLessEqual(runner.fake_batch_runner.run_started_at, first_registered_at)
             self.assertLessEqual(first_registered_at, runner.fake_batch_runner.close_called_at)
             self.assertLessEqual(second_registered_at, runner.fake_batch_runner.close_called_at)
+
+    def test_query_runner_interactive_mode_writes_topic_checkpoint_artifact(self) -> None:
+        class FakeInteractiveBatchRunner:
+            def __init__(self, runner: "InteractiveQueryRunner") -> None:
+                self.runner = runner
+                self.documents: list[SimpleNamespace] = []
+                self.closed = threading.Event()
+                self.stop_after_frontier_index: int | None = None
+                self.enable_corpus_synthesis: bool | None = None
+
+            def register_document(self, pdf_path: Path):
+                run_name = f"run_{len(self.documents) + 1}"
+                outdir = self.runner.batch_outdir / run_name
+                configs_dir = outdir / "configs"
+                configs_dir.mkdir(parents=True, exist_ok=True)
+                if "alpha" in pdf_path.name:
+                    topics = "minimum wage increases\nemployment floor effects\n"
+                    guide = {
+                        "summary": "The article focuses on minimum wage policy and labor-market outcomes.",
+                        "causal_gestalt": "Minimum wage changes alter wage floors and can reshape employer responses.",
+                    }
+                else:
+                    topics = "minimum wage increases\nhousehold income effects\n"
+                    guide = {
+                        "summary": "This paper tracks income and labor consequences of wage-floor changes.",
+                        "causal_gestalt": "Raising the wage floor can increase household earnings while shifting employment margins.",
+                    }
+                (configs_dir / "root_topics.txt").write_text(topics, encoding="utf-8")
+                (configs_dir / "document_topic_guide.json").write_text(json.dumps(guide), encoding="utf-8")
+                self.documents.append(
+                    SimpleNamespace(
+                        run_name=run_name,
+                        outdir=outdir,
+                        pdf_path=pdf_path,
+                    )
+                )
+                return None
+
+            def close_document_stream(self) -> None:
+                self.closed.set()
+
+            def _documents_snapshot(self):
+                return tuple(self.documents)
+
+            def run_with_artifacts(self) -> DemocritusBatchRunResult:
+                self.closed.wait(timeout=1.0)
+                return DemocritusBatchRunResult(records=(), csql_bundle=None, corpus_synthesis=None)
+
+        class InteractiveQueryRunner(DemocritusQueryAgenticRunner):
+            def __init__(self, config: DemocritusQueryAgenticConfig) -> None:
+                super().__init__(config)
+                self.fake_batch_runner = FakeInteractiveBatchRunner(self)
+
+            def _run_query_interpretation_agent(self) -> QueryPlan:
+                return QueryPlan(
+                    query=self.config.query,
+                    normalized_query=self.config.query.lower(),
+                    keyword_tokens=("minimum", "wage"),
+                    target_documents=2,
+                )
+
+            def _run_corpus_materialization_agent(self, plan: QueryPlan, on_document_acquired=None):
+                del plan
+                alpha_pdf = self.pdf_dir / "alpha_minimum_wage.pdf"
+                beta_pdf = self.pdf_dir / "beta_minimum_wage.pdf"
+                alpha_pdf.parent.mkdir(parents=True, exist_ok=True)
+                alpha_pdf.write_bytes(b"%PDF-1.4\n")
+                beta_pdf.write_bytes(b"%PDF-1.4\n")
+                acquired = (
+                    AcquiredCorpusDocument(
+                        title="Alpha Minimum Wage Study",
+                        acquired_pdf_path=str(alpha_pdf),
+                        source_path=str(alpha_pdf),
+                        score=9.0,
+                        run_name_hint="alpha",
+                        retrieval_backend="manifest",
+                    ),
+                    AcquiredCorpusDocument(
+                        title="Beta Minimum Wage Study",
+                        acquired_pdf_path=str(beta_pdf),
+                        source_path=str(beta_pdf),
+                        score=8.5,
+                        run_name_hint="beta",
+                        retrieval_backend="manifest",
+                    ),
+                )
+                if on_document_acquired is not None:
+                    for item in acquired:
+                        on_document_acquired(item)
+                selected = tuple(
+                    DiscoveredDocument(
+                        title=item.title,
+                        score=item.score,
+                        retrieval_backend=item.retrieval_backend,
+                        source_path=item.source_path,
+                        document_format="pdf",
+                    )
+                    for item in acquired
+                )
+                return selected, acquired, 1, False, None
+
+            def _build_batch_runner(self, *, streaming: bool):
+                del streaming
+                return self.fake_batch_runner
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "query_run"
+            runner = InteractiveQueryRunner(
+                DemocritusQueryAgenticConfig(
+                    query="Find 10 studies of minimum wage and synthesize what they jointly support",
+                    outdir=outdir,
+                    execution_mode="interactive",
+                    target_documents=2,
+                )
+            )
+
+            result = runner.run()
+
+            self.assertIsNotNone(result.checkpoint_manifest_path)
+            self.assertIsNotNone(result.checkpoint_dashboard_path)
+            self.assertTrue(result.checkpoint_manifest_path.exists())
+            self.assertTrue(result.checkpoint_dashboard_path.exists())
+            self.assertIsNone(result.corpus_synthesis_dashboard_path)
+            payload = json.loads(result.checkpoint_manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["stage_id"], "root_topics")
+            self.assertEqual(payload["n_documents"], 2)
+            self.assertTrue(any(item["topic"] == "minimum wage increases" for item in payload["top_topics"]))
+            checkpoint_html = result.checkpoint_dashboard_path.read_text(encoding="utf-8")
+            alpha_pdf_uri = (outdir / "acquired_pdfs" / "alpha_minimum_wage.pdf").resolve().as_uri()
+            self.assertIn('class="doc-title"', checkpoint_html)
+            self.assertIn("Inspect PDF", checkpoint_html)
+            self.assertIn(alpha_pdf_uri, checkpoint_html)
+            summary = json.loads((outdir / "query_run_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["execution_mode"], "interactive")
+            self.assertEqual(summary["checkpoint_manifest_path"], str(result.checkpoint_manifest_path))
 
     def test_query_runner_stops_after_democlritus_retrieval_state_stabilizes(self) -> None:
         class FakeBatchRunner:

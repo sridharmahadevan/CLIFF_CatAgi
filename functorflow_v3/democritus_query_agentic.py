@@ -14,7 +14,7 @@ import webbrowser
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
-from html import unescape
+from html import escape, unescape
 from pathlib import Path
 from typing import Callable, Protocol
 from urllib.parse import unquote, urlencode, urlparse
@@ -296,6 +296,220 @@ def _read_records(path: Path) -> list[dict[str, object]]:
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _read_topic_lines(path: Path) -> tuple[str, ...]:
+    if not path.exists():
+        return ()
+    lines = [
+        " ".join(line.split()).strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    return tuple(line for line in lines if line)
+
+
+def _read_document_guide(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _path_to_file_uri(path_value: object) -> str:
+    raw = str(path_value or "").strip()
+    if not raw:
+        return ""
+    try:
+        return Path(raw).expanduser().resolve().as_uri()
+    except Exception:
+        return ""
+
+
+def _render_democritus_topic_checkpoint_html(payload: dict[str, object]) -> str:
+    query = escape(str(payload.get("query") or "Democritus interactive checkpoint"))
+    stage_label = escape(str(payload.get("stage_label") or "Topic checkpoint"))
+    summary_text = escape(str(payload.get("summary_text") or ""))
+    n_documents = int(payload.get("n_documents") or 0)
+    top_topics = list(payload.get("top_topics") or [])
+    documents = list(payload.get("documents") or [])
+    topic_chips = "".join(
+        f'<span class="chip">{escape(str(item.get("topic") or ""))} · {escape(str(item.get("document_count") or 0))} docs</span>'
+        for item in top_topics[:16]
+    ) or '<span class="chip">No recurring topics detected yet</span>'
+    document_cards = "".join(
+        (
+            '<article class="doc-card">'
+            f'<div class="doc-meta">{escape(str(item.get("run_name") or ""))}</div>'
+            f'<h3 class="doc-title" title="{escape(str(item.get("title") or ""))}">{escape(str(item.get("title") or ""))}</h3>'
+            + (
+                f'<div class="doc-actions"><a href="{escape(_path_to_file_uri(item.get("pdf_path")))}" target="_blank" rel="noopener">Inspect PDF</a></div>'
+                if _path_to_file_uri(item.get("pdf_path"))
+                else ""
+            )
+            + (
+                f'<p class="guide">{escape(str(item.get("guide_summary") or ""))}</p>'
+                if str(item.get("guide_summary") or "").strip()
+                else ""
+            )
+            + (
+                f'<p class="guide"><strong>Causal gestalt:</strong> {escape(str(item.get("causal_gestalt") or ""))}</p>'
+                if str(item.get("causal_gestalt") or "").strip()
+                else ""
+            )
+            + '<div class="topic-list">'
+            + "".join(f'<span class="topic-pill">{escape(topic)}</span>' for topic in list(item.get("topics") or [])[:12])
+            + "</div>"
+            "</article>"
+        )
+        for item in documents
+    ) or '<div class="empty">Root topics have not been materialized yet.</div>'
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Democritus Interactive Checkpoint</title>
+    <style>
+      :root {{
+        --ink: #18222d;
+        --muted: #5b6874;
+        --paper: #f6f1e8;
+        --card: rgba(255,255,255,0.9);
+        --line: #d7ccb8;
+        --accent: #93451e;
+        --green: #1f6a56;
+      }}
+      * {{ box-sizing: border-box; }}
+      body {{
+        margin: 0;
+        font-family: Georgia, "Iowan Old Style", serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(147,69,30,0.12), transparent 24%),
+          linear-gradient(180deg, #fbf7f0 0%, var(--paper) 100%);
+      }}
+      main {{ width: min(1220px, calc(100vw - 32px)); margin: 32px auto 48px; display: grid; gap: 18px; }}
+      .panel {{ background: var(--card); border: 1px solid var(--line); border-radius: 28px; padding: 24px; box-shadow: 0 24px 60px rgba(30,25,18,0.08); }}
+      .eyebrow {{ margin: 0 0 10px; text-transform: uppercase; letter-spacing: 0.16em; font-size: 12px; color: var(--accent); }}
+      .hero-grid {{ display: grid; gap: 18px; grid-template-columns: 1.4fr 1fr; }}
+      h1, h2, h3, p {{ margin: 0; }}
+      .trace {{ color: var(--muted); line-height: 1.6; }}
+      .chip-row, .topic-list {{ display: flex; flex-wrap: wrap; gap: 10px; min-width: 0; }}
+      .chip, .topic-pill {{ border-radius: 999px; padding: 8px 12px; background: #efe7d9; font-size: 0.92rem; color: #64492b; }}
+      .topic-pill {{ background: #f5efe4; max-width: 100%; overflow-wrap: anywhere; }}
+      .doc-grid {{ display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); }}
+      .doc-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 16px; background: #fffdf9; display: grid; gap: 10px; min-width: 0; align-content: start; overflow: hidden; }}
+      .doc-meta {{ color: var(--muted); font-size: 0.9rem; }}
+      .doc-title {{
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        line-height: 1.25;
+        min-width: 0;
+      }}
+      .doc-actions {{ min-width: 0; }}
+      .guide {{ color: var(--ink); line-height: 1.5; min-width: 0; overflow-wrap: anywhere; }}
+      .callout {{ background: #f8ede0; }}
+      .empty {{ color: var(--muted); line-height: 1.6; }}
+      a {{ color: var(--green); text-decoration: none; font-weight: 700; }}
+      a:hover {{ text-decoration: underline; }}
+      @media (max-width: 920px) {{ .hero-grid {{ grid-template-columns: 1fr; }} }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="panel hero-grid">
+        <div>
+          <p class="eyebrow">Democritus Interactive Mode</p>
+          <h1>{query}</h1>
+          <p class="trace">Democritus paused at the <strong>{stage_label}</strong>. This preview is meant to be inspected before launching the deeper causal extraction and corpus synthesis stages.</p>
+        </div>
+        <div class="panel callout">
+          <p class="eyebrow">Next Step</p>
+          <p class="trace">{summary_text}</p>
+          <p class="trace" style="margin-top:12px;">Use the session list's <strong>Go deeper</strong> button to continue from this checkpoint into claim extraction, manifold scoring, and cross-document synthesis.</p>
+        </div>
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Corpus Topic Atlas</p>
+        <p class="trace">{n_documents} documents reached the root-topic frontier. These recurring themes are the first shared causal surface Democritus recovered.</p>
+        <div class="chip-row" style="margin-top:14px;">{topic_chips}</div>
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Per-Document Topics</p>
+        <div class="doc-grid" style="margin-top:12px;">{document_cards}</div>
+      </section>
+    </main>
+  </body>
+</html>"""
+
+
+def _build_democritus_topic_checkpoint(
+    *,
+    query: str,
+    outdir: Path,
+    batch_runner: DemocritusBatchAgenticRunner,
+) -> tuple[Path, Path]:
+    checkpoint_dir = outdir / "interactive_checkpoint"
+    manifest_path = checkpoint_dir / "democritus_topic_checkpoint.json"
+    dashboard_path = checkpoint_dir / "democritus_topic_checkpoint.html"
+    documents_payload: list[dict[str, object]] = []
+    topic_counter: Counter[str] = Counter()
+    for document in batch_runner._documents_snapshot():
+        topics_path = document.outdir / "configs" / "root_topics.txt"
+        guide_path = document.outdir / "configs" / "document_topic_guide.json"
+        topics = _read_topic_lines(topics_path)
+        guide_payload = _read_document_guide(guide_path)
+        guide_summary = " ".join(str(guide_payload.get("summary") or "").split()).strip()
+        if not guide_summary:
+            guide_summary = " ".join(str(guide_payload.get("raw") or "").split()).strip()
+        causal_gestalt = " ".join(str(guide_payload.get("causal_gestalt") or "").split()).strip()
+        if guide_summary and len(guide_summary) > 280:
+            guide_summary = guide_summary[:277].rstrip() + "..."
+        if causal_gestalt and len(causal_gestalt) > 280:
+            causal_gestalt = causal_gestalt[:277].rstrip() + "..."
+        for topic in topics:
+            topic_counter[topic] += 1
+        documents_payload.append(
+            {
+                "run_name": document.run_name,
+                "title": document.pdf_path.stem.replace("_", " "),
+                "pdf_path": str(document.pdf_path),
+                "topic_count": len(topics),
+                "topics": topics,
+                "guide_summary": guide_summary,
+                "causal_gestalt": causal_gestalt,
+            }
+        )
+    top_topics = [
+        {"topic": topic, "document_count": count}
+        for topic, count in topic_counter.most_common(16)
+    ]
+    recurring = ", ".join(item["topic"] for item in top_topics[:4]) if top_topics else "no recurring topics yet"
+    payload = {
+        "query": query,
+        "stage_id": "root_topics",
+        "stage_label": "Root Topic Checkpoint",
+        "n_documents": len(documents_payload),
+        "top_topics": top_topics,
+        "documents": documents_payload,
+        "summary_text": (
+            "Democritus has finished topic extraction and built an initial corpus topic atlas around "
+            f"{recurring}. If the article set looks right, continue deeper to causal question generation, "
+            "statement extraction, and cross-document synthesis."
+        ),
+        "recommended_next_action": "continue_deeper",
+    }
+    _write_json(manifest_path, payload)
+    dashboard_path.parent.mkdir(parents=True, exist_ok=True)
+    dashboard_path.write_text(_render_democritus_topic_checkpoint_html(payload), encoding="utf-8")
+    return manifest_path, dashboard_path
 
 
 def _looks_like_pdf(url: str) -> bool:
@@ -1011,7 +1225,13 @@ class DemocritusQueryAgenticConfig:
     sec_company_limit: int = 3
 
     def resolved(self) -> "DemocritusQueryAgenticConfig":
-        execution_mode = "deep" if str(self.execution_mode).strip().lower() == "deep" else "quick"
+        normalized_mode = str(self.execution_mode).strip().lower()
+        if normalized_mode == "deep":
+            execution_mode = "deep"
+        elif normalized_mode == "interactive":
+            execution_mode = "interactive"
+        else:
+            execution_mode = "quick"
         target_documents = max(1, int(self.target_documents))
         if execution_mode == "quick":
             target_documents = min(target_documents, 3)
@@ -1019,6 +1239,9 @@ class DemocritusQueryAgenticConfig:
         if execution_mode == "quick":
             quick_max_docs = target_documents + 2
             max_docs = min(max_docs, quick_max_docs) if max_docs > 0 else quick_max_docs
+        elif execution_mode == "interactive":
+            interactive_max_docs = target_documents + 2
+            max_docs = min(max_docs, interactive_max_docs) if max_docs > 0 else interactive_max_docs
         depth_limit = max(1, int(self.depth_limit))
         max_total_topics = max(10, int(self.max_total_topics))
         statements_per_question = max(1, int(self.statements_per_question))
@@ -1043,6 +1266,9 @@ class DemocritusQueryAgenticConfig:
             statement_batch_size = max(statement_batch_size, 32)
             statement_max_tokens = min(statement_max_tokens, 72)
             intra_document_shards = max(2, intra_document_shards)
+        include_phase2 = self.include_phase2
+        if execution_mode in {"quick", "interactive"}:
+            include_phase2 = False
         return DemocritusQueryAgenticConfig(
             query=self.query.strip(),
             outdir=self.outdir.resolve(),
@@ -1063,7 +1289,7 @@ class DemocritusQueryAgenticConfig:
             consensus_required_stable_passes=self.consensus_required_stable_passes,
             max_workers=self.max_workers,
             agent_concurrency_limits=tuple(self.agent_concurrency_limits),
-            include_phase2=(False if execution_mode == "quick" else self.include_phase2),
+            include_phase2=include_phase2,
             auto_topics_from_pdf=self.auto_topics_from_pdf,
             root_topic_strategy=root_topic_strategy,
             depth_limit=depth_limit,
@@ -1118,6 +1344,8 @@ class DemocritusQueryRunResult:
     csql_summary_path: Path | None = None
     corpus_synthesis_summary_path: Path | None = None
     corpus_synthesis_dashboard_path: Path | None = None
+    checkpoint_manifest_path: Path | None = None
+    checkpoint_dashboard_path: Path | None = None
 
 
 class RetrievalBackend(Protocol):
@@ -1748,6 +1976,8 @@ class DemocritusQueryAgenticRunner:
         self.config.outdir.mkdir(parents=True, exist_ok=True)
         batch_runner: DemocritusBatchAgenticRunner | None = None
         batch_result: DemocritusBatchRunResult | None = None
+        checkpoint_manifest_path: Path | None = None
+        checkpoint_dashboard_path: Path | None = None
         if not self.config.discovery_only and not self.config.dry_run:
             batch_runner = self._build_batch_runner(streaming=True)
         selected_documents: tuple[DiscoveredDocument, ...] = ()
@@ -1795,6 +2025,12 @@ class DemocritusQueryAgenticRunner:
         batch_records: tuple[DemocritusBatchRecord, ...] = ()
         if batch_result is not None:
             batch_records = batch_result.records
+        if self.config.execution_mode == "interactive" and batch_runner is not None:
+            checkpoint_manifest_path, checkpoint_dashboard_path = _build_democritus_topic_checkpoint(
+                query=plan.query,
+                outdir=self.config.outdir,
+                batch_runner=batch_runner,
+            )
         result = DemocritusQueryRunResult(
             query_plan=plan,
             selected_documents=selected_documents,
@@ -1818,6 +2054,8 @@ class DemocritusQueryAgenticRunner:
                 if batch_result and batch_result.corpus_synthesis
                 else None
             ),
+            checkpoint_manifest_path=checkpoint_manifest_path,
+            checkpoint_dashboard_path=checkpoint_dashboard_path,
         )
         _write_json(
             self.summary_path,
@@ -1844,6 +2082,16 @@ class DemocritusQueryAgenticRunner:
                 "corpus_synthesis_dashboard_path": (
                     str(result.corpus_synthesis_dashboard_path)
                     if result.corpus_synthesis_dashboard_path
+                    else None
+                ),
+                "checkpoint_manifest_path": (
+                    str(result.checkpoint_manifest_path)
+                    if result.checkpoint_manifest_path
+                    else None
+                ),
+                "checkpoint_dashboard_path": (
+                    str(result.checkpoint_dashboard_path)
+                    if result.checkpoint_dashboard_path
                     else None
                 ),
             },
@@ -1888,7 +2136,10 @@ class DemocritusQueryAgenticRunner:
                 write_deep_dive=self.config.write_deep_dive,
                 deep_dive_max_bullets=self.config.deep_dive_max_bullets,
                 intra_document_shards=self.config.intra_document_shards,
-                enable_corpus_synthesis=self.config.enable_corpus_synthesis,
+                enable_corpus_synthesis=(
+                    False if self.config.execution_mode == "interactive" else self.config.enable_corpus_synthesis
+                ),
+                stop_after_frontier_index=(1 if self.config.execution_mode == "interactive" else None),
                 discover_existing_documents=not streaming,
                 allow_incremental_admission=streaming,
                 dry_run=self.config.dry_run,
@@ -3291,7 +3542,7 @@ def main() -> None:
         )
     )
     result = runner.run()
-    artifact_path = result.corpus_synthesis_dashboard_path
+    artifact_path = result.checkpoint_dashboard_path or result.corpus_synthesis_dashboard_path
     if artifact_path is None or not artifact_path.exists():
         gui_path = result.batch_outdir / "democritus_gui.html"
         artifact_path = gui_path if gui_path.exists() else result.batch_outdir / "dashboard.html"
@@ -3310,6 +3561,11 @@ def main() -> None:
                 "corpus_synthesis_dashboard_path": (
                     str(result.corpus_synthesis_dashboard_path)
                     if result.corpus_synthesis_dashboard_path
+                    else None
+                ),
+                "checkpoint_dashboard_path": (
+                    str(result.checkpoint_dashboard_path)
+                    if result.checkpoint_dashboard_path
                     else None
                 ),
             },

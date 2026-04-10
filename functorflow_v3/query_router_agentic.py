@@ -174,6 +174,8 @@ class FF2QueryRouterConfig:
     product_discovery_only: bool = False
     sec_target_filings: int = 10
     sec_retrieval_user_agent: str = ""
+    company_similarity_year_start: int | None = None
+    company_similarity_year_end: int | None = None
     sec_form_types: tuple[str, ...] = ("10-K", "10-Q")
     sec_company_limit: int = 3
     sec_discovery_only: bool = False
@@ -184,10 +186,15 @@ class FF2QueryRouterConfig:
     course_execution_timeout_sec: int = 900
 
     def resolved(self) -> "FF2QueryRouterConfig":
+        normalized_mode = str(self.execution_mode).strip().lower()
         return FF2QueryRouterConfig(
             query=" ".join(self.query.split()),
             outdir=self.outdir.resolve(),
-            execution_mode="deep" if str(self.execution_mode).strip().lower() == "deep" else "quick",
+            execution_mode=(
+                "deep"
+                if normalized_mode == "deep"
+                else ("interactive" if normalized_mode == "interactive" else "quick")
+            ),
             route_override=self.route_override,
             democritus_input_pdf_path=self.democritus_input_pdf_path.resolve() if self.democritus_input_pdf_path else None,
             democritus_input_pdf_dir=self.democritus_input_pdf_dir.resolve() if self.democritus_input_pdf_dir else None,
@@ -230,6 +237,16 @@ class FF2QueryRouterConfig:
             product_discovery_only=self.product_discovery_only,
             sec_target_filings=self.sec_target_filings,
             sec_retrieval_user_agent=" ".join(str(self.sec_retrieval_user_agent).split()).strip(),
+            company_similarity_year_start=(
+                int(self.company_similarity_year_start)
+                if self.company_similarity_year_start is not None
+                else None
+            ),
+            company_similarity_year_end=(
+                int(self.company_similarity_year_end)
+                if self.company_similarity_year_end is not None
+                else None
+            ),
             sec_form_types=tuple(self.sec_form_types),
             sec_company_limit=self.sec_company_limit,
             sec_discovery_only=self.sec_discovery_only,
@@ -492,6 +509,8 @@ class FF2QueryRouter:
             route_outdir,
             sec_user_agent=self.config.sec_retrieval_user_agent,
             execution_mode=self.config.execution_mode,
+            year_start=self.config.company_similarity_year_start,
+            year_end=self.config.company_similarity_year_end,
         ).run()
         return FF2QueryRouterRunResult(
             route_decision=decision,
@@ -579,6 +598,9 @@ def _artifact_path_for_result(result: FF2QueryRouterRunResult) -> Path | None:
     if result.course_demo_result:
         return result.course_demo_result.dashboard_path
     if result.democritus_result:
+        checkpoint_candidate = result.democritus_result.checkpoint_dashboard_path
+        if checkpoint_candidate and checkpoint_candidate.exists():
+            return checkpoint_candidate
         corpus_candidate = result.democritus_result.corpus_synthesis_dashboard_path
         if corpus_candidate and corpus_candidate.exists():
             return corpus_candidate
@@ -863,6 +885,8 @@ def _build_router_from_args_with_outdir(
             product_discovery_only=args.product_discovery_only,
             sec_target_filings=sec_target_filings,
             sec_retrieval_user_agent=args.sec_retrieval_user_agent,
+            company_similarity_year_start=getattr(args, "company_similarity_year_start", None),
+            company_similarity_year_end=getattr(args, "company_similarity_year_end", None),
             sec_form_types=tuple(args.sec_form) if args.sec_form else ("10-K", "10-Q"),
             sec_company_limit=args.sec_company_limit,
             sec_discovery_only=args.sec_discovery_only,
@@ -984,7 +1008,7 @@ def _parse_args() -> argparse.Namespace:
         help="Natural-language FF2 request. If omitted, a local dashboard will open to collect it.",
     )
     parser.add_argument("--outdir", required=True)
-    parser.add_argument("--execution-mode", choices=("quick", "deep"), default="quick")
+    parser.add_argument("--execution-mode", choices=("quick", "interactive", "deep"), default="quick")
     parser.add_argument("--route", choices=("auto", "democritus", "basket_rocket_sec", "culinary_tour", "product_feedback", "company_similarity", "course_demo"), default="auto")
     parser.add_argument("--democritus-manifest", default="")
     parser.add_argument("--democritus-source-pdf-root", default="")
@@ -1002,6 +1026,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--brand-name", default="")
     parser.add_argument("--analysis-question", default="")
     parser.add_argument("--product-discovery-only", action="store_true")
+    parser.add_argument("--company-similarity-year-start", type=int, default=None)
+    parser.add_argument("--company-similarity-year-end", type=int, default=None)
     parser.add_argument("--sec-target-filings", type=int, default=None)
     parser.add_argument(
         "--sec-retrieval-user-agent",

@@ -12,9 +12,11 @@ from unittest.mock import patch
 
 try:
     from functorflow_v3 import cliff as module
+    from functorflow_v3 import cliff_worker as worker_module
     from functorflow_v3.product_feedback_query_agentic import ProductFeedbackQueryRunResult, ReviewQueryPlan
 except ModuleNotFoundError:
     from ..functorflow_v3 import cliff as module
+    from ..functorflow_v3 import cliff_worker as worker_module
     from ..functorflow_v3.product_feedback_query_agentic import ProductFeedbackQueryRunResult, ReviewQueryPlan
 
 
@@ -265,6 +267,78 @@ class CLIFFTests(unittest.TestCase):
         self.assertIn("second synthesis pass", launcher.updates[-1]["note"])
         open_artifact.assert_not_called()
 
+    def test_run_cliff_session_query_keeps_interactive_democritus_at_checkpoint(self) -> None:
+        class FakeLauncher:
+            def __init__(self) -> None:
+                self.updates: list[dict[str, object]] = []
+
+            def update_session_run(self, run_id: str, **kwargs) -> None:
+                payload = {"run_id": run_id}
+                payload.update(kwargs)
+                self.updates.append(payload)
+
+        checkpoint_path = Path("/tmp/democritus-interactive-checkpoint.html")
+        checkpoint_path.write_text("<html>checkpoint</html>", encoding="utf-8")
+        self.addCleanup(lambda: checkpoint_path.unlink(missing_ok=True))
+        launcher = FakeLauncher()
+        args = SimpleNamespace(
+            outdir="/tmp/cliff",
+            route="auto",
+            execution_mode="interactive",
+            democritus_manifest="",
+            democritus_source_pdf_root="",
+            democritus_target_docs=None,
+            democritus_retrieval_backend="auto",
+            democritus_max_docs=None,
+            democritus_intra_document_shards=1,
+            democritus_discovery_only=False,
+            democritus_dry_run=False,
+            product_manifest="",
+            culinary_manifest="",
+            product_target_docs=None,
+            product_max_docs=None,
+            product_name="",
+            brand_name="",
+            analysis_question="",
+            product_discovery_only=False,
+            sec_target_filings=None,
+            sec_retrieval_user_agent="",
+            sec_form=[],
+            sec_company_limit=3,
+            sec_discovery_only=False,
+            sec_dry_run=False,
+        )
+
+        fake_result = module.CLIFFRouterRunResult(
+            route_decision=module.CLIFFRouteDecision(
+                route_name="democritus",
+                module_name="functorflow_v3.democritus_query_agentic",
+                rationale="test",
+            ),
+            route_outdir=Path("/tmp/cliff-run") / "democritus",
+            summary_path=Path("/tmp/cliff-run") / "ff2_query_router_summary.json",
+            democritus_result=SimpleNamespace(
+                checkpoint_dashboard_path=checkpoint_path,
+                corpus_synthesis_dashboard_path=None,
+                batch_outdir=Path("/tmp/cliff-run") / "democritus" / "democritus_runs",
+            ),
+        )
+
+        with patch.object(module, "_build_router_from_args_with_outdir") as build_router:
+            with patch.object(module, "_build_cliff_synthesis_from_first_pass") as build_synthesis:
+                build_router.return_value = SimpleNamespace(run=lambda: fake_result)
+                module._run_cliff_session_query(
+                    launcher,
+                    args,
+                    run_id="run-0007",
+                    query="Analyze 10 recent studies of minimum wage and synthesize their joint support",
+                )
+
+        self.assertEqual(launcher.updates[-1]["status"], "complete")
+        self.assertEqual(launcher.updates[-1]["artifact_path"], checkpoint_path)
+        self.assertNotIn("second synthesis pass", launcher.updates[-1]["note"])
+        build_synthesis.assert_not_called()
+
     def test_monitor_cliff_session_worker_re_dispatches_after_first_pass(self) -> None:
         class FakeLauncher:
             def __init__(self) -> None:
@@ -497,6 +571,96 @@ class CLIFFTests(unittest.TestCase):
                     worker.stderr_handle.close()
 
         self.assertEqual(captured["kwargs"]["env"]["PYTHONUNBUFFERED"], "1")
+
+    def test_cliff_worker_completes_interactive_democritus_checkpoint_without_phase2_status(self) -> None:
+        checkpoint_path = Path("/tmp/democritus_topic_checkpoint.html")
+        checkpoint_path.write_text("<html>checkpoint</html>", encoding="utf-8")
+        self.addCleanup(lambda: checkpoint_path.unlink(missing_ok=True))
+
+        args = SimpleNamespace(
+            query="Analyze 10 recent studies of minimum wage and synthesize their joint support",
+            outdir="/tmp/cliff-worker-interactive",
+            cycle_stage="first_pass",
+            execution_mode="interactive",
+            cliff_defer_final_synthesis=True,
+            route="auto",
+            democritus_input_pdf="",
+            democritus_input_pdf_dir="",
+            democritus_manifest="",
+            democritus_source_pdf_root="",
+            democritus_target_docs=None,
+            democritus_retrieval_backend="auto",
+            democritus_max_docs=None,
+            democritus_intra_document_shards=1,
+            democritus_manifold_mode="full",
+            democritus_topk=200,
+            democritus_radii="1,2,3",
+            democritus_maxnodes="10,20,30,40,60",
+            democritus_lambda_edge=0.25,
+            democritus_topk_models=5,
+            democritus_topk_claims=30,
+            democritus_alpha=1.0,
+            democritus_tier1=0.60,
+            democritus_tier2=0.30,
+            democritus_anchors="",
+            democritus_title="",
+            democritus_dedupe_focus=False,
+            democritus_require_anchor_in_focus=False,
+            democritus_focus_blacklist_regex="",
+            democritus_render_topk_pngs=False,
+            democritus_assets_dir="assets",
+            democritus_png_dpi=200,
+            democritus_write_deep_dive=False,
+            democritus_deep_dive_max_bullets=8,
+            democritus_discovery_only=False,
+            democritus_dry_run=False,
+            product_manifest="",
+            culinary_manifest="",
+            product_target_docs=None,
+            product_max_docs=None,
+            product_name="",
+            brand_name="",
+            analysis_question="",
+            product_discovery_only=False,
+            sec_target_filings=None,
+            sec_retrieval_user_agent="",
+            sec_form=[],
+            sec_company_limit=3,
+            sec_discovery_only=False,
+            sec_dry_run=False,
+            course_repo_root="",
+            course_book_pdf_path="",
+            course_no_execute=False,
+            course_timeout_sec=900,
+        )
+
+        fake_result = module.CLIFFRouterRunResult(
+            route_decision=module.CLIFFRouteDecision(
+                route_name="democritus",
+                module_name="functorflow_v3.democritus_query_agentic",
+                rationale="test",
+            ),
+            route_outdir=Path("/tmp/cliff-worker-interactive") / "democritus",
+            summary_path=Path("/tmp/cliff-worker-interactive") / "ff2_query_router_summary.json",
+            democritus_result=SimpleNamespace(
+                checkpoint_dashboard_path=checkpoint_path,
+                corpus_synthesis_dashboard_path=None,
+                batch_outdir=Path("/tmp/cliff-worker-interactive") / "democritus" / "democritus_runs",
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir)
+            args.outdir = str(outdir)
+            with patch.object(worker_module, "_parse_args", return_value=args):
+                with patch.object(worker_module, "route_cliff_query", return_value=fake_result.route_decision):
+                    with patch.object(worker_module, "_build_router_from_args_with_outdir", return_value=SimpleNamespace(run=lambda: fake_result)):
+                        worker_module.main()
+
+            payload = json.loads((outdir / module._WORKER_RESULT_FILENAME).read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["status"], "complete")
+        self.assertEqual(payload["artifact_path"], str(checkpoint_path))
 
 
 if __name__ == "__main__":

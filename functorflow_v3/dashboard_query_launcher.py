@@ -10,7 +10,7 @@ import re
 import threading
 import time
 import webbrowser
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +22,12 @@ _ARTIFACT_REFRESH_SECONDS = 15
 _ARTIFACT_REFRESH_MS = _ARTIFACT_REFRESH_SECONDS * 1000
 _SESSION_REFRESH_SECONDS = 5
 _SESSION_REFRESH_MS = _SESSION_REFRESH_SECONDS * 1000
+_DEMOCRITUS_CHECKPOINT_HTML = "democritus_topic_checkpoint.html"
+_DEMOCRITUS_CHECKPOINT_MANIFEST = "democritus_topic_checkpoint.json"
+_DEMOCRITUS_CURATION_STATE = "user_curation.json"
+_DEMOCRITUS_CURATED_MANIFEST = "selected_documents_manifest.json"
+_DEMOCRITUS_CURATION_TELEMETRY = "user_curation_telemetry.jsonl"
+_DEMOCRITUS_CURATION_SUMMARY = "user_curation_summary.json"
 
 
 @dataclass(frozen=True)
@@ -61,7 +67,7 @@ class DashboardQueryLauncher:
         self._query_received = False
         self._artifact_path = config.artifact_path
         self._submission_counter = 0
-        self._submission_queue: deque[tuple[str, str]] = deque()
+        self._submission_queue: deque[tuple[str, str, str]] = deque()
         self._session_runs: list[dict[str, object]] = []
         self._session_runs_by_id: dict[str, dict[str, object]] = {}
         self._server: ThreadingHTTPServer | None = None
@@ -91,7 +97,12 @@ class DashboardQueryLauncher:
 
     @staticmethod
     def _normalize_execution_mode(value: object) -> str:
-        return "deep" if str(value or "").strip().lower() == "deep" else "quick"
+        normalized = str(value or "").strip().lower()
+        if normalized == "deep":
+            return "deep"
+        if normalized == "interactive":
+            return "interactive"
+        return "quick"
 
     @staticmethod
     def _route_research_profile(route_name: object) -> dict[str, str]:
@@ -155,7 +166,15 @@ class DashboardQueryLauncher:
         with self._lock:
             self._artifact_path = artifact_path
 
-    def submit_query(self, query: str, *, execution_mode: str | None = None, parent_run_id: str | None = None) -> str:
+    def submit_query(
+        self,
+        query: str,
+        *,
+        execution_mode: str | None = None,
+        parent_run_id: str | None = None,
+        submission_overrides: dict[str, object] | None = None,
+        queued_note: str | None = None,
+    ) -> str:
         normalized_query = " ".join(str(query).split()).strip()
         if not normalized_query:
             raise ValueError("Query must be non-empty.")
@@ -186,13 +205,25 @@ class DashboardQueryLauncher:
                 "updated_at": time.time(),
             }
             if parent_run_id:
-                run_state["note"] = f"Queued as a deep follow-up to {parent_run_id}."
+                run_state["note"] = queued_note or f"Queued as a follow-up to {parent_run_id}."
+            elif queued_note:
+                run_state["note"] = queued_note
+            if submission_overrides:
+                run_state["submission_overrides"] = dict(submission_overrides)
             self._submission_queue.append((run_id, normalized_query, normalized_mode))
             self._session_runs.insert(0, run_state)
             self._session_runs_by_id[run_id] = run_state
             self._query_received = True
             self._submitted_event.set()
             return run_id
+
+    def submission_overrides_for_run(self, run_id: str) -> dict[str, object]:
+        with self._lock:
+            run_state = self._session_runs_by_id.get(run_id)
+            if run_state is None:
+                return {}
+            overrides = run_state.get("submission_overrides")
+            return dict(overrides) if isinstance(overrides, dict) else {}
 
     def update_session_run(
         self,
@@ -223,21 +254,775 @@ class DashboardQueryLauncher:
                 run_state["outdir"] = str(outdir)
             run_state["updated_at"] = time.time()
 
-    def request_session_run_deepen(self, run_id: str) -> str | None:
+    def request_session_run_deepen(
+        self,
+        run_id: str,
+        *,
+        query_override: str | None = None,
+        democritus_manifest_path: Path | None = None,
+        democritus_target_docs: int | None = None,
+    ) -> str | None:
         with self._lock:
             run_state = self._session_runs_by_id.get(run_id)
             if run_state is None or not self.config.session_mode or not self.config.enable_execution_mode:
                 return None
             if str(run_state.get("status") or "") != "complete":
                 return None
-            if self._normalize_execution_mode(run_state.get("execution_mode")) != "quick":
+            if self._normalize_execution_mode(run_state.get("execution_mode")) not in {"quick", "interactive"}:
                 return None
             if str(run_state.get("route_name") or "") not in {"democritus", "company_similarity"}:
                 return None
-            query = str(run_state.get("query") or "").strip()
+            query = " ".join(str(query_override or run_state.get("query") or "").split()).strip()
         if not query:
             return None
-        return self.submit_query(query, execution_mode="deep", parent_run_id=run_id)
+        submission_overrides: dict[str, object] = {}
+        if democritus_manifest_path is not None:
+            submission_overrides["democritus_manifest"] = str(democritus_manifest_path.resolve())
+        if democritus_target_docs is not None:
+            submission_overrides["democritus_target_docs"] = max(1, int(democritus_target_docs))
+        queued_note = (
+            f"Queued as a deep follow-up to {run_id}."
+            if not submission_overrides
+            else f"Queued as a deep follow-up to {run_id} using the curated checkpoint selection."
+        )
+        return self.submit_query(
+            query,
+            execution_mode="deep",
+            parent_run_id=run_id,
+            submission_overrides=submission_overrides or None,
+            queued_note=queued_note,
+        )
+
+    def request_session_run_retrieve_more(
+        self,
+        run_id: str,
+        *,
+        query_override: str | None = None,
+        democritus_target_docs: int,
+    ) -> str | None:
+        with self._lock:
+            run_state = self._session_runs_by_id.get(run_id)
+            if run_state is None or not self.config.session_mode or not self.config.enable_execution_mode:
+                return None
+            route_name = str(run_state.get("route_name") or "")
+            if route_name != "democritus":
+                return None
+            query = " ".join(str(query_override or run_state.get("query") or "").split()).strip()
+        if not query:
+            return None
+        return self.submit_query(
+            query,
+            execution_mode="interactive",
+            parent_run_id=run_id,
+            submission_overrides={"democritus_target_docs": max(1, int(democritus_target_docs))},
+            queued_note=f"Queued to retrieve more Democritus evidence after {run_id}.",
+        )
+
+    @staticmethod
+    def _checkpoint_manifest_for_html(artifact_path: Path) -> Path | None:
+        if artifact_path.name != _DEMOCRITUS_CHECKPOINT_HTML:
+            return None
+        manifest_path = artifact_path.with_name(_DEMOCRITUS_CHECKPOINT_MANIFEST)
+        return manifest_path if manifest_path.exists() else None
+
+    @staticmethod
+    def _read_json_dict(path: Path) -> dict[str, object]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _write_json_file(path: Path, payload: object) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _load_democritus_checkpoint_payload(self, artifact_path: Path) -> dict[str, object]:
+        manifest_path = self._checkpoint_manifest_for_html(artifact_path)
+        if manifest_path is None:
+            return {}
+        payload = self._read_json_dict(manifest_path)
+        payload["_manifest_path"] = str(manifest_path)
+        return payload
+
+    def _default_selected_checkpoint_paths(self, payload: dict[str, object]) -> tuple[str, ...]:
+        selected: list[str] = []
+        for item in list(payload.get("documents") or []):
+            pdf_path = " ".join(str(dict(item).get("pdf_path") or "").split()).strip()
+            if pdf_path:
+                selected.append(pdf_path)
+        return tuple(dict.fromkeys(selected))
+
+    def _checkpoint_curation_path(self, payload: dict[str, object]) -> Path | None:
+        manifest_path_raw = str(payload.get("_manifest_path") or "").strip()
+        if not manifest_path_raw:
+            return None
+        return Path(manifest_path_raw).resolve().with_name(_DEMOCRITUS_CURATION_STATE)
+
+    def _load_democritus_checkpoint_curation(self, payload: dict[str, object]) -> dict[str, object]:
+        curation_path = self._checkpoint_curation_path(payload)
+        selected_defaults = self._default_selected_checkpoint_paths(payload)
+        if curation_path is None or not curation_path.exists():
+            return {
+                "selected_pdf_paths": list(selected_defaults),
+                "retrieval_refinement": "",
+            }
+        curation = self._read_json_dict(curation_path)
+        selected_paths = [
+            " ".join(str(value).split()).strip()
+            for value in list(curation.get("selected_pdf_paths") or [])
+            if " ".join(str(value).split()).strip()
+        ]
+        if "selected_pdf_paths" not in curation:
+            selected_paths = list(selected_defaults)
+        return {
+            "selected_pdf_paths": list(dict.fromkeys(selected_paths)),
+            "retrieval_refinement": " ".join(str(curation.get("retrieval_refinement") or "").split()).strip(),
+        }
+
+    def _save_democritus_checkpoint_curation(
+        self,
+        payload: dict[str, object],
+        *,
+        selected_pdf_paths: tuple[str, ...],
+        retrieval_refinement: str = "",
+    ) -> Path | None:
+        curation_path = self._checkpoint_curation_path(payload)
+        if curation_path is None:
+            return None
+        self._write_json_file(
+            curation_path,
+            {
+                "selected_pdf_paths": list(selected_pdf_paths),
+                "retrieval_refinement": retrieval_refinement,
+                "updated_at": time.time(),
+            },
+        )
+        return curation_path
+
+    def _write_democritus_curated_manifest(
+        self,
+        payload: dict[str, object],
+        *,
+        selected_pdf_paths: tuple[str, ...],
+    ) -> Path | None:
+        manifest_path_raw = str(payload.get("_manifest_path") or "").strip()
+        if not manifest_path_raw:
+            return None
+        selected_lookup = {item for item in selected_pdf_paths if item}
+        rows: list[dict[str, object]] = []
+        for item in list(payload.get("documents") or []):
+            record = dict(item)
+            pdf_path = " ".join(str(record.get("pdf_path") or "").split()).strip()
+            if not pdf_path or pdf_path not in selected_lookup:
+                continue
+            summary = " ".join(
+                str(value).strip()
+                for value in (
+                    record.get("guide_summary"),
+                    record.get("causal_gestalt"),
+                )
+                if str(value or "").strip()
+            ).strip()
+            rows.append(
+                {
+                    "id": str(record.get("run_name") or Path(pdf_path).stem),
+                    "title": str(record.get("title") or Path(pdf_path).stem),
+                    "summary": summary,
+                    "abstract": summary,
+                    "keywords": ", ".join(str(topic) for topic in list(record.get("topics") or [])),
+                    "pdf_path": pdf_path,
+                    "source_path": pdf_path,
+                    "document_format": "pdf",
+                }
+            )
+        target_path = Path(manifest_path_raw).resolve().with_name(_DEMOCRITUS_CURATED_MANIFEST)
+        self._write_json_file(target_path, rows)
+        return target_path
+
+    def _checkpoint_telemetry_log_path(self, payload: dict[str, object]) -> Path | None:
+        manifest_path_raw = str(payload.get("_manifest_path") or "").strip()
+        if not manifest_path_raw:
+            return None
+        return Path(manifest_path_raw).resolve().with_name(_DEMOCRITUS_CURATION_TELEMETRY)
+
+    def _checkpoint_telemetry_summary_path(self, payload: dict[str, object]) -> Path | None:
+        manifest_path_raw = str(payload.get("_manifest_path") or "").strip()
+        if not manifest_path_raw:
+            return None
+        return Path(manifest_path_raw).resolve().with_name(_DEMOCRITUS_CURATION_SUMMARY)
+
+    @staticmethod
+    def _topic_counter_payload(counter: Counter[str], *, limit: int = 24) -> dict[str, int]:
+        return {topic: int(count) for topic, count in counter.most_common(limit)}
+
+    def _democritus_checkpoint_selection_snapshot(
+        self,
+        payload: dict[str, object],
+        *,
+        selected_pdf_paths: tuple[str, ...],
+    ) -> dict[str, object]:
+        selected_lookup = {path for path in selected_pdf_paths if path}
+        selected_docs: list[dict[str, object]] = []
+        rejected_docs: list[dict[str, object]] = []
+        selected_topics: Counter[str] = Counter()
+        rejected_topics: Counter[str] = Counter()
+        for item in list(payload.get("documents") or []):
+            record = dict(item)
+            pdf_path = " ".join(str(record.get("pdf_path") or "").split()).strip()
+            normalized_topics = [
+                " ".join(str(topic).split()).strip()
+                for topic in list(record.get("topics") or [])
+                if " ".join(str(topic).split()).strip()
+            ]
+            normalized_record = {
+                "run_name": str(record.get("run_name") or ""),
+                "title": str(record.get("title") or ""),
+                "pdf_path": pdf_path,
+                "topics": normalized_topics,
+            }
+            if pdf_path in selected_lookup:
+                selected_docs.append(normalized_record)
+                for topic in normalized_topics:
+                    selected_topics[topic] += 1
+            else:
+                rejected_docs.append(normalized_record)
+                for topic in normalized_topics:
+                    rejected_topics[topic] += 1
+        topic_preference_signal = Counter(selected_topics)
+        topic_preference_signal.subtract(rejected_topics)
+        return {
+            "selected_documents": selected_docs,
+            "rejected_documents": rejected_docs,
+            "selected_topic_counts": self._topic_counter_payload(selected_topics),
+            "rejected_topic_counts": self._topic_counter_payload(rejected_topics),
+            "topic_preference_signal": {
+                topic: int(value)
+                for topic, value in topic_preference_signal.items()
+                if int(value) != 0
+            },
+        }
+
+    def _record_democritus_checkpoint_telemetry(
+        self,
+        payload: dict[str, object],
+        *,
+        run_state: dict[str, object],
+        action_kind: str,
+        action_status: str,
+        selected_pdf_paths: tuple[str, ...],
+        retrieval_refinement: str,
+        additional_documents: int,
+        queued_followup_run_id: str | None = None,
+        curated_manifest_path: Path | None = None,
+    ) -> None:
+        log_path = self._checkpoint_telemetry_log_path(payload)
+        summary_path = self._checkpoint_telemetry_summary_path(payload)
+        if log_path is None or summary_path is None:
+            return
+        snapshot = self._democritus_checkpoint_selection_snapshot(
+            payload,
+            selected_pdf_paths=selected_pdf_paths,
+        )
+        selected_documents = list(snapshot.get("selected_documents") or [])
+        rejected_documents = list(snapshot.get("rejected_documents") or [])
+        event = {
+            "timestamp": time.time(),
+            "run_id": str(run_state.get("run_id") or ""),
+            "parent_run_id": str(run_state.get("parent_run_id") or ""),
+            "route_name": str(run_state.get("route_name") or ""),
+            "execution_mode": str(run_state.get("execution_mode") or ""),
+            "query": str(payload.get("query") or run_state.get("query") or ""),
+            "stage_label": str(payload.get("stage_label") or ""),
+            "action_kind": str(action_kind),
+            "action_status": str(action_status),
+            "selected_count": len(selected_documents),
+            "rejected_count": len(rejected_documents),
+            "selected_documents": selected_documents,
+            "rejected_documents": rejected_documents,
+            "selected_topic_counts": dict(snapshot.get("selected_topic_counts") or {}),
+            "rejected_topic_counts": dict(snapshot.get("rejected_topic_counts") or {}),
+            "topic_preference_signal": dict(snapshot.get("topic_preference_signal") or {}),
+            "retrieval_refinement": retrieval_refinement,
+            "additional_documents_requested": int(max(1, additional_documents)),
+            "queued_followup_run_id": str(queued_followup_run_id or ""),
+            "curated_manifest_path": str(curated_manifest_path.resolve()) if curated_manifest_path else "",
+        }
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event) + "\n")
+
+        existing_summary = self._read_json_dict(summary_path) if summary_path.exists() else {}
+        action_counts = Counter(
+            {
+                str(key): int(value)
+                for key, value in dict(existing_summary.get("action_counts") or {}).items()
+                if str(key).strip()
+            }
+        )
+        status_counts = Counter(
+            {
+                str(key): int(value)
+                for key, value in dict(existing_summary.get("action_status_counts") or {}).items()
+                if str(key).strip()
+            }
+        )
+        topic_preferences = Counter(
+            {
+                str(key): int(value)
+                for key, value in dict(existing_summary.get("cumulative_topic_preference_signal") or {}).items()
+                if str(key).strip()
+            }
+        )
+        document_selection_counts = Counter(
+            {
+                str(key): int(value)
+                for key, value in dict(existing_summary.get("document_selection_counts") or {}).items()
+                if str(key).strip()
+            }
+        )
+        rejected_document_counts = Counter(
+            {
+                str(key): int(value)
+                for key, value in dict(existing_summary.get("document_rejection_counts") or {}).items()
+                if str(key).strip()
+            }
+        )
+        action_counts[str(action_kind)] += 1
+        status_counts[str(action_status)] += 1
+        for topic, delta in dict(event.get("topic_preference_signal") or {}).items():
+            topic_preferences[str(topic)] += int(delta)
+        for item in selected_documents:
+            title = " ".join(str(dict(item).get("title") or "").split()).strip()
+            if title:
+                document_selection_counts[title] += 1
+        for item in rejected_documents:
+            title = " ".join(str(dict(item).get("title") or "").split()).strip()
+            if title:
+                rejected_document_counts[title] += 1
+        summary = {
+            "event_count": int(existing_summary.get("event_count") or 0) + 1,
+            "action_counts": dict(action_counts),
+            "action_status_counts": dict(status_counts),
+            "latest_event": event,
+            "latest_selected_count": len(selected_documents),
+            "latest_rejected_count": len(rejected_documents),
+            "latest_retrieval_refinement": retrieval_refinement,
+            "cumulative_topic_preference_signal": dict(topic_preferences),
+            "document_selection_counts": dict(document_selection_counts),
+            "document_rejection_counts": dict(rejected_document_counts),
+        }
+        self._write_json_file(summary_path, summary)
+
+    @staticmethod
+    def _combine_query_with_refinement(query: str, refinement: str) -> str:
+        base = " ".join(str(query or "").split()).strip()
+        suffix = " ".join(str(refinement or "").split()).strip()
+        if not suffix:
+            return base
+        if not base:
+            return suffix
+        return f"{base} {suffix}"
+
+    def _render_democritus_checkpoint_page(
+        self,
+        run_id: str,
+        *,
+        artifact_path: Path,
+        banner_message: str = "",
+        banner_tone: str = "info",
+    ) -> str:
+        payload = self._load_democritus_checkpoint_payload(artifact_path)
+        if not payload:
+            return artifact_path.read_text(encoding="utf-8", errors="replace")
+        curation = self._load_democritus_checkpoint_curation(payload)
+        selected_pdf_paths = set(str(item) for item in list(curation.get("selected_pdf_paths") or []))
+        documents = list(payload.get("documents") or [])
+        n_documents = len(documents)
+        selected_count = sum(
+            1
+            for item in documents
+            if " ".join(str(dict(item).get("pdf_path") or "").split()).strip() in selected_pdf_paths
+        )
+        query = html.escape(str(payload.get("query") or "Democritus interactive checkpoint"))
+        stage_label = html.escape(str(payload.get("stage_label") or "Topic checkpoint"))
+        summary_text = html.escape(str(payload.get("summary_text") or ""))
+        top_topics = list(payload.get("top_topics") or [])
+        topic_chips = "".join(
+            f'<span class="chip">{html.escape(str(item.get("topic") or ""))} · {html.escape(str(item.get("document_count") or 0))} docs</span>'
+            for item in top_topics[:16]
+        ) or '<span class="chip">No recurring topics detected yet</span>'
+        document_cards = []
+        for item in documents:
+            record = dict(item)
+            pdf_path_raw = " ".join(str(record.get("pdf_path") or "").split()).strip()
+            checked_attr = " checked" if pdf_path_raw in selected_pdf_paths else ""
+            pdf_href = (
+                html.escape(self._launcher_href_for_run_file(run_id, Path(pdf_path_raw).resolve()))
+                if pdf_path_raw
+                else ""
+            )
+            topics_markup = "".join(
+                f'<span class="topic-pill">{html.escape(str(topic))}</span>'
+                for topic in list(record.get("topics") or [])[:12]
+            )
+            document_cards.append(
+                '<article class="doc-card">'
+                f'<label class="doc-select"><input type="checkbox" name="selected_pdf_path" value="{html.escape(pdf_path_raw)}"{checked_attr} /> Include in deeper analysis</label>'
+                f'<div class="doc-meta">{html.escape(str(record.get("run_name") or ""))}</div>'
+                f'<h3 class="doc-title" title="{html.escape(str(record.get("title") or ""))}">{html.escape(str(record.get("title") or ""))}</h3>'
+                + (
+                    f'<div class="doc-actions"><a href="{pdf_href}" target="_blank" rel="noopener noreferrer">Inspect PDF</a></div>'
+                    if pdf_href
+                    else ""
+                )
+                + (
+                    f'<p class="guide">{html.escape(str(record.get("guide_summary") or ""))}</p>'
+                    if str(record.get("guide_summary") or "").strip()
+                    else ""
+                )
+                + (
+                    f'<p class="guide"><strong>Causal gestalt:</strong> {html.escape(str(record.get("causal_gestalt") or ""))}</p>'
+                    if str(record.get("causal_gestalt") or "").strip()
+                    else ""
+                )
+                + f'<div class="topic-list">{topics_markup}</div>'
+                + "</article>"
+            )
+        banner_markup = (
+            f'<section class="banner banner-{html.escape(banner_tone)}">{html.escape(banner_message)}</section>'
+            if banner_message
+            else ""
+        )
+        refinement_value = html.escape(str(curation.get("retrieval_refinement") or ""))
+        return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Democritus Interactive Checkpoint</title>
+    <style>
+      :root {{
+        --ink: #18222d;
+        --muted: #5b6874;
+        --paper: #f6f1e8;
+        --card: rgba(255,255,255,0.9);
+        --line: #d7ccb8;
+        --accent: #93451e;
+        --green: #1f6a56;
+        --warn: #8b4a1f;
+        --soft: #f8ede0;
+        --ok: #e8f4ee;
+      }}
+      * {{ box-sizing: border-box; }}
+      body {{
+        margin: 0;
+        font-family: Georgia, "Iowan Old Style", serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(147,69,30,0.12), transparent 24%),
+          linear-gradient(180deg, #fbf7f0 0%, var(--paper) 100%);
+      }}
+      main {{ width: min(1240px, calc(100vw - 32px)); margin: 32px auto 48px; display: grid; gap: 18px; }}
+      .panel, .banner {{ background: var(--card); border: 1px solid var(--line); border-radius: 28px; padding: 24px; box-shadow: 0 24px 60px rgba(30,25,18,0.08); }}
+      .banner-info {{ background: #fdf8ef; }}
+      .banner-success {{ background: var(--ok); }}
+      .banner-warn {{ background: var(--soft); }}
+      .eyebrow {{ margin: 0 0 10px; text-transform: uppercase; letter-spacing: 0.16em; font-size: 12px; color: var(--accent); }}
+      .hero-grid {{ display: grid; gap: 18px; grid-template-columns: 1.35fr 1fr; }}
+      h1, h2, h3, p {{ margin: 0; }}
+      .trace {{ color: var(--muted); line-height: 1.6; }}
+      .chip-row, .topic-list, .checkpoint-chips, .form-actions {{ display: flex; flex-wrap: wrap; gap: 10px; min-width: 0; }}
+      .chip, .topic-pill, .checkpoint-chip {{ border-radius: 999px; padding: 8px 12px; background: #efe7d9; font-size: 0.92rem; color: #64492b; }}
+      .topic-pill {{ background: #f5efe4; max-width: 100%; overflow-wrap: anywhere; }}
+      .checkpoint-chip {{ background: #f6f0e5; }}
+      .controls-grid {{ display: grid; gap: 16px; grid-template-columns: 1.2fr 1fr; }}
+      .control-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 18px; background: #fffdf9; display: grid; gap: 12px; }}
+      .control-label {{ font-size: 0.86rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }}
+      .control-copy {{ color: var(--muted); line-height: 1.55; }}
+      .refinement-input, .additional-input {{
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 12px 14px;
+        font: inherit;
+        background: #fffdfa;
+        color: var(--ink);
+      }}
+      .doc-grid {{ display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); }}
+      .doc-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 16px; background: #fffdf9; display: grid; gap: 10px; min-width: 0; align-content: start; overflow: hidden; }}
+      .doc-meta {{ color: var(--muted); font-size: 0.9rem; }}
+      .doc-title {{
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        line-height: 1.25;
+        min-width: 0;
+      }}
+      .doc-select {{ display: flex; gap: 10px; align-items: center; font-size: 0.95rem; color: var(--ink); }}
+      .doc-actions {{ min-width: 0; }}
+      .guide {{ color: var(--ink); line-height: 1.5; min-width: 0; overflow-wrap: anywhere; }}
+      .callout {{ background: #f8ede0; }}
+      .empty {{ color: var(--muted); line-height: 1.6; }}
+      .primary-button, .secondary-button {{
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        padding: 10px 16px;
+        font: inherit;
+        cursor: pointer;
+      }}
+      .primary-button {{ background: #204d41; color: #fff; border-color: #204d41; }}
+      .secondary-button {{ background: #fff8ef; color: var(--ink); }}
+      a {{ color: var(--green); text-decoration: none; font-weight: 700; }}
+      a:hover {{ text-decoration: underline; }}
+      @media (max-width: 980px) {{
+        .hero-grid, .controls-grid {{ grid-template-columns: 1fr; }}
+      }}
+    </style>
+  </head>
+  <body>
+    <main>
+      {banner_markup}
+      <form method="post" action="/checkpoint-action">
+        <input type="hidden" name="run_id" value="{html.escape(run_id)}" />
+        <section class="panel hero-grid">
+          <div>
+            <p class="eyebrow">Democritus Interactive Mode</p>
+            <h1>{query}</h1>
+            <p class="trace">Democritus paused at the <strong>{stage_label}</strong>. Curate the corpus here before launching the deeper causal extraction and synthesis stages.</p>
+            <div class="checkpoint-chips" style="margin-top:14px;">
+              <span class="checkpoint-chip">{selected_count} selected</span>
+              <span class="checkpoint-chip">{n_documents} retrieved</span>
+            </div>
+          </div>
+          <div class="panel callout">
+            <p class="eyebrow">Next Step</p>
+            <p class="trace">{summary_text}</p>
+            <p class="trace" style="margin-top:12px;">Use <strong>Go deeper on selected</strong> to run the longer Democritus pass only on the documents you keep.</p>
+          </div>
+        </section>
+        <section class="panel">
+          <p class="eyebrow">Corpus Topic Atlas</p>
+          <p class="trace">{n_documents} documents reached the root-topic frontier. These recurring themes are the first shared causal surface Democritus recovered.</p>
+          <div class="chip-row" style="margin-top:14px;">{topic_chips}</div>
+        </section>
+        <section class="panel">
+          <p class="eyebrow">Interactive Controls</p>
+          <div class="controls-grid" style="margin-top:12px;">
+            <div class="control-card">
+              <span class="control-label">Selection</span>
+              <p class="control-copy">Keep the documents that look useful for the final deep run. The saved selection persists for this checkpoint.</p>
+              <div class="form-actions">
+                <button type="submit" class="secondary-button" name="action_kind" value="save">Save selection</button>
+                <button type="submit" class="primary-button" name="action_kind" value="deepen">Go deeper on selected</button>
+              </div>
+            </div>
+            <div class="control-card">
+              <span class="control-label">Retrieve More</span>
+              <p class="control-copy">Queue another interactive pass with more documents. Optional refinement text is appended to the original query to steer the next retrieval.</p>
+              <input class="additional-input" type="number" name="additional_documents" min="1" max="25" step="1" value="3" />
+              <input class="refinement-input" type="text" name="retrieval_refinement" value="{refinement_value}" placeholder="Optional retrieval refinement, e.g. peer reviewed natural experiments" />
+              <div class="form-actions">
+                <button type="submit" class="secondary-button" name="action_kind" value="retrieve_more">Retrieve more documents</button>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="panel">
+          <p class="eyebrow">Per-Document Topics</p>
+          <div class="doc-grid" style="margin-top:12px;">{''.join(document_cards) or '<div class="empty">Root topics have not been materialized yet.</div>'}</div>
+        </section>
+      </form>
+    </main>
+  </body>
+</html>"""
+
+    def _render_checkpoint_followup_queued_page(
+        self,
+        *,
+        heading: str,
+        message: str,
+        run_id: str,
+        new_run_id: str | None,
+    ) -> str:
+        new_run_markup = (
+            f'<p><strong>Queued run:</strong> {html.escape(new_run_id)}</p>'
+            if new_run_id
+            else ""
+        )
+        artifact_link = (
+            f'<p><a href="/run-artifact?run_id={html.escape(new_run_id)}" target="_blank" rel="noopener noreferrer">Open the new run</a></p>'
+            if new_run_id
+            else ""
+        )
+        return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="refresh" content="1; url=/" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{html.escape(self.config.title)}</title>
+    <style>
+      body {{ margin: 0; font-family: Georgia, "Iowan Old Style", serif; background: #f7f1e5; color: #1a1f1a; }}
+      main {{ max-width: 860px; margin: 48px auto; padding: 0 18px; }}
+      .card {{ background: #fffdf6; border: 1px solid #d5c8a4; border-radius: 24px; padding: 24px; }}
+      h1 {{ margin: 0 0 12px; }}
+      p {{ margin: 12px 0 0; color: #5e675d; line-height: 1.6; }}
+      a {{ color: #1f6a56; font-weight: 700; }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="card">
+        <h1>{html.escape(heading)}</h1>
+        <p>{html.escape(message)}</p>
+        {new_run_markup}
+        {artifact_link}
+        <p><a href="/">Return to the CLIFF session</a></p>
+        <p><a href="/run-artifact?run_id={html.escape(run_id)}">Back to the checkpoint</a></p>
+      </section>
+    </main>
+  </body>
+</html>"""
+
+    def _handle_checkpoint_action(
+        self,
+        *,
+        run_id: str,
+        action_kind: str,
+        selected_pdf_paths: tuple[str, ...],
+        additional_documents: int,
+        retrieval_refinement: str,
+    ) -> tuple[str, HTTPStatus]:
+        with self._lock:
+            run_state = dict(self._session_runs_by_id.get(run_id) or {})
+        artifact_path_value = str(run_state.get("artifact_path") or "").strip()
+        artifact_path = Path(artifact_path_value).resolve() if artifact_path_value else None
+        if artifact_path is None or not artifact_path.exists():
+            body = self._render_text_file_as_html(
+                self.config.title,
+                "This interactive checkpoint is no longer available from the current session.",
+            )
+            return body, HTTPStatus.NOT_FOUND
+        payload = self._load_democritus_checkpoint_payload(artifact_path)
+        documents = list(payload.get("documents") or [])
+        valid_paths = {
+            " ".join(str(dict(item).get("pdf_path") or "").split()).strip()
+            for item in documents
+            if " ".join(str(dict(item).get("pdf_path") or "").split()).strip()
+        }
+        filtered_selected = tuple(
+            path for path in dict.fromkeys(selected_pdf_paths) if path in valid_paths
+        )
+        refinement = " ".join(str(retrieval_refinement or "").split()).strip()
+        self._save_democritus_checkpoint_curation(
+            payload,
+            selected_pdf_paths=filtered_selected,
+            retrieval_refinement=refinement,
+        )
+        if action_kind == "save":
+            count = len(filtered_selected)
+            tone = "success" if count else "warn"
+            message = (
+                f"Saved the checkpoint selection for {count} document{'s' if count != 1 else ''}."
+                if count
+                else "No documents are currently selected. Choose at least one document before going deeper."
+            )
+            self._record_democritus_checkpoint_telemetry(
+                payload,
+                run_state=run_state,
+                action_kind="save",
+                action_status=("saved" if count else "empty_selection"),
+                selected_pdf_paths=filtered_selected,
+                retrieval_refinement=refinement,
+                additional_documents=additional_documents,
+            )
+            return self._render_democritus_checkpoint_page(
+                run_id,
+                artifact_path=artifact_path,
+                banner_message=message,
+                banner_tone=tone,
+            ), HTTPStatus.OK
+        if action_kind == "deepen":
+            if not filtered_selected:
+                self._record_democritus_checkpoint_telemetry(
+                    payload,
+                    run_state=run_state,
+                    action_kind="deepen",
+                    action_status="blocked_empty_selection",
+                    selected_pdf_paths=filtered_selected,
+                    retrieval_refinement=refinement,
+                    additional_documents=additional_documents,
+                )
+                return self._render_democritus_checkpoint_page(
+                    run_id,
+                    artifact_path=artifact_path,
+                    banner_message="Select at least one document before launching the deeper Democritus pass.",
+                    banner_tone="warn",
+                ), HTTPStatus.BAD_REQUEST
+            curated_manifest_path = self._write_democritus_curated_manifest(
+                payload,
+                selected_pdf_paths=filtered_selected,
+            )
+            new_run_id = self.request_session_run_deepen(
+                run_id,
+                democritus_manifest_path=curated_manifest_path,
+                democritus_target_docs=len(filtered_selected),
+            )
+            self._record_democritus_checkpoint_telemetry(
+                payload,
+                run_state=run_state,
+                action_kind="deepen",
+                action_status=("queued" if new_run_id else "not_queued"),
+                selected_pdf_paths=filtered_selected,
+                retrieval_refinement=refinement,
+                additional_documents=additional_documents,
+                queued_followup_run_id=new_run_id,
+                curated_manifest_path=curated_manifest_path,
+            )
+            return self._render_checkpoint_followup_queued_page(
+                heading="Deep Democritus Run Queued",
+                message=f"Queued a deep run on {len(filtered_selected)} selected document{'s' if len(filtered_selected) != 1 else ''}.",
+                run_id=run_id,
+                new_run_id=new_run_id,
+            ), HTTPStatus.OK
+        if action_kind == "retrieve_more":
+            base_count = max(1, len(documents))
+            target_documents = base_count + max(1, int(additional_documents or 1))
+            query = self._combine_query_with_refinement(str(run_state.get("query") or ""), refinement)
+            new_run_id = self.request_session_run_retrieve_more(
+                run_id,
+                query_override=query,
+                democritus_target_docs=target_documents,
+            )
+            self._record_democritus_checkpoint_telemetry(
+                payload,
+                run_state=run_state,
+                action_kind="retrieve_more",
+                action_status=("queued" if new_run_id else "not_queued"),
+                selected_pdf_paths=filtered_selected,
+                retrieval_refinement=refinement,
+                additional_documents=additional_documents,
+                queued_followup_run_id=new_run_id,
+            )
+            return self._render_checkpoint_followup_queued_page(
+                heading="Interactive Retrieval Expansion Queued",
+                message=(
+                    f"Queued another interactive run targeting {target_documents} documents"
+                    + (f" with the refinement '{refinement}'." if refinement else ".")
+                ),
+                run_id=run_id,
+                new_run_id=new_run_id,
+            ), HTTPStatus.OK
+        return self._render_democritus_checkpoint_page(
+            run_id,
+            artifact_path=artifact_path,
+            banner_message="No checkpoint action was applied.",
+            banner_tone="warn",
+        ), HTTPStatus.BAD_REQUEST
 
     def request_session_run_stop(self, run_id: str) -> bool:
         handler = None
@@ -288,6 +1073,32 @@ class DashboardQueryLauncher:
 
             def do_POST(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
+                if parsed.path == "/checkpoint-action":
+                    content_length = int(self.headers.get("Content-Length") or "0")
+                    payload = self.rfile.read(content_length).decode("utf-8", errors="replace")
+                    parsed_payload = parse_qs(payload)
+                    run_id = " ".join(parsed_payload.get("run_id", [""])[0].split()).strip()
+                    action_kind = " ".join(parsed_payload.get("action_kind", [""])[0].split()).strip().lower()
+                    selected_pdf_paths = tuple(
+                        " ".join(item.split()).strip()
+                        for item in parsed_payload.get("selected_pdf_path", [])
+                        if " ".join(item.split()).strip()
+                    )
+                    additional_raw = " ".join(parsed_payload.get("additional_documents", ["3"])[0].split()).strip()
+                    try:
+                        additional_documents = max(1, int(additional_raw or "3"))
+                    except ValueError:
+                        additional_documents = 3
+                    retrieval_refinement = parsed_payload.get("retrieval_refinement", [""])[0]
+                    body, status = launcher._handle_checkpoint_action(
+                        run_id=run_id,
+                        action_kind=action_kind,
+                        selected_pdf_paths=selected_pdf_paths,
+                        additional_documents=additional_documents,
+                        retrieval_refinement=retrieval_refinement,
+                    )
+                    self._send_html(body, status=status)
+                    return
                 if parsed.path == "/deepen-run":
                     content_length = int(self.headers.get("Content-Length") or "0")
                     payload = self.rfile.read(content_length).decode("utf-8", errors="replace")
@@ -1644,6 +2455,9 @@ class DashboardQueryLauncher:
 """
 
     def _render_html_file_for_run(self, run_id: str, file_path: Path) -> str:
+        checkpoint_manifest = self._checkpoint_manifest_for_html(file_path)
+        if checkpoint_manifest is not None:
+            return self._render_democritus_checkpoint_page(run_id, artifact_path=file_path)
         return self._rewrite_artifact_links(
             file_path.read_text(encoding="utf-8", errors="replace"),
             run_id=run_id,
@@ -1705,12 +2519,16 @@ class DashboardQueryLauncher:
                 <span><strong>Quick</strong> Start with a smaller sample and lighter pass so the first answer arrives sooner.</span>
               </label>
               <label class="execution-mode-option">
+                <input type="radio" name="execution_mode" value="interactive" />
+                <span><strong>Interactive</strong> Stop at the first meaningful checkpoint so you can inspect topics and decide whether to continue deeper.</span>
+              </label>
+              <label class="execution-mode-option">
                 <input type="radio" name="execution_mode" value="deep" />
                 <span><strong>Deep</strong> Run the fuller causal build from the start for maximum coverage.</span>
               </label>
               <p class="execution-mode-hint">
                 Latency guide: textbook and filing lookups are usually quickest, product evaluation can take longer,
-                and deep research routes like Democritus or company similarity may still take several minutes even in quick mode.
+                interactive mode pauses earlier for inspection, and deep research routes like Democritus or company similarity may still take several minutes even in quick mode.
               </p>
             </fieldset>
             """
@@ -1793,7 +2611,7 @@ class DashboardQueryLauncher:
                 var stopAction = ((run.status || '') === 'queued' || (run.status || '') === 'routing' || (run.status || '') === 'running')
                   ? '<div class="run-actions"><button type="button" class="run-stop-button" onclick="requestStopRun(\\'' + escapeHtml(run.run_id || '') + '\\')">Stop query</button></div>'
                   : '';
-                var deepenAction = ((run.status || '') === 'complete' && executionMode === 'quick' && ((run.route_name || '') === 'democritus' || (run.route_name || '') === 'company_similarity'))
+                var deepenAction = ((run.status || '') === 'complete' && (executionMode === 'quick' || executionMode === 'interactive') && ((run.route_name || '') === 'democritus' || (run.route_name || '') === 'company_similarity'))
                   ? '<div class="run-actions"><button type="button" class="run-deepen-button" onclick="requestDeepRun(\\'' + escapeHtml(run.run_id || '') + '\\')">Go deeper</button></div>'
                   : '';
                 var inspectLabel = ((run.status || '') === 'queued' || (run.status || '') === 'routing' || (run.status || '') === 'running' || (run.status || '') === 'stopping')
@@ -2458,7 +3276,7 @@ class DashboardQueryLauncher:
             deepen_action_markup = (
                 f'<div class="run-actions"><button type="button" class="run-deepen-button" onclick="requestDeepRun(\'{esc(run.get("run_id") or "")}\')">Go deeper</button></div>'
                 if run.get("status") == "complete"
-                and run.get("execution_mode") == "quick"
+                and run.get("execution_mode") in {"quick", "interactive"}
                 and run.get("route_name") in {"democritus", "company_similarity"}
                 else ""
             )

@@ -450,6 +450,148 @@ class DemocritusPublicScriptTests(unittest.TestCase):
             else:
                 sys.modules["matplotlib.pyplot"] = original_pyplot
 
+    def test_make_credibility_bundle_collapses_near_duplicate_summary_claims(self) -> None:
+        try:
+            import pandas  # noqa: F401
+        except ModuleNotFoundError:
+            self.skipTest("pandas is required for make_credibility_bundle")
+        original_networkx = sys.modules.get("networkx")
+        original_matplotlib = sys.modules.get("matplotlib")
+        original_pyplot = sys.modules.get("matplotlib.pyplot")
+        fake_networkx = ModuleType("networkx")
+        fake_matplotlib = ModuleType("matplotlib")
+        fake_pyplot = ModuleType("matplotlib.pyplot")
+        sys.modules["networkx"] = fake_networkx
+        sys.modules["matplotlib"] = fake_matplotlib
+        sys.modules["matplotlib.pyplot"] = fake_pyplot
+        module, repo_root, added, original_tqdm, original_requests = self._with_public_script_module(
+            "scripts.make_credibility_bundle"
+        )
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                scores_path = root / "scores.csv"
+                triples_path = root / "relational_triples.jsonl"
+                lcm_dir = root / "sweep"
+                outdir = root / "reports"
+                lcm_dir.mkdir(parents=True, exist_ok=True)
+                scores_path.write_text(
+                    "\n".join(
+                        [
+                            "file,focus,score,n_nodes,n_edges",
+                            "model_a.json,antarctic habitat change,0.9,3,1",
+                            "model_b.json,emperor penguin breeding risk,0.85,3,1",
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                triples_path.write_text(
+                    "\n".join(
+                        [
+                            json.dumps(
+                                {
+                                    "subj": "global warming",
+                                    "rel": "causes",
+                                    "obj": "loss of coastal sea ice, which leads to emperor penguin breeding failures",
+                                    "statement": "Global warming causes the loss of coastal sea ice, which leads to emperor penguin breeding failures.",
+                                }
+                            ),
+                            json.dumps(
+                                {
+                                    "subj": "global warming",
+                                    "rel": "leads_to",
+                                    "obj": "loss of antarctic sea ice, which reduces the available breeding habitat for emperor penguins",
+                                    "statement": "Global warming leads to the loss of Antarctic sea ice, which reduces the available breeding habitat for emperor penguins.",
+                                }
+                            ),
+                        ]
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                (lcm_dir / "model_a.json").write_text(
+                    json.dumps(
+                        {
+                            "focus": "antarctic habitat change",
+                            "nodes": ["global warming", "coastal sea ice loss", "emperor penguin breeding failures"],
+                            "edges": [
+                                {
+                                    "src": "global warming",
+                                    "rel": "causes",
+                                    "dst": "loss of coastal sea ice, which leads to emperor penguin breeding failures",
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (lcm_dir / "model_b.json").write_text(
+                    json.dumps(
+                        {
+                            "focus": "emperor penguin breeding risk",
+                            "nodes": ["global warming", "antarctic sea ice loss", "emperor penguin breeding habitat"],
+                            "edges": [
+                                {
+                                    "src": "global warming",
+                                    "rel": "leads_to",
+                                    "dst": "loss of antarctic sea ice, which reduces the available breeding habitat for emperor penguins",
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                original_argv = sys.argv
+                sys.argv = [
+                    "make_credibility_bundle.py",
+                    "--scores",
+                    str(scores_path),
+                    "--triples",
+                    str(triples_path),
+                    "--lcm-dir",
+                    str(lcm_dir),
+                    "--outdir",
+                    str(outdir),
+                    "--name",
+                    "penguin_demo",
+                    "--topk-models",
+                    "2",
+                    "--max-per-tier",
+                    "5",
+                ]
+                try:
+                    with redirect_stdout(StringIO()):
+                        module.main()
+                finally:
+                    sys.argv = original_argv
+
+                summary_md = (outdir / "penguin_demo_executive_summary.md").read_text(encoding="utf-8")
+
+            self.assertIn("## Tier 1 Claims", summary_md)
+            self.assertEqual(summary_md.count("global warming"), 1)
+            self.assertIn("Consolidates 2 nearby causal variants", summary_md)
+        finally:
+            self._cleanup_public_script_module(
+                repo_root=repo_root,
+                added=added,
+                original_tqdm=original_tqdm,
+                original_requests=original_requests,
+            )
+            if original_networkx is None:
+                sys.modules.pop("networkx", None)
+            else:
+                sys.modules["networkx"] = original_networkx
+            if original_matplotlib is None:
+                sys.modules.pop("matplotlib", None)
+            else:
+                sys.modules["matplotlib"] = original_matplotlib
+            if original_pyplot is None:
+                sys.modules.pop("matplotlib.pyplot", None)
+            else:
+                sys.modules["matplotlib.pyplot"] = original_pyplot
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -309,6 +309,7 @@ class DemocritusBatchConfig:
     dry_run: bool = False
     intra_document_shards: int = 1
     enable_corpus_synthesis: bool = True
+    stop_after_frontier_index: int | None = None
 
     def resolved(self) -> "DemocritusBatchConfig":
         return DemocritusBatchConfig(
@@ -354,6 +355,11 @@ class DemocritusBatchConfig:
             dry_run=self.dry_run,
             intra_document_shards=max(1, int(self.intra_document_shards)),
             enable_corpus_synthesis=self.enable_corpus_synthesis,
+            stop_after_frontier_index=(
+                None
+                if self.stop_after_frontier_index is None
+                else max(0, int(self.stop_after_frontier_index))
+            ),
         )
 
 
@@ -763,8 +769,12 @@ class DemocritusBatchAgenticRunner:
                     document = self._document_by_run_name(run_name)
                     frontier_size = len(document.plan[frontier_index])
                     if frontier_completion_counts[frontier_key] == frontier_size:
-                        pending_frontiers[run_name] = frontier_index + 1
-                        enqueue_ready_frontier(document)
+                        stop_after = self.config.stop_after_frontier_index
+                        if stop_after is not None and frontier_index >= stop_after:
+                            pending_frontiers[run_name] = len(document.plan)
+                        else:
+                            pending_frontiers[run_name] = frontier_index + 1
+                            enqueue_ready_frontier(document)
                 admit_new_documents()
                 submit_ready_agents(executor)
                 self._write_telemetry(
