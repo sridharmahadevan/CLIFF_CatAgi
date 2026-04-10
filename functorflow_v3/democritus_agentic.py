@@ -784,6 +784,7 @@ class DemocritusAgenticRunner:
 
     def _run_causal_question_agent(self) -> tuple[str, ...]:
         output_path = self.outdir / "causal_questions.jsonl"
+        document_guide_path = self._topic_guidance_path()
         return self._run_sharded_generation_agent(
             agent_name="causal_question_agent",
             output_path=output_path,
@@ -799,11 +800,17 @@ class DemocritusAgenticRunner:
                 str(shard_index),
                 "--num-shards",
                 str(shard_count),
-            ],
+            ]
+            + (
+                ["--document-guide", str(document_guide_path)]
+                if document_guide_path.exists()
+                else []
+            ),
         )
 
     def _run_causal_statement_agent(self) -> tuple[str, ...]:
         output_path = self.outdir / "causal_statements.jsonl"
+        document_guide_path = self._topic_guidance_path()
         return self._run_sharded_generation_agent(
             agent_name="causal_statement_agent",
             output_path=output_path,
@@ -825,7 +832,12 @@ class DemocritusAgenticRunner:
                 str(shard_index),
                 "--num-shards",
                 str(shard_count),
-            ],
+            ]
+            + (
+                ["--document-guide", str(document_guide_path)]
+                if document_guide_path.exists()
+                else []
+            ),
         )
 
     def _run_triple_extraction_agent(self) -> tuple[str, ...]:

@@ -379,6 +379,45 @@ class DemocritusAgenticTests(unittest.TestCase):
             self.assertEqual(len(merged_lines), 3)
             self.assertTrue(all("--num-shards" in " ".join(cmd) for _, cmd in calls))
 
+    def test_causal_question_agent_passes_document_guide_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir)
+            runner = DemocritusAgenticRunner(
+                DemocritusAgenticConfig(
+                    outdir=outdir,
+                    root_topics=("root topic",),
+                    include_phase2=False,
+                )
+            )
+            (outdir / "topic_graph.jsonl").write_text(
+                '{"topic":"root topic","parent":null,"depth":0}\n',
+                encoding="utf-8",
+            )
+            guide_path = outdir / "configs" / "document_topic_guide.json"
+            guide_path.parent.mkdir(parents=True, exist_ok=True)
+            guide_path.write_text(json.dumps({"raw": "CAUSAL GESTALT: sample"}), encoding="utf-8")
+
+            calls: list[tuple[str, list[str]]] = []
+            original = runner._run_subprocess_agent
+
+            def fake_run(agent_name, cmd, *, cwd, outputs):
+                del cwd
+                calls.append((agent_name, cmd))
+                shard_output = Path(outputs[0])
+                shard_output.parent.mkdir(parents=True, exist_ok=True)
+                shard_output.write_text("", encoding="utf-8")
+                return tuple(str(path) for path in outputs)
+
+            runner._run_subprocess_agent = fake_run  # type: ignore[assignment]
+            try:
+                runner._run_causal_question_agent()
+            finally:
+                runner._run_subprocess_agent = original  # type: ignore[assignment]
+
+            self.assertEqual(len(calls), 1)
+            self.assertIn("--document-guide", calls[0][1])
+            self.assertIn(str(guide_path.resolve()), calls[0][1])
+
     def test_topic_graph_agent_can_shard_within_one_document_and_merge_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             outdir = Path(tmpdir)
@@ -482,6 +521,45 @@ class DemocritusAgenticTests(unittest.TestCase):
                 self.assertEqual(cmd[statements_arg_index + 1], "1")
                 self.assertEqual(cmd[batch_arg_index + 1], "16")
                 self.assertEqual(cmd[tokens_arg_index + 1], "192")
+
+    def test_causal_statement_agent_passes_document_guide_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir)
+            runner = DemocritusAgenticRunner(
+                DemocritusAgenticConfig(
+                    outdir=outdir,
+                    root_topics=("root topic",),
+                    include_phase2=False,
+                )
+            )
+            (outdir / "causal_questions.jsonl").write_text(
+                json.dumps({"topic": "root topic", "path": ["root topic"], "questions": ["What causes walking?"]}) + "\n",
+                encoding="utf-8",
+            )
+            guide_path = outdir / "configs" / "document_topic_guide.json"
+            guide_path.parent.mkdir(parents=True, exist_ok=True)
+            guide_path.write_text(json.dumps({"raw": "CAUSAL GESTALT: sample"}), encoding="utf-8")
+
+            calls: list[tuple[str, list[str]]] = []
+            original = runner._run_subprocess_agent
+
+            def fake_run(agent_name, cmd, *, cwd, outputs):
+                del cwd
+                calls.append((agent_name, cmd))
+                output = Path(outputs[0])
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text("", encoding="utf-8")
+                return tuple(str(path) for path in outputs)
+
+            runner._run_subprocess_agent = fake_run  # type: ignore[assignment]
+            try:
+                runner._run_causal_statement_agent()
+            finally:
+                runner._run_subprocess_agent = original  # type: ignore[assignment]
+
+            self.assertEqual(len(calls), 1)
+            self.assertIn("--document-guide", calls[0][1])
+            self.assertIn(str(guide_path.resolve()), calls[0][1])
 
     def test_manifold_visualization_agent_serializes_matplotlib_rendering(self) -> None:
         fake_matplotlib = ModuleType("matplotlib")

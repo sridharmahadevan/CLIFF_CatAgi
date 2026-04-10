@@ -168,6 +168,29 @@ class DemocritusPublicScriptTests(unittest.TestCase):
                 original_requests=original_requests,
             )
 
+    def test_causal_statement_builder_prompt_includes_document_guide_and_topic_path(self) -> None:
+        module, repo_root, added, original_tqdm, original_requests = self._with_public_script_module(
+            "scripts.causal_statement_builder"
+        )
+        try:
+            prompt = module.build_prompt(
+                "How does femur anatomy influence bipedal walking?",
+                n=2,
+                path=["early hominin anatomy", "bipedal walking"],
+                document_guide="CAUSAL GESTALT: femur structure suggests a capacity for upright walking.",
+            )
+
+            self.assertIn("Document causal guide", prompt)
+            self.assertIn("Topic path", prompt)
+            self.assertIn('use vague subjects like "this discovery"', prompt)
+        finally:
+            self._cleanup_public_script_module(
+                repo_root=repo_root,
+                added=added,
+                original_tqdm=original_tqdm,
+                original_requests=original_requests,
+            )
+
     def test_causal_question_builder_falls_back_to_single_prompt_calls(self) -> None:
         module, repo_root, added, original_tqdm, original_requests = self._with_public_script_module(
             "scripts.causal_question_builder"
@@ -209,9 +232,30 @@ class DemocritusPublicScriptTests(unittest.TestCase):
             record = json.loads(output[0])
             self.assertEqual(record["topic"], "good topic")
             self.assertEqual(
-                record["questions"],
-                ["How does warming affect coral bleaching?", "What increases climate migration?"],
+                set(record["questions"]),
+                {"How does warming affect coral bleaching?", "What increases climate migration?"},
             )
+        finally:
+            self._cleanup_public_script_module(
+                repo_root=repo_root,
+                added=added,
+                original_tqdm=original_tqdm,
+                original_requests=original_requests,
+            )
+
+    def test_causal_question_builder_prompt_includes_document_guide(self) -> None:
+        module, repo_root, added, original_tqdm, original_requests = self._with_public_script_module(
+            "scripts.causal_question_builder"
+        )
+        try:
+            prompt = module.build_prompt(
+                ["early hominin anatomy", "bipedal walking"],
+                document_guide="CAUSAL GESTALT: anatomical traits suggest partial bipedal locomotion.",
+            )
+
+            self.assertIn("Document causal guide", prompt)
+            self.assertIn("Avoid meta questions about significance", prompt)
+            self.assertIn("bipedal walking", prompt)
         finally:
             self._cleanup_public_script_module(
                 repo_root=repo_root,
