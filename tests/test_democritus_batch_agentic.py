@@ -325,10 +325,22 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
                 edge_support = connection.execute(
                     "SELECT document_support FROM aggregated_edges WHERE subj = 'carbon' AND rel = 'increases' AND obj = 'warming'"
                 ).fetchone()[0]
+                claim_columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(claims)").fetchall()
+                }
             finally:
                 connection.close()
             self.assertEqual(claim_count, 4)
             self.assertEqual(edge_support, 2)
+            self.assertTrue(
+                {"surface_form", "canonical_subj", "canonical_rel", "canonical_obj", "canonical_domain"} <= claim_columns
+            )
+            csql_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(csql_summary["n_homotopy_localized_claims"], 2)
+            self.assertEqual(csql_summary["n_regime_gluing_surfaces"], 0)
+            self.assertEqual(csql_summary["top_homotopy_localized_claims"][0]["canonical_subj"], "carbon")
+            self.assertEqual(csql_summary["top_homotopy_localized_claims"][0]["canonical_rel"], "increases")
             synthesis_payload = json.loads(result.corpus_synthesis.summary_path.read_text(encoding="utf-8"))
             self.assertEqual(synthesis_payload["diagnostic_supported"], [])
             synthesis_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
@@ -404,6 +416,455 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             synthesis_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
             self.assertIn("Normalized Diagnostic Support", synthesis_html)
             self.assertIn("glp1 receptor agonist", synthesis_html)
+
+    def test_csql_bundle_surfaces_homotopy_localized_claims(self) -> None:
+        class FakeRunner:
+            def __init__(self, outdir: Path, name: str) -> None:
+                self.outdir = outdir
+                self.name = name
+
+            def _execute_agent(self, agent_name: str, frontier_index: int):
+                triples_path = self.outdir / "relational_triples.jsonl"
+                triples_path.parent.mkdir(parents=True, exist_ok=True)
+                payload_by_name = {
+                    "run_0": (
+                        '{"topic":"weight loss","path":["weight loss"],"question":"q","statement":"The use of GLP-1 receptor agonists increases weight loss.","subj":"the use of glp-1 receptor agonists","rel":"increases","obj":"weight loss","domain":"GLP-1 receptor agonists effects"}'
+                    ),
+                    "run_1": (
+                        '{"topic":"weight loss","path":["weight loss"],"question":"q","statement":"Treatment with glucagon-like peptide-1 receptor agonists increases weight loss.","subj":"treatment with glucagon-like peptide-1 receptor agonists","rel":"increases","obj":"weight loss","domain":"Glucagon-Like Peptide-1 receptor agonists"}'
+                    ),
+                }
+                triples_path.write_text(payload_by_name[self.name] + "\n", encoding="utf-8")
+                return DemocritusAgentRecord(
+                    agent_name=agent_name,
+                    frontier_index=frontier_index,
+                    status="ok",
+                    started_at=0.0,
+                    ended_at=1.0,
+                    outputs=(str(triples_path),),
+                    log_path=None,
+                    notes="",
+                )
+
+        class FakeBatchRunner(DemocritusBatchAgenticRunner):
+            def _discover_documents(self):
+                documents = []
+                for index in range(2):
+                    run_name = f"run_{index}"
+                    outdir = Path(self.config.outdir) / run_name
+                    documents.append(
+                        DemocritusBatchDocument(
+                            index=index,
+                            pdf_path=Path(f"/tmp/{run_name}.pdf"),
+                            run_name=run_name,
+                            outdir=outdir,
+                            runner=FakeRunner(outdir, run_name),
+                            plan=((SimpleNamespace(name="triple_extraction_agent"),),),
+                        )
+                    )
+                return tuple(documents)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = FakeBatchRunner(
+                DemocritusBatchConfig(
+                    pdf_dir=Path(tmpdir),
+                    outdir=Path(tmpdir) / "runs",
+                    max_workers=2,
+                    dry_run=False,
+                )
+            )
+            result = runner.run_with_artifacts()
+
+            self.assertIsNotNone(result.csql_bundle)
+            sqlite_path = result.csql_bundle.sqlite_path
+            connection = sqlite3.connect(str(sqlite_path))
+            try:
+                localized = connection.execute(
+                    """
+                    SELECT
+                        canonical_subj,
+                        canonical_rel,
+                        canonical_obj,
+                        document_support,
+                        surface_form_count,
+                        variant_count,
+                        exact_document_support_max
+                    FROM homotopy_localized_claims
+                    """
+                ).fetchall()
+            finally:
+                connection.close()
+
+            self.assertEqual(len(localized), 1)
+            row = localized[0]
+            self.assertEqual(row[0], "glp1 receptor agonist")
+            self.assertEqual(row[1], "increases")
+            self.assertEqual(row[2], "weight loss")
+            self.assertEqual(row[3], 2)
+            self.assertEqual(row[4], 2)
+            self.assertGreaterEqual(row[5], 2)
+            self.assertEqual(row[6], 1)
+            csql_summary = json.loads(result.csql_bundle.summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(csql_summary["n_homotopy_localized_claims"], 1)
+            self.assertEqual(csql_summary["top_homotopy_localized_claims"][0]["canonical_subj"], "glp1 receptor agonist")
+            self.assertEqual(csql_summary["top_homotopy_localized_claims"][0]["document_support"], 2)
+
+    def test_corpus_synthesis_surfaces_homotopy_localized_claim_classes(self) -> None:
+        class FakeRunner:
+            def __init__(self, outdir: Path, name: str) -> None:
+                self.outdir = outdir
+                self.name = name
+
+            def _execute_agent(self, agent_name: str, frontier_index: int):
+                triples_path = self.outdir / "relational_triples.jsonl"
+                triples_path.parent.mkdir(parents=True, exist_ok=True)
+                payload_by_name = {
+                    "run_0": (
+                        '{"topic":"weight loss","path":["weight loss"],"question":"q","statement":"The use of GLP-1 receptor agonists increases weight loss.","subj":"the use of glp-1 receptor agonists","rel":"increases","obj":"weight loss","domain":"GLP-1 receptor agonists effects"}'
+                    ),
+                    "run_1": (
+                        '{"topic":"weight loss","path":["weight loss"],"question":"q","statement":"Treatment with glucagon-like peptide-1 receptor agonists increases weight loss.","subj":"treatment with glucagon-like peptide-1 receptor agonists","rel":"increases","obj":"weight loss","domain":"Glucagon-Like Peptide-1 receptor agonists"}'
+                    ),
+                    "run_2": (
+                        '{"topic":"weight loss","path":["weight loss"],"question":"q","statement":"Administration of GLP1 medicines increases weight loss.","subj":"administration of glp1 medicines","rel":"increases","obj":"weight loss","domain":"GLP1 medicines and weight loss"}'
+                    ),
+                }
+                triples_path.write_text(payload_by_name[self.name] + "\n", encoding="utf-8")
+                return DemocritusAgentRecord(
+                    agent_name=agent_name,
+                    frontier_index=frontier_index,
+                    status="ok",
+                    started_at=0.0,
+                    ended_at=1.0,
+                    outputs=(str(triples_path),),
+                    log_path=None,
+                    notes="",
+                )
+
+        class FakeBatchRunner(DemocritusBatchAgenticRunner):
+            def _discover_documents(self):
+                documents = []
+                for index in range(3):
+                    run_name = f"run_{index}"
+                    outdir = Path(self.config.outdir) / run_name
+                    documents.append(
+                        DemocritusBatchDocument(
+                            index=index,
+                            pdf_path=Path(f"/tmp/{run_name}.pdf"),
+                            run_name=run_name,
+                            outdir=outdir,
+                            runner=FakeRunner(outdir, run_name),
+                            plan=((SimpleNamespace(name="triple_extraction_agent"),),),
+                        )
+                    )
+                return tuple(documents)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = FakeBatchRunner(
+                DemocritusBatchConfig(
+                    pdf_dir=Path(tmpdir),
+                    outdir=Path(tmpdir) / "runs",
+                    max_workers=3,
+                    dry_run=False,
+                )
+            )
+            result = runner.run_with_artifacts()
+
+            self.assertIsNotNone(result.corpus_synthesis)
+            synthesis_payload = json.loads(result.corpus_synthesis.summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(synthesis_payload["homotopy_summary"]["class_count"], 1)
+            self.assertEqual(synthesis_payload["homotopy_summary"]["coherent_count"], 1)
+            self.assertEqual(len(synthesis_payload["homotopy_classes"]), 1)
+            homotopy_class = synthesis_payload["homotopy_classes"][0]
+            self.assertEqual(homotopy_class["canonical_subj"], "glp1 receptor agonist")
+            self.assertEqual(homotopy_class["canonical_rel"], "increases")
+            self.assertEqual(homotopy_class["canonical_obj"], "weight loss")
+            self.assertEqual(homotopy_class["surface_form_count"], 3)
+            self.assertEqual(homotopy_class["variant_count"], 3)
+            self.assertEqual(homotopy_class["simplex_triangles"], 1)
+            self.assertEqual(homotopy_class["open_horns"], 0)
+            self.assertEqual(homotopy_class["coherence_state"], "coherent")
+            synthesis_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
+            self.assertIn("Homotopy Localization", synthesis_html)
+            self.assertIn("Filled triangles: 1", synthesis_html)
+            self.assertIn("glp1 receptor agonist", synthesis_html)
+
+    def test_csql_bundle_surfaces_regime_gluing_states(self) -> None:
+        class FakeRunner:
+            def __init__(self, outdir: Path, name: str) -> None:
+                self.outdir = outdir
+                self.name = name
+
+            def _execute_agent(self, agent_name: str, frontier_index: int):
+                triples_path = self.outdir / "relational_triples.jsonl"
+                triples_path.parent.mkdir(parents=True, exist_ok=True)
+                payload_by_name = {
+                    "run_0": (
+                        '{"topic":"wine chemistry","path":["wine chemistry"],"question":"q","statement":"Moderate red wine consumption increases resveratrol intake.","subj":"moderate red wine consumption","rel":"increases","obj":"resveratrol intake","domain":"dietary polyphenol regime"}'
+                    ),
+                    "run_1": (
+                        '{"topic":"wine chemistry","path":["wine chemistry"],"question":"q","statement":"Moderate red wine consumption increases resveratrol intake.","subj":"moderate red wine consumption","rel":"increases","obj":"resveratrol intake","domain":"cardiometabolic regime"}'
+                    ),
+                    "run_2": (
+                        '{"topic":"wage policy","path":["wage policy"],"question":"q","statement":"Minimum wage increases employment.","subj":"minimum wage","rel":"increases","obj":"employment","domain":"urban labor regime"}'
+                    ),
+                    "run_3": (
+                        '{"topic":"wage policy","path":["wage policy"],"question":"q","statement":"Minimum wage reduces employment.","subj":"minimum wage","rel":"reduces","obj":"employment","domain":"rural labor regime"}'
+                    ),
+                }
+                triples_path.write_text(payload_by_name[self.name] + "\n", encoding="utf-8")
+                return DemocritusAgentRecord(
+                    agent_name=agent_name,
+                    frontier_index=frontier_index,
+                    status="ok",
+                    started_at=0.0,
+                    ended_at=1.0,
+                    outputs=(str(triples_path),),
+                    log_path=None,
+                    notes="",
+                )
+
+        class FakeBatchRunner(DemocritusBatchAgenticRunner):
+            def _discover_documents(self):
+                documents = []
+                for index in range(4):
+                    run_name = f"run_{index}"
+                    outdir = Path(self.config.outdir) / run_name
+                    documents.append(
+                        DemocritusBatchDocument(
+                            index=index,
+                            pdf_path=Path(f"/tmp/{run_name}.pdf"),
+                            run_name=run_name,
+                            outdir=outdir,
+                            runner=FakeRunner(outdir, run_name),
+                            plan=((SimpleNamespace(name="triple_extraction_agent"),),),
+                        )
+                    )
+                return tuple(documents)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = FakeBatchRunner(
+                DemocritusBatchConfig(
+                    pdf_dir=Path(tmpdir),
+                    outdir=Path(tmpdir) / "runs",
+                    max_workers=4,
+                    dry_run=False,
+                )
+            )
+            result = runner.run_with_artifacts()
+
+            self.assertIsNotNone(result.csql_bundle)
+            connection = sqlite3.connect(str(result.csql_bundle.sqlite_path))
+            try:
+                regime_rows = connection.execute(
+                    """
+                    SELECT canonical_subj, canonical_obj, gluing_state, regime_count, polarity_count
+                    FROM regime_gluing_surfaces
+                    ORDER BY canonical_subj, canonical_obj
+                    """
+                ).fetchall()
+            finally:
+                connection.close()
+
+            self.assertEqual(len(regime_rows), 2)
+            self.assertEqual(regime_rows[0][0], "minimum wage")
+            self.assertEqual(regime_rows[0][1], "employment")
+            self.assertEqual(regime_rows[0][2], "obstructed")
+            self.assertEqual(regime_rows[0][3], 2)
+            self.assertEqual(regime_rows[0][4], 2)
+            self.assertEqual(regime_rows[1][0], "moderate red wine consumption")
+            self.assertEqual(regime_rows[1][1], "resveratrol intake")
+            self.assertEqual(regime_rows[1][2], "multi_regime_glued")
+            csql_summary = json.loads(result.csql_bundle.summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(csql_summary["n_regime_gluing_surfaces"], 2)
+            self.assertEqual(csql_summary["top_regime_gluing_surfaces"][0]["gluing_state"], "obstructed")
+            synthesis_payload = json.loads(result.corpus_synthesis.summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(synthesis_payload["regime_gluing_summary"]["surface_count"], 2)
+            self.assertEqual(synthesis_payload["regime_gluing_summary"]["obstructed_count"], 1)
+            self.assertEqual(synthesis_payload["regime_gluing_summary"]["multi_regime_glued_count"], 1)
+            synthesis_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
+            self.assertIn("Regime Gluing", synthesis_html)
+            self.assertIn("multi regime glued", synthesis_html)
+            self.assertIn("obstructed", synthesis_html)
+
+    def test_corpus_synthesis_preserves_json_aggregates_and_splits_cross_document_homotopy_counts(self) -> None:
+        class FakeRunner:
+            def __init__(self, outdir: Path, name: str) -> None:
+                self.outdir = outdir
+                self.name = name
+
+            def _execute_agent(self, agent_name: str, frontier_index: int):
+                triples_path = self.outdir / "relational_triples.jsonl"
+                triples_path.parent.mkdir(parents=True, exist_ok=True)
+                payload_by_name = {
+                    "run_0": (
+                        '{"topic":"atlantic climate","path":["atlantic climate"],"question":"q","statement":"Reduced equatorial upwelling causes enhanced equatorial warming in the Atlantic Ocean by decreasing the supply of cooler, nutrient-rich waters to the surface.","subj":"reduced equatorial upwelling","rel":"causes","obj":"enhanced equatorial warming in the atlantic ocean","domain":"Global warming climate fingerprint, Atlantic Ocean"}'
+                    ),
+                    "run_1": (
+                        '{"topic":"atlantic climate","path":["atlantic climate"],"question":"q","statement":"Reduced equatorial upwelling leads to enhanced equatorial warming in the Atlantic Ocean by decreasing the supply of cooler, nutrient-rich waters to the surface.","subj":"reduced equatorial upwelling","rel":"leads_to","obj":"enhanced equatorial warming in the atlantic ocean","domain":"Enhanced equatorial warming, Atlantic regime"}'
+                    ),
+                    "run_2": (
+                        '{"topic":"coral refugia","path":["coral refugia"],"question":"q","statement":"The presence of thermal refugia increases coral thermal phenotype diversity.","subj":"the presence of thermal refugia","rel":"increases","obj":"coral thermal phenotype diversity","domain":"Marine heatwaves and coral bleaching"}'
+                    ),
+                }
+                triples_path.write_text(payload_by_name[self.name] + "\n", encoding="utf-8")
+                return DemocritusAgentRecord(
+                    agent_name=agent_name,
+                    frontier_index=frontier_index,
+                    status="ok",
+                    started_at=0.0,
+                    ended_at=1.0,
+                    outputs=(str(triples_path),),
+                    log_path=None,
+                    notes="",
+                )
+
+        class FakeBatchRunner(DemocritusBatchAgenticRunner):
+            def _discover_documents(self):
+                documents = []
+                for index in range(3):
+                    run_name = f"run_{index}"
+                    outdir = Path(self.config.outdir) / run_name
+                    documents.append(
+                        DemocritusBatchDocument(
+                            index=index,
+                            pdf_path=Path(f"/tmp/{run_name}.pdf"),
+                            run_name=run_name,
+                            outdir=outdir,
+                            runner=FakeRunner(outdir, run_name),
+                            plan=((SimpleNamespace(name="triple_extraction_agent"),),),
+                        )
+                    )
+                return tuple(documents)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = FakeBatchRunner(
+                DemocritusBatchConfig(
+                    pdf_dir=Path(tmpdir),
+                    outdir=Path(tmpdir) / "runs",
+                    max_workers=3,
+                    dry_run=False,
+                )
+            )
+            result = runner.run_with_artifacts()
+
+            self.assertIsNotNone(result.csql_bundle)
+            connection = sqlite3.connect(str(result.csql_bundle.sqlite_path))
+            try:
+                localized_row = connection.execute(
+                    """
+                    SELECT surface_forms_json, domain_aliases_json
+                    FROM homotopy_localized_claims
+                    WHERE canonical_subj = 'reduced equatorial upwelling'
+                    """
+                ).fetchone()
+                gluing_row = connection.execute(
+                    """
+                    SELECT regimes_json
+                    FROM regime_gluing_surfaces
+                    WHERE canonical_subj = 'reduced equatorial upwelling'
+                      AND canonical_obj = 'enhanced equatorial warming in the atlantic ocean'
+                    """
+                ).fetchone()
+            finally:
+                connection.close()
+
+            self.assertIsNotNone(localized_row)
+            self.assertIn(
+                "global warming climate fingerprint atlantic ocean",
+                json.loads(localized_row[1]),
+            )
+            self.assertIsNotNone(gluing_row)
+            self.assertIn(
+                "enhanced equatorial warming atlantic regime",
+                json.loads(gluing_row[0]),
+            )
+
+            synthesis_payload = json.loads(result.corpus_synthesis.summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(synthesis_payload["homotopy_summary"]["class_count"], 2)
+            self.assertEqual(synthesis_payload["homotopy_summary"]["cross_document_class_count"], 1)
+            self.assertEqual(synthesis_payload["homotopy_summary"]["within_document_class_count"], 1)
+            first_homotopy_class = synthesis_payload["homotopy_classes"][0]
+            self.assertIn(
+                "cooler, nutrient-rich waters",
+                first_homotopy_class["statement"],
+            )
+            self.assertIn(
+                "global warming climate fingerprint atlantic ocean",
+                first_homotopy_class["domain_aliases"],
+            )
+            synthesis_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
+            self.assertIn("cross-document classes", synthesis_html)
+            self.assertIn("within-document families", synthesis_html)
+
+    def test_corpus_synthesis_suppresses_singleton_equivalence_cards_after_relation_normalization(self) -> None:
+        class FakeRunner:
+            def __init__(self, outdir: Path, name: str) -> None:
+                self.outdir = outdir
+                self.name = name
+
+            def _execute_agent(self, agent_name: str, frontier_index: int):
+                triples_path = self.outdir / "relational_triples.jsonl"
+                triples_path.parent.mkdir(parents=True, exist_ok=True)
+                payload_by_name = {
+                    "run_0": (
+                        '{"topic":"atlantic climate","path":["atlantic climate"],"question":"q","statement":"Reduced equatorial upwelling causes enhanced equatorial warming in the Atlantic Ocean.","subj":"reduced equatorial upwelling","rel":"causes","obj":"enhanced equatorial warming in the atlantic ocean","domain":"Global warming climate fingerprint"}'
+                    ),
+                    "run_1": (
+                        '{"topic":"atlantic climate","path":["atlantic climate"],"question":"q","statement":"Reduced equatorial upwelling leads to enhanced equatorial warming in the Atlantic Ocean.","subj":"reduced equatorial upwelling","rel":"leads_to","obj":"enhanced equatorial warming in the atlantic ocean","domain":"Global warming climate fingerprint"}'
+                    ),
+                    "run_2": (
+                        '{"topic":"atlantic climate","path":["atlantic climate"],"question":"q","statement":"Reduced equatorial upwelling causes enhanced equatorial warming in the Atlantic Ocean.","subj":"reduced equatorial upwelling","rel":"causes","obj":"enhanced equatorial warming in the atlantic ocean","domain":"Enhanced equatorial warming fingerprint"}'
+                    ),
+                    "run_3": (
+                        '{"topic":"atlantic climate","path":["atlantic climate"],"question":"q","statement":"Reduced equatorial upwelling leads to enhanced equatorial warming in the Atlantic Ocean.","subj":"reduced equatorial upwelling","rel":"leads_to","obj":"enhanced equatorial warming in the atlantic ocean","domain":"Enhanced equatorial warming fingerprint"}'
+                    ),
+                }
+                triples_path.write_text(payload_by_name[self.name] + "\n", encoding="utf-8")
+                return DemocritusAgentRecord(
+                    agent_name=agent_name,
+                    frontier_index=frontier_index,
+                    status="ok",
+                    started_at=0.0,
+                    ended_at=1.0,
+                    outputs=(str(triples_path),),
+                    log_path=None,
+                    notes="",
+                )
+
+        class FakeBatchRunner(DemocritusBatchAgenticRunner):
+            def _discover_documents(self):
+                documents = []
+                for index in range(4):
+                    run_name = f"run_{index}"
+                    outdir = Path(self.config.outdir) / run_name
+                    documents.append(
+                        DemocritusBatchDocument(
+                            index=index,
+                            pdf_path=Path(f"/tmp/{run_name}.pdf"),
+                            run_name=run_name,
+                            outdir=outdir,
+                            runner=FakeRunner(outdir, run_name),
+                            plan=((SimpleNamespace(name="triple_extraction_agent"),),),
+                        )
+                    )
+                return tuple(documents)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = FakeBatchRunner(
+                DemocritusBatchConfig(
+                    pdf_dir=Path(tmpdir),
+                    outdir=Path(tmpdir) / "runs",
+                    max_workers=4,
+                    dry_run=False,
+                )
+            )
+            result = runner.run_with_artifacts()
+
+            synthesis_payload = json.loads(result.corpus_synthesis.summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(synthesis_payload["equivalence_classes"], [])
+            rendered_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
+            self.assertNotIn("1 same-direction variant(s)", rendered_html)
 
     def test_single_document_corpus_synthesis_coalesces_near_duplicate_claim_cards(self) -> None:
         class FakeRunner:
@@ -935,6 +1396,7 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+            (run_dir / "reports" / "assets").mkdir(parents=True, exist_ok=True)
             (run_dir / "reports" / "run_alpha_executive_summary.md").write_text(
                 "\n".join(
                     [
@@ -998,6 +1460,7 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             )
             (run_dir / "viz").mkdir(parents=True, exist_ok=True)
             (run_dir / "viz" / "relational_manifold_2d.png").write_bytes(b"fakepng")
+            (run_dir / "reports" / "assets" / "lcm_01_appetite_suppression_pathway.png").write_bytes(b"fakepng")
 
             runner._write_telemetry(
                 batch_started_at=100.0,
@@ -1032,12 +1495,16 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             self.assertIn(f'{run_dir.name}/input.pdf', gui_html)
             self.assertIn("run_alpha_executive_summary.html", gui_html)
             self.assertIn("relational_manifold_viewer.html", gui_html)
+            self.assertIn("LCM graph gallery", gui_html)
+            self.assertIn("lcm_01_appetite_suppression_pathway.png", gui_html)
             summary_viewer = run_dir / "reports" / "run_alpha_executive_summary.html"
             credibility_viewer = run_dir / "reports" / "run_alpha_credibility_report.html"
             manifold_viewer = run_dir / "viz" / "relational_manifold_viewer.html"
+            lcm_viewer = run_dir / "reports" / "run_alpha_lcm_gallery.html"
             self.assertTrue(summary_viewer.exists())
             self.assertTrue(credibility_viewer.exists())
             self.assertTrue(manifold_viewer.exists())
+            self.assertTrue(lcm_viewer.exists())
             summary_html = summary_viewer.read_text(encoding="utf-8")
             self.assertIn("BAFFLE Democritus Reader", summary_html)
             self.assertIn("font-size: 22px", summary_html)
@@ -1051,8 +1518,14 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             self.assertIn("Credibility Report", credibility_html)
             self.assertIn("Appetite suppression is supported by multiple statements.", credibility_html)
             self.assertNotIn('<article class="article">\n      <h1>', credibility_html)
-            self.assertIn("Topic Labels", manifold_viewer.read_text(encoding="utf-8"))
-            self.assertIn("GLP-1 agonists", manifold_viewer.read_text(encoding="utf-8"))
+            manifold_html = manifold_viewer.read_text(encoding="utf-8")
+            self.assertIn("Topic Labels", manifold_html)
+            self.assertIn("GLP-1 agonists", manifold_html)
+            self.assertIn("lcm_01_appetite_suppression_pathway.png", manifold_html)
+            lcm_html = lcm_viewer.read_text(encoding="utf-8")
+            self.assertIn("LCM Graph Gallery", lcm_html)
+            self.assertIn("appetite suppression pathway", lcm_html)
+            self.assertIn("lcm_01_appetite_suppression_pathway.png", lcm_html)
             pdf_fixture.unlink(missing_ok=True)
 
 

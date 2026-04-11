@@ -46,6 +46,12 @@ def _sha256_prefix(path: Path) -> str:
     return digest.hexdigest()[:12]
 
 
+def _relative_href_from(*, start: Path, target: Path) -> str:
+    if not target.exists():
+        return ""
+    return os.path.relpath(target.resolve(), start=start.resolve())
+
+
 def _format_duration(seconds: float) -> str:
     seconds = max(0, int(round(seconds)))
     hours, remainder = divmod(seconds, 3600)
@@ -1492,6 +1498,7 @@ class DemocritusBatchAgenticRunner:
         top_lcms = [
             {
                 "focus": str(row.get("focus") or ""),
+                "file": str(row.get("file") or row.get("lcm_json") or ""),
                 "score": round(_safe_float(row.get("score")), 3),
                 "coupling": round(_safe_float(row.get("coupling")), 3),
                 "n_nodes": _safe_int(row.get("n_nodes")),
@@ -1499,10 +1506,11 @@ class DemocritusBatchAgenticRunner:
             }
             for row in score_rows[:3]
         ]
+        top_lcms = self._attach_lcm_graph_artifacts(run_dir=run_dir, top_lcms=top_lcms)
         summary_path = run_dir / "reports" / f"{document.run_name}_executive_summary.md"
         credibility_path = run_dir / "reports" / f"{document.run_name}_credibility_report.md"
         manifold_path = run_dir / "viz" / "relational_manifold_2d.png"
-        summary_viewer_path, credibility_viewer_path, manifold_viewer_path = self._write_artifact_viewers(
+        summary_viewer_path, credibility_viewer_path, manifold_viewer_path, lcm_viewer_path = self._write_artifact_viewers(
             document,
             summary_path=summary_path,
             credibility_path=credibility_path,
@@ -1534,12 +1542,29 @@ class DemocritusBatchAgenticRunner:
             "summary_href": self._bundle_relative_href(summary_viewer_path),
             "credibility_href": self._bundle_relative_href(credibility_viewer_path),
             "manifold_href": self._bundle_relative_href(manifold_viewer_path),
+            "lcm_viewer_href": self._bundle_relative_href(lcm_viewer_path),
         }
 
     def _bundle_relative_href(self, target_path: Path) -> str:
         if not target_path.exists():
             return ""
         return os.path.relpath(target_path.resolve(), start=self.gui_path.parent.resolve())
+
+    def _attach_lcm_graph_artifacts(
+        self,
+        *,
+        run_dir: Path,
+        top_lcms: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        assets_dir = run_dir / "reports" / self.config.assets_dir
+        enriched: list[dict[str, object]] = []
+        for rank, item in enumerate(top_lcms, start=1):
+            focus_slug = _slugify(str(item.get("focus") or "local causal model"))
+            graph_path = assets_dir / f"lcm_{rank:02d}_{focus_slug}.png"
+            enriched_item = dict(item)
+            enriched_item["graph_path"] = str(graph_path) if graph_path.exists() else ""
+            enriched.append(enriched_item)
+        return enriched
 
     def _write_artifact_viewers(
         self,
@@ -1551,10 +1576,11 @@ class DemocritusBatchAgenticRunner:
         root_topics: list[str],
         top_triples: list[dict[str, object]],
         top_lcms: list[dict[str, object]],
-    ) -> tuple[Path, Path, Path]:
+    ) -> tuple[Path, Path, Path, Path]:
         summary_viewer_path = summary_path.with_suffix(".html")
         credibility_viewer_path = credibility_path.with_suffix(".html")
         manifold_viewer_path = manifold_path.with_name("relational_manifold_viewer.html")
+        lcm_viewer_path = summary_path.parent / f"{document.run_name}_lcm_gallery.html"
         summary_viewer_path.parent.mkdir(parents=True, exist_ok=True)
         manifold_viewer_path.parent.mkdir(parents=True, exist_ok=True)
         summary_viewer_path.write_text(
@@ -1586,7 +1612,15 @@ class DemocritusBatchAgenticRunner:
             ),
             encoding="utf-8",
         )
-        return summary_viewer_path, credibility_viewer_path, manifold_viewer_path
+        lcm_viewer_path.write_text(
+            self._render_lcm_viewer_html(
+                title=document.pdf_path.stem.replace("_", " "),
+                viewer_path=lcm_viewer_path,
+                top_lcms=top_lcms,
+            ),
+            encoding="utf-8",
+        )
+        return summary_viewer_path, credibility_viewer_path, manifold_viewer_path, lcm_viewer_path
 
     def _render_report_viewer_html(
         self,
@@ -1723,10 +1757,17 @@ class DemocritusBatchAgenticRunner:
             for item in top_triples[:4]
         )
         lcm_markup = "".join(
-            '<article class="lcm-row">'
-            f'<div><strong>{esc(item.get("focus") or "local causal model")}</strong></div>'
-            f'<div class="lcm-meta">score {esc(item.get("score") or 0)} · coupling {esc(item.get("coupling") or 0)} · {esc(item.get("n_nodes") or 0)} nodes · {esc(item.get("n_edges") or 0)} edges</div>'
-            "</article>"
+            (
+                '<article class="lcm-row">'
+                f'<div><strong>{esc(item.get("focus") or "local causal model")}</strong></div>'
+                f'<div class="lcm-meta">score {esc(item.get("score") or 0)} · coupling {esc(item.get("coupling") or 0)} · {esc(item.get("n_nodes") or 0)} nodes · {esc(item.get("n_edges") or 0)} edges</div>'
+                + (
+                    f'<img src="{esc(_relative_href_from(start=manifold_path.parent, target=Path(str(item.get("graph_path")))))}" alt="{esc(item.get("focus") or "local causal model")} graph" loading="lazy">'
+                    if str(item.get("graph_path") or "").strip() and Path(str(item.get("graph_path"))).exists()
+                    else ""
+                )
+                + "</article>"
+            )
             for item in top_lcms[:4]
         )
         image_markup = (
@@ -1798,6 +1839,14 @@ class DemocritusBatchAgenticRunner:
       padding: 14px;
       margin-bottom: 12px;
     }}
+    .lcm-row img {{
+      width: 100%;
+      margin-top: 12px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      display: block;
+      background: #faf8f4;
+    }}
     .mini-title {{ font-size: 18px; line-height: 1.35; }}
     .mini-card p, .lcm-meta {{
       margin: 10px 0 0;
@@ -1837,6 +1886,93 @@ class DemocritusBatchAgenticRunner:
         {lcm_markup or '<div class="empty">LCM scores will appear here after sweep scoring.</div>'}
       </aside>
     </div>
+  </div>
+</body>
+</html>"""
+
+    def _render_lcm_viewer_html(
+        self,
+        *,
+        title: str,
+        viewer_path: Path,
+        top_lcms: list[dict[str, object]],
+    ) -> str:
+        def esc(value: object) -> str:
+            return html.escape(str(value))
+
+        cards = []
+        for item in top_lcms[:4]:
+            graph_path_raw = str(item.get("graph_path") or "").strip()
+            graph_markup = '<div class="empty">Rendered graph PNG is not available for this model.</div>'
+            if graph_path_raw and Path(graph_path_raw).exists():
+                graph_markup = (
+                    f'<img src="{esc(_relative_href_from(start=viewer_path.parent, target=Path(graph_path_raw)))}" '
+                    f'alt="{esc(item.get("focus") or "local causal model")} graph" loading="lazy">'
+                )
+            cards.append(
+                '<article class="lcm-card">'
+                f'<div class="eyebrow">Local Causal Model</div>'
+                f'<h2>{esc(item.get("focus") or "local causal model")}</h2>'
+                f'<p class="meta">score {esc(item.get("score") or 0)} · coupling {esc(item.get("coupling") or 0)} · '
+                f'{esc(item.get("n_nodes") or 0)} nodes · {esc(item.get("n_edges") or 0)} edges</p>'
+                f'{graph_markup}'
+                '</article>'
+            )
+        gallery_markup = "".join(cards) or '<div class="empty">Selected LCM graphs will appear here once PNG rendering is enabled.</div>'
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LCM Graph Gallery · {esc(title)}</title>
+  <style>
+    :root {{
+      --ink: #142433;
+      --muted: #5a7184;
+      --paper: #f5efe5;
+      --card: rgba(255, 252, 246, 0.97);
+      --line: #d8ccbc;
+      --accent: #0f766e;
+      --shadow: 0 18px 44px rgba(20, 36, 51, 0.08);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      color: var(--ink);
+      font-family: Georgia, "Iowan Old Style", serif;
+      background:
+        radial-gradient(circle at top left, rgba(15,118,110,0.08), transparent 28%),
+        linear-gradient(180deg, #fbf6ee 0%, #eee4d6 100%);
+    }}
+    .shell {{ max-width: 1180px; margin: 0 auto; padding: 28px 18px 44px; }}
+    .hero, .lcm-card {{
+      background: var(--card);
+      border: 1px solid rgba(216, 204, 188, 0.96);
+      border-radius: 28px;
+      box-shadow: var(--shadow);
+    }}
+    .hero {{ padding: 26px; margin-bottom: 20px; }}
+    .eyebrow {{ font-size: 12px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--muted); }}
+    h1 {{ margin: 10px 0 8px; font-size: clamp(32px, 4vw, 54px); line-height: 0.98; }}
+    .hero p {{ margin: 0; color: var(--muted); font-size: 17px; line-height: 1.65; max-width: 920px; }}
+    .grid {{ display: grid; gap: 18px; }}
+    .lcm-card {{ padding: 22px; }}
+    .lcm-card h2 {{ margin: 8px 0 0; font-size: 26px; }}
+    .meta {{ color: var(--muted); font-size: 15px; line-height: 1.6; }}
+    .lcm-card img {{ width: 100%; margin-top: 14px; border-radius: 18px; border: 1px solid var(--line); background: white; display: block; }}
+    .empty {{ margin-top: 14px; border: 1px dashed var(--line); border-radius: 18px; padding: 18px; color: var(--muted); background: rgba(255,255,255,0.72); }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <div class="eyebrow">BAFFLE Democritus Viewer</div>
+      <h1>LCM Graph Gallery</h1>
+      <p>{esc(title)}. This view surfaces selected local causal model graphs directly, so the highest-scoring WhyGraph structures are visible alongside the summaries and credibility reports.</p>
+    </section>
+    <section class="grid">
+      {gallery_markup}
+    </section>
   </div>
 </body>
 </html>"""
@@ -1963,10 +2099,17 @@ class DemocritusBatchAgenticRunner:
                 for item in card["top_triples"]
             ) or '<div class="empty">Relational triples will appear here after extraction.</div>'
             lcm_markup = "".join(
-                '<article class="lcm-row">'
-                f'<div><strong>{esc(item["focus"] or "local causal model")}</strong></div>'
-                f'<div class="lcm-meta">score {esc(item["score"])} · coupling {esc(item["coupling"])} · {esc(item["n_nodes"])} nodes · {esc(item["n_edges"])} edges</div>'
-                "</article>"
+                (
+                    '<article class="lcm-row">'
+                    f'<div><strong>{esc(item["focus"] or "local causal model")}</strong></div>'
+                    f'<div class="lcm-meta">score {esc(item["score"])} · coupling {esc(item["coupling"])} · {esc(item["n_nodes"])} nodes · {esc(item["n_edges"])} edges</div>'
+                    + (
+                        f'<img src="{esc(self._bundle_relative_href(Path(str(item["graph_path"]))))}" alt="{esc(item["focus"] or "local causal model")} graph" loading="lazy">'
+                        if str(item.get("graph_path") or "").strip() and Path(str(item.get("graph_path"))).exists()
+                        else ""
+                    )
+                    + "</article>"
+                )
                 for item in card["top_lcms"]
             ) or '<div class="empty">LCM scores will appear here after sweep scoring.</div>'
             links = []
@@ -1978,6 +2121,8 @@ class DemocritusBatchAgenticRunner:
                 links.append(f'<a href="{esc(card["credibility_href"])}" target="_blank" rel="noreferrer">Credibility report</a>')
             if card["manifold_href"]:
                 links.append(f'<a href="{esc(card["manifold_href"])}" target="_blank" rel="noreferrer">Manifold view</a>')
+            if card["lcm_viewer_href"]:
+                links.append(f'<a href="{esc(card["lcm_viewer_href"])}" target="_blank" rel="noreferrer">LCM graph gallery</a>')
             link_markup = " · ".join(links) if links else "Artifacts will appear as this run completes."
             status_chip = chip(str(card["status"]).replace("_", " "), tone_for_status(str(card["status"])))
             progress_chip = chip(str(card["progress_text"]), "neutral")
@@ -2136,6 +2281,14 @@ class DemocritusBatchAgenticRunner:
       border: 1px solid var(--line);
       border-radius: 18px;
       padding: 14px;
+    }}
+    .lcm-row img {{
+      width: 100%;
+      margin-top: 12px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      display: block;
+      background: #faf8f4;
     }}
     .mini-kicker {{ font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }}
     .mini-title {{ margin-top: 8px; font-size: 16px; line-height: 1.35; }}

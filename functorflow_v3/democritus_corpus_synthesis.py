@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import itertools
 import json
 import os
 import re
@@ -10,6 +11,11 @@ import sqlite3
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .causal_homotopy import (
+    normalize_claim_text as _normalize_claim_text,
+    normalize_relation as _normalize_relation,
+    relation_polarity as _relation_polarity,
+)
 from .textbook_backstop import recommend_textbook_backstop, render_textbook_backstop_html
 
 
@@ -81,71 +87,54 @@ class DiagnosticCorpusClaim:
         return asdict(self)
 
 
-_LEADING_PHRASE_PREFIXES = (
-    "the use of ",
-    "use of ",
-    "treatment with ",
-    "treatment using ",
-    "administration of ",
-    "exposure to ",
-    "an increase in ",
-    "increase in ",
-    "a rise in ",
-    "rise in ",
-    "the effect of ",
-    "effect of ",
-)
+@dataclass(frozen=True)
+class HomotopyClaimClass:
+    subj: str
+    rel: str
+    obj: str
+    domain: str
+    statement: str
+    canonical_subj: str
+    canonical_rel: str
+    canonical_obj: str
+    document_support: int
+    claim_count: int
+    support_ratio: float
+    truth_value: str
+    supporting_runs: tuple[str, ...]
+    surface_form_count: int
+    surface_forms: tuple[str, ...]
+    domain_aliases: tuple[str, ...]
+    variant_count: int
+    simplex_vertices: int
+    simplex_edges: int
+    simplex_triangles: int
+    open_horns: int
+    connected_components: int
+    horn_fill_ratio: float
+    coherence_state: str
 
-_CLAUSE_MARKERS = (
-    ", which ",
-    " which ",
-    " by ",
-    " due to ",
-    " through ",
-    " allowing ",
-    " because ",
-    " while ",
-    " when ",
-)
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
 
-_PHRASE_REWRITES: tuple[tuple[str, str], ...] = (
-    (r"\bglucagon[\s-]+like[\s-]+peptide[\s-]+1\b", "glp1"),
-    (r"\bglp[\s-]*1\b", "glp1"),
-    (r"\bglp1ras?\b", "glp1 receptor agonist"),
-    (r"\bglp1 receptor agonists\b", "glp1 receptor agonist"),
-    (r"\bglp1 medicines\b", "glp1 receptor agonist"),
-    (r"\bglp1 drugs\b", "glp1 receptor agonist"),
-    (r"\bindividuals\b", "people"),
-    (r"\bpatients\b", "people"),
-    (r"\bsubjects\b", "people"),
-    (r"\bpersons\b", "people"),
-    (r"\bmoving\b", "move"),
-    (r"\bmoves\b", "move"),
-)
 
-_RELATION_REWRITES = {
-    "leads_to": "causes",
-    "leads to": "causes",
-    "drives": "causes",
-    "results_in": "causes",
-    "results in": "causes",
-    "influences": "affects",
-}
+@dataclass(frozen=True)
+class RegimeGluingClaim:
+    canonical_subj: str
+    canonical_obj: str
+    regime_variant_count: int
+    regime_count: int
+    canonical_relation_count: int
+    polarity_count: int
+    total_document_support: int
+    max_regime_support: int
+    regimes: tuple[str, ...]
+    canonical_relations: tuple[str, ...]
+    gluing_state: str
 
-_POSITIVE_RELATIONS = {
-    "causes",
-    "affects",
-    "increases",
-    "supports",
-}
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
 
-_NEGATIVE_RELATIONS = {
-    "reduces",
-    "decreases",
-    "prevents",
-    "blocks",
-    "inhibits",
-}
 
 _DISPLAY_TOKEN_STOPWORDS = {
     "a",
@@ -165,6 +154,14 @@ _DISPLAY_TOKEN_STOPWORDS = {
     "which",
 }
 
+_SURFACE_TOKEN_REWRITES: tuple[tuple[str, str], ...] = (
+    (r"\bglucagon[\s-]+like[\s-]+peptide[\s-]+1\b", "glp1"),
+    (r"\bglp[\s-]*1\b", "glp1"),
+    (r"\bglp1 medicines\b", "glp1 receptor agonist"),
+    (r"\bglp1 drugs\b", "glp1 receptor agonist"),
+    (r"\bglp1 receptor agonists\b", "glp1 receptor agonist"),
+)
+
 
 def build_democritus_corpus_synthesis(
     *,
@@ -183,7 +180,13 @@ def build_democritus_corpus_synthesis(
         total_documents = _scalar(connection, "SELECT COUNT(*) FROM documents")
         claims = _load_claims(connection, total_documents=total_documents)
         equivalence_classes, disagreements = _load_relation_groups(connection, total_documents=total_documents)
-        diagnostic_claims = _load_diagnostic_claims(claims, total_documents=total_documents)
+        diagnostic_claims = _load_diagnostic_claims(connection, total_documents=total_documents)
+        homotopy_classes = _load_homotopy_claim_classes(
+            connection,
+            claims=claims,
+            total_documents=total_documents,
+        )
+        regime_gluing_claims = _load_regime_gluing_claims(connection)
         contested_keys = {
             (item.subj, item.obj, item.domain)
             for item in disagreements
@@ -202,6 +205,21 @@ def build_democritus_corpus_synthesis(
         weak_claims = _coalesce_display_claims(weak_claims, total_documents=total_documents)
         study_cards = _load_study_cards(connection, batch_outdir=batch_outdir)
 
+    homotopy_summary = {
+        "class_count": len(homotopy_classes),
+        "within_document_class_count": sum(1 for item in homotopy_classes if item.document_support <= 1),
+        "cross_document_class_count": sum(1 for item in homotopy_classes if item.document_support > 1),
+        "coherent_count": sum(1 for item in homotopy_classes if item.coherence_state == "coherent"),
+        "partially_glued_count": sum(1 for item in homotopy_classes if item.coherence_state == "partially_glued"),
+        "disconnected_count": sum(1 for item in homotopy_classes if item.coherence_state == "disconnected"),
+    }
+    regime_gluing_summary = {
+        "surface_count": len(regime_gluing_claims),
+        "obstructed_count": sum(1 for item in regime_gluing_claims if item.gluing_state == "obstructed"),
+        "regime_sensitive_count": sum(1 for item in regime_gluing_claims if item.gluing_state == "regime_sensitive"),
+        "multi_regime_glued_count": sum(1 for item in regime_gluing_claims if item.gluing_state == "multi_regime_glued"),
+    }
+
     payload = {
         "query": query,
         "csql_sqlite_path": str(csql_sqlite_path),
@@ -211,6 +229,10 @@ def build_democritus_corpus_synthesis(
         "diagnostic_supported": [item.as_dict() for item in diagnostic_claims[:12]],
         "equivalence_classes": [item.as_dict() for item in equivalence_classes[:8]],
         "disagreements": [item.as_dict() for item in disagreements[:8]],
+        "homotopy_summary": homotopy_summary,
+        "homotopy_classes": [item.as_dict() for item in homotopy_classes[:8]],
+        "regime_gluing_summary": regime_gluing_summary,
+        "regime_gluing_claims": [item.as_dict() for item in regime_gluing_claims[:8]],
         "study_cards": study_cards,
     }
     summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -247,106 +269,80 @@ def _split_runs(raw_runs: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(runs))
 
 
-def _normalize_relation(value: str) -> str:
-    normalized = re.sub(r"\s+", " ", str(value or "").strip().lower())
-    normalized = normalized.replace("-", "_")
-    return _RELATION_REWRITES.get(normalized, normalized)
-
-
-def _relation_polarity(value: str) -> str:
-    normalized = _normalize_relation(value)
-    if normalized in _POSITIVE_RELATIONS:
-        return "positive"
-    if normalized in _NEGATIVE_RELATIONS:
-        return "negative"
-    return normalized
-
-
-def _normalize_claim_text(value: str) -> str:
-    text = str(value or "").strip().lower()
-    if not text:
-        return ""
-    for marker in _CLAUSE_MARKERS:
-        if marker in text:
-            prefix, _, _ = text.partition(marker)
-            if prefix.strip():
-                text = prefix.strip()
-                break
-    text = text.replace("_", " ")
-    text = re.sub(r"[\-/]+", " ", text)
-    text = re.sub(r"[^\w\s]", " ", text)
-    for pattern, replacement in _PHRASE_REWRITES:
-        text = re.sub(pattern, replacement, text)
-    text = re.sub(r"\s+", " ", text).strip()
-    changed = True
-    while changed and text:
-        changed = False
-        for prefix in _LEADING_PHRASE_PREFIXES:
-            if text.startswith(prefix):
-                text = text[len(prefix) :].strip()
-                changed = True
-    text = re.sub(r"^(?:the|a|an)\s+", "", text).strip()
-    return re.sub(r"\s+", " ", text).strip()
+def _decode_json_array(raw_value: object) -> tuple[str, ...]:
+    if raw_value is None:
+        return ()
+    if isinstance(raw_value, (list, tuple)):
+        values = raw_value
+    else:
+        text = str(raw_value or "").strip()
+        if not text:
+            return ()
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = [item.strip() for item in text.split(",") if item.strip()]
+        values = parsed if isinstance(parsed, list) else [parsed]
+    decoded = [str(item).strip() for item in values if str(item).strip()]
+    return tuple(dict.fromkeys(decoded))
 
 
 def _load_diagnostic_claims(
-    claims: list[CorpusClaim],
+    connection: sqlite3.Connection,
     *,
     total_documents: int,
 ) -> list[DiagnosticCorpusClaim]:
-    grouped: dict[tuple[str, str, str], list[CorpusClaim]] = {}
-    for item in claims:
-        key = (
-            _normalize_claim_text(item.subj),
-            _normalize_relation(item.rel),
-            _normalize_claim_text(item.obj),
-        )
-        if not all(key):
-            continue
-        grouped.setdefault(key, []).append(item)
-
+    rows = connection.execute(
+        """
+        SELECT
+            canonical_subj,
+            canonical_rel,
+            canonical_obj,
+            canonical_domain,
+            statement,
+            document_support,
+            claim_count,
+            supporting_runs_json,
+            surface_form_count,
+            exact_document_support_max,
+            surface_forms_json
+        FROM homotopy_localized_claims
+        ORDER BY document_support DESC, surface_form_count DESC, claim_count DESC, canonical_subj, canonical_obj
+        """
+    ).fetchall()
     diagnostic_claims: list[DiagnosticCorpusClaim] = []
-    for (canonical_subj, canonical_rel, canonical_obj), items in grouped.items():
-        supporting_runs: list[str] = []
-        seen_runs: set[str] = set()
-        for item in items:
-            for run_name in item.supporting_runs:
-                if run_name in seen_runs:
-                    continue
-                seen_runs.add(run_name)
-                supporting_runs.append(run_name)
-        document_support = len(supporting_runs)
+    for row in rows:
+        canonical_subj = str(row[0] or "")
+        canonical_rel = str(row[1] or "")
+        canonical_obj = str(row[2] or "")
+        document_support = int(row[5] or 0)
         if document_support < 2:
             continue
-        surface_forms = tuple(
-            dict.fromkeys(f"{item.subj} {item.rel} {item.obj}" for item in items)
-        )
-        exact_document_support_max = max(int(item.document_support) for item in items)
-        if document_support <= exact_document_support_max and len(surface_forms) <= 1:
+        surface_form_count = int(row[8] or 0)
+        exact_document_support_max = int(row[9] or 0)
+        if document_support <= exact_document_support_max and surface_form_count <= 1:
             continue
-        representative = max(
-            items,
-            key=lambda item: (int(item.document_support), int(item.claim_count), len(item.statement)),
-        )
+        supporting_runs = _decode_json_array(row[7])
+        surface_forms = _decode_json_array(row[10])
         diagnostic_claims.append(
             DiagnosticCorpusClaim(
-                subj=representative.subj,
-                rel=representative.rel,
-                obj=representative.obj,
-                domain=representative.domain,
-                statement=representative.statement,
+                subj=canonical_subj,
+                rel=canonical_rel,
+                obj=canonical_obj,
+                domain=str(row[3] or ""),
+                statement=str(row[4] or ""),
                 canonical_subj=canonical_subj,
                 canonical_rel=canonical_rel,
                 canonical_obj=canonical_obj,
                 document_support=document_support,
-                claim_count=sum(int(item.claim_count) for item in items),
+                claim_count=int(row[6] or 0),
                 support_ratio=round(document_support / total_documents, 3) if total_documents else 0.0,
                 truth_value=_support_truth_value(
                     document_support=document_support,
                     total_documents=total_documents,
                 ),
                 supporting_runs=tuple(supporting_runs),
-                surface_form_count=len(surface_forms),
+                surface_form_count=surface_form_count,
                 exact_document_support_max=exact_document_support_max,
                 surface_forms=surface_forms[:4],
             )
@@ -361,6 +357,303 @@ def _load_diagnostic_claims(
         )
     )
     return diagnostic_claims
+
+
+def _variant_surface_form(item: CorpusClaim) -> str:
+    surface = str(item.statement or "").strip()
+    if surface:
+        return " ".join(surface.split())
+    return " ".join(f"{item.subj} {item.rel} {item.obj}".split()).strip()
+
+
+def _variant_signature(item: CorpusClaim) -> tuple[str, ...]:
+    tokens: list[str] = []
+    tokens.extend(_token_signature(item.subj))
+    tokens.extend(_token_signature(item.obj))
+    tokens.extend(_token_signature(item.domain))
+    tokens.extend(_token_signature(_variant_surface_form(item)))
+    relation = _normalize_relation(item.rel)
+    if relation:
+        tokens.append(relation)
+    return tuple(sorted(dict.fromkeys(token for token in tokens if token)))
+
+
+def _surface_signature(value: str) -> tuple[str, ...]:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ()
+    text = text.replace("_", " ")
+    for pattern, replacement in _SURFACE_TOKEN_REWRITES:
+        text = re.sub(pattern, replacement, text)
+    text = re.sub(r"[\-/]+", " ", text)
+    text = re.sub(r"[^\w\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ()
+    return tuple(
+        sorted(
+            dict.fromkeys(
+                token
+                for token in text.split()
+                if token and token not in _DISPLAY_TOKEN_STOPWORDS
+            )
+        )
+    )
+
+
+def _variant_similarity(left: CorpusClaim, right: CorpusClaim) -> float:
+    subj_score = _jaccard_similarity(_token_signature(left.subj), _token_signature(right.subj))
+    obj_score = _jaccard_similarity(_token_signature(left.obj), _token_signature(right.obj))
+    domain_score = _jaccard_similarity(_token_signature(left.domain), _token_signature(right.domain))
+    statement_score = _jaccard_similarity(_surface_signature(_variant_surface_form(left)), _surface_signature(_variant_surface_form(right)))
+    relation_score = 0.0
+    if _normalize_relation(left.rel) == _normalize_relation(right.rel):
+        relation_score = 1.0
+    elif _relation_polarity(left.rel) == _relation_polarity(right.rel):
+        relation_score = 0.6
+    return (
+        (0.18 * subj_score)
+        + (0.18 * obj_score)
+        + (0.24 * domain_score)
+        + (0.30 * statement_score)
+        + (0.10 * relation_score)
+    )
+
+
+def _should_link_homotopy_variants(left: CorpusClaim, right: CorpusClaim) -> bool:
+    if _relation_polarity(left.rel) != _relation_polarity(right.rel):
+        return False
+    subj_score = _jaccard_similarity(_token_signature(left.subj), _token_signature(right.subj))
+    obj_score = _jaccard_similarity(_token_signature(left.obj), _token_signature(right.obj))
+    if subj_score < 0.65 or obj_score < 0.65:
+        return False
+    domain_score = _jaccard_similarity(_token_signature(left.domain), _token_signature(right.domain))
+    statement_score = _jaccard_similarity(_surface_signature(_variant_surface_form(left)), _surface_signature(_variant_surface_form(right)))
+    combined_score = _variant_similarity(left, right)
+    if statement_score >= 0.76:
+        return True
+    if statement_score >= 0.62 and domain_score >= 0.25:
+        return True
+    if statement_score >= 0.52 and domain_score >= 0.55:
+        return True
+    return combined_score >= 0.64 and statement_score >= 0.48 and domain_score >= 0.40
+
+
+def _homotopy_graph_metrics(items: list[CorpusClaim]) -> tuple[int, int, int, int, float, str]:
+    vertex_count = len(items)
+    if vertex_count <= 1:
+        return 0, 0, 0, 1, 1.0, "coherent"
+
+    adjacency: list[set[int]] = [set() for _ in items]
+    edge_count = 0
+    for left_index, right_index in itertools.combinations(range(vertex_count), 2):
+        if not _should_link_homotopy_variants(items[left_index], items[right_index]):
+            continue
+        adjacency[left_index].add(right_index)
+        adjacency[right_index].add(left_index)
+        edge_count += 1
+
+    connected_components = 0
+    seen: set[int] = set()
+    for start_index in range(vertex_count):
+        if start_index in seen:
+            continue
+        connected_components += 1
+        stack = [start_index]
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            stack.extend(sorted(adjacency[current] - seen))
+
+    triangle_count = 0
+    open_horns = 0
+    for left_index, middle_index, right_index in itertools.combinations(range(vertex_count), 3):
+        edges_present = sum(
+            (
+                int(middle_index in adjacency[left_index]),
+                int(right_index in adjacency[left_index]),
+                int(right_index in adjacency[middle_index]),
+            )
+        )
+        if edges_present == 3:
+            triangle_count += 1
+        elif edges_present == 2:
+            open_horns += 1
+
+    denominator = triangle_count + open_horns
+    horn_fill_ratio = round((triangle_count / denominator), 3) if denominator else 1.0
+    if connected_components == 1 and horn_fill_ratio >= 0.75:
+        coherence_state = "coherent"
+    elif connected_components == 1:
+        coherence_state = "partially_glued"
+    else:
+        coherence_state = "disconnected"
+    return edge_count, triangle_count, open_horns, connected_components, horn_fill_ratio, coherence_state
+
+
+def _load_homotopy_claim_classes(
+    connection: sqlite3.Connection,
+    *,
+    claims: list[CorpusClaim],
+    total_documents: int,
+) -> list[HomotopyClaimClass]:
+    grouped: dict[tuple[str, str, str], list[CorpusClaim]] = {}
+    for item in claims:
+        key = (
+            _normalize_claim_text(item.subj),
+            _normalize_relation(item.rel),
+            _normalize_claim_text(item.obj),
+        )
+        if not all(key):
+            continue
+        grouped.setdefault(key, []).append(item)
+
+    localized_rows = connection.execute(
+        """
+        SELECT
+            canonical_subj,
+            canonical_rel,
+            canonical_obj,
+            canonical_domain,
+            statement,
+            document_support,
+            claim_count,
+            supporting_runs_json,
+            surface_form_count,
+            surface_forms_json,
+            domain_aliases_json,
+            variant_count
+        FROM homotopy_localized_claims
+        ORDER BY document_support DESC, surface_form_count DESC, claim_count DESC, canonical_subj, canonical_obj
+        """
+    ).fetchall()
+
+    homotopy_classes: list[HomotopyClaimClass] = []
+    for row in localized_rows:
+        canonical_subj = str(row[0] or "")
+        canonical_rel = str(row[1] or "")
+        canonical_obj = str(row[2] or "")
+        items = grouped.get((canonical_subj, canonical_rel, canonical_obj), [])
+        surface_forms = _decode_json_array(row[9])
+        domain_aliases = _decode_json_array(row[10])
+        if not items and len(surface_forms) <= 1 and len(domain_aliases) <= 1:
+            continue
+        simplex_edges, simplex_triangles, open_horns, connected_components, horn_fill_ratio, coherence_state = _homotopy_graph_metrics(items)
+        supporting_runs = _decode_json_array(row[7])
+        document_support = int(row[5] or 0)
+        representative = max(
+            items,
+            key=lambda item: (
+                int(item.document_support),
+                int(item.claim_count),
+                _domain_rank(item.domain),
+                len(item.statement),
+            ),
+            default=CorpusClaim(
+                subj=canonical_subj,
+                rel=canonical_rel,
+                obj=canonical_obj,
+                domain=str(row[3] or ""),
+                statement=str(row[4] or ""),
+                document_support=document_support,
+                claim_count=int(row[6] or 0),
+                support_ratio=round(document_support / total_documents, 3) if total_documents else 0.0,
+                truth_value=_support_truth_value(document_support=document_support, total_documents=total_documents),
+                supporting_runs=supporting_runs,
+            ),
+        )
+        homotopy_classes.append(
+            HomotopyClaimClass(
+                subj=representative.subj,
+                rel=representative.rel,
+                obj=representative.obj,
+                domain=max(domain_aliases, key=_domain_rank, default=str(row[3] or representative.domain)),
+                statement=str(row[4] or representative.statement),
+                canonical_subj=canonical_subj,
+                canonical_rel=canonical_rel,
+                canonical_obj=canonical_obj,
+                document_support=document_support,
+                claim_count=int(row[6] or 0),
+                support_ratio=round(document_support / total_documents, 3) if total_documents else 0.0,
+                truth_value=_support_truth_value(
+                    document_support=document_support,
+                    total_documents=total_documents,
+                ),
+                supporting_runs=tuple(supporting_runs),
+                surface_form_count=int(row[8] or len(surface_forms)),
+                surface_forms=surface_forms[:6],
+                domain_aliases=domain_aliases[:6],
+                variant_count=int(row[11] or len(items)),
+                simplex_vertices=max(len(items), int(row[8] or 0)),
+                simplex_edges=simplex_edges,
+                simplex_triangles=simplex_triangles,
+                open_horns=open_horns,
+                connected_components=connected_components,
+                horn_fill_ratio=horn_fill_ratio,
+                coherence_state=coherence_state,
+            )
+        )
+
+    homotopy_classes.sort(
+        key=lambda item: (
+            -item.document_support,
+            -item.surface_form_count,
+            -item.claim_count,
+            item.subj.lower(),
+            item.obj.lower(),
+        )
+    )
+    return homotopy_classes
+
+
+def _load_regime_gluing_claims(connection: sqlite3.Connection) -> list[RegimeGluingClaim]:
+    rows = connection.execute(
+        """
+        SELECT
+            canonical_subj,
+            canonical_obj,
+            regime_variant_count,
+            regime_count,
+            canonical_relation_count,
+            polarity_count,
+            total_document_support,
+            max_regime_support,
+            regimes_json,
+            canonical_relations_json,
+            gluing_state
+        FROM regime_gluing_surfaces
+        ORDER BY
+            CASE gluing_state
+                WHEN 'obstructed' THEN 0
+                WHEN 'regime_sensitive' THEN 1
+                WHEN 'multi_regime_glued' THEN 2
+                ELSE 3
+            END,
+            total_document_support DESC,
+            canonical_subj,
+            canonical_obj
+        """
+    ).fetchall()
+    claims: list[RegimeGluingClaim] = []
+    for row in rows:
+        claims.append(
+            RegimeGluingClaim(
+                canonical_subj=str(row[0] or ""),
+                canonical_obj=str(row[1] or ""),
+                regime_variant_count=int(row[2] or 0),
+                regime_count=int(row[3] or 0),
+                canonical_relation_count=int(row[4] or 0),
+                polarity_count=int(row[5] or 0),
+                total_document_support=int(row[6] or 0),
+                max_regime_support=int(row[7] or 0),
+                regimes=_decode_json_array(row[8]),
+                canonical_relations=_decode_json_array(row[9]),
+                gluing_state=str(row[10] or "single_regime"),
+            )
+        )
+    return claims
 
 
 def _load_claims(connection: sqlite3.Connection, *, total_documents: int) -> list[CorpusClaim]:
@@ -754,6 +1047,7 @@ def _load_relation_groups(
         equivalence_classes,
         total_documents=total_documents,
     )
+    equivalence_classes = [item for item in equivalence_classes if len(item.variants) > 1]
     equivalence_classes.sort(
         key=lambda item: (
             -max(variant.document_support for variant in item.variants),
@@ -942,6 +1236,68 @@ def _render_diagnostic_claim_card(claim: dict[str, object]) -> str:
     )
 
 
+def _render_homotopy_card(item: dict[str, object]) -> str:
+    def esc(value: object) -> str:
+        return html.escape(str(value))
+
+    surface_preview = " | ".join(str(entry) for entry in (item.get("surface_forms") or [])[:3])
+    domain_aliases = [
+        str(entry).strip()
+        for entry in (item.get("domain_aliases") or [])
+        if str(entry).strip()
+    ]
+    alternate_domains = [entry for entry in domain_aliases if entry != str(item.get("domain") or "")]
+    return (
+        '<article class="homotopy-card">'
+        f'<div class="claim-meta">{esc(item.get("coherence_state") or "coherent").replace("_", " ")} · '
+        f'{esc(item.get("surface_form_count") or 0)} surface form(s) · '
+        f'{esc(item.get("document_support") or 0)} study(s)</div>'
+        f'<h3>{esc(item.get("subj") or "")} {esc(item.get("rel") or "")} {esc(item.get("obj") or "")}</h3>'
+        + (f'<p>{esc(item.get("statement") or item.get("domain") or "")}</p>' if item.get("statement") or item.get("domain") else "")
+        + (
+            f'<p class="trace">Canonical key: {esc(item.get("canonical_subj") or "")} · '
+            f'{esc(item.get("canonical_rel") or "")} · {esc(item.get("canonical_obj") or "")}</p>'
+        )
+        + (
+            f'<p class="trace">Vertices: {esc(item.get("simplex_vertices") or 0)} · '
+            f'Edges: {esc(item.get("simplex_edges") or 0)} · '
+            f'Filled triangles: {esc(item.get("simplex_triangles") or 0)} · '
+            f'Open horns: {esc(item.get("open_horns") or 0)} · '
+            f'Horn-fill ratio: {esc(item.get("horn_fill_ratio") or 0)}</p>'
+        )
+        + (f'<p class="trace">Surface forms: {esc(surface_preview)}</p>' if surface_preview else "")
+        + (
+            f'<p class="trace">Also seen under: {esc(" | ".join(alternate_domains[:3]))}</p>'
+            if alternate_domains
+            else ""
+        )
+        + "</article>"
+    )
+
+
+def _render_regime_gluing_card(item: dict[str, object]) -> str:
+    def esc(value: object) -> str:
+        return html.escape(str(value))
+
+    regimes = " | ".join(str(entry) for entry in (item.get("regimes") or [])[:4])
+    relations = " | ".join(str(entry) for entry in (item.get("canonical_relations") or [])[:4])
+    gluing_state = str(item.get("gluing_state") or "single_regime").replace("_", " ")
+    return (
+        '<article class="regime-card">'
+        f'<div class="claim-meta">{esc(gluing_state)} · {esc(item.get("regime_count") or 0)} regime(s) · '
+        f'{esc(item.get("total_document_support") or 0)} total supporting study hits</div>'
+        f'<h3>{esc(item.get("canonical_subj") or "")} -> {esc(item.get("canonical_obj") or "")}</h3>'
+        + (f'<p class="trace">Regimes: {esc(regimes)}</p>' if regimes else "")
+        + (f'<p class="trace">Relation family: {esc(relations)}</p>' if relations else "")
+        + (
+            f'<p class="trace">Regime variants: {esc(item.get("regime_variant_count") or 0)} · '
+            f'Polarity count: {esc(item.get("polarity_count") or 0)} · '
+            f'Max single-regime support: {esc(item.get("max_regime_support") or 0)}</p>'
+        )
+        + "</article>"
+    )
+
+
 def _render_study_card(item: dict[str, object]) -> str:
     def esc(value: object) -> str:
         return html.escape(str(value))
@@ -1013,6 +1369,12 @@ def _render_dashboard_html(
     disagreement_trace = (
         "These cards are reserved for genuine polarity conflicts, where the recovered corpus supports opposed directions for the same subject/object backbone."
     )
+    homotopy_trace = (
+        "This section localizes causally equivalent mentions by a normalized subject-relation-object key, then measures whether their paraphrase family forms a coherent simplicial patch. Filled triangles indicate multiway agreement; open horns flag wording drift or regime-sensitive gluing failures. The chips below separate within-document paraphrase families from cross-document homotopy classes."
+    )
+    regime_trace = (
+        "These cards read directly from the CSQL bundle's regime-gluing view. They distinguish claims that glue cleanly across multiple canonical regimes from claims whose relation family or polarity changes across regimes, which is where descent starts to fail."
+    )
 
     strong_markup = "".join(_render_claim_card(item) for item in payload.get("strongly_supported") or []) or (
         '<div class="empty">No strongly supported cross-study claims were recovered yet.</div>'
@@ -1028,6 +1390,12 @@ def _render_dashboard_html(
     )
     disagreement_markup = "".join(_render_disagreement_card(item) for item in payload.get("disagreements") or []) or (
         f'<div class="empty">{esc(disagreement_empty_text)}</div>'
+    )
+    homotopy_markup = "".join(_render_homotopy_card(item) for item in payload.get("homotopy_classes") or []) or (
+        '<div class="empty">No non-trivial homotopy-localized claim classes were detected yet.</div>'
+    )
+    regime_markup = "".join(_render_regime_gluing_card(item) for item in payload.get("regime_gluing_claims") or []) or (
+        '<div class="empty">No cross-regime gluing surfaces were detected yet.</div>'
     )
     study_markup = "".join(_render_study_card(item) for item in payload.get("study_cards") or []) or (
         '<div class="empty">Study cards will appear once document-level artifacts are available.</div>'
@@ -1075,8 +1443,10 @@ def _render_dashboard_html(
       .link-row a, .trace a {{ color: var(--green); text-decoration: none; font-weight: 700; }}
       .link-row a:hover, .trace a:hover {{ text-decoration: underline; }}
       .claim-grid, .study-grid {{ display: grid; gap: 12px; }}
-      .claim-card, .equivalence-card, .disagreement-card, .study-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 16px; background: #fffdf9; }}
+      .claim-card, .equivalence-card, .disagreement-card, .homotopy-card, .regime-card, .study-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 16px; background: #fffdf9; }}
       .equivalence-card {{ background: #fcf8ef; }}
+      .homotopy-card {{ background: #f7f4ff; }}
+      .regime-card {{ background: #eef7f2; }}
       .claim-meta, .trace, .variant-meta {{ color: var(--muted); font-size: 0.92rem; line-height: 1.5; }}
       .textbook-list {{ padding-left: 20px; display: grid; gap: 10px; }}
       .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; }}
@@ -1099,6 +1469,8 @@ def _render_dashboard_html(
             <span class="chip">{esc(len(payload.get("diagnostic_supported") or []))} normalized diagnostic claims</span>
             <span class="chip">{esc(len(payload.get("equivalence_classes") or []))} {esc(equivalence_chip)}</span>
             <span class="chip">{esc(len(payload.get("disagreements") or []))} {esc(disagreement_chip)}</span>
+            <span class="chip">{esc(int((payload.get("homotopy_summary") or {}).get("class_count") or 0))} homotopy-localized claim classes</span>
+            <span class="chip">{esc(int((payload.get("regime_gluing_summary") or {}).get("surface_count") or 0))} regime-gluing surfaces</span>
           </div>
           <div class="link-row">
             {f'<a href="{esc(democritus_gui_href)}" target="_blank" rel="noreferrer">Open Democritus batch GUI</a>' if democritus_gui_href else ''}
@@ -1127,6 +1499,28 @@ def _render_dashboard_html(
         <p class="eyebrow">Normalized Diagnostic Support</p>
         <p class="trace">This relaxed pass ignores per-paper topic domains and merges lightweight language variants so we can see claims that almost glued but were split by wording drift. Treat these as diagnostic evidence, not the primary strict verdict.</p>
         <div class="claim-grid" style="margin-top:12px;">{diagnostic_markup}</div>
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Homotopy Localization</p>
+        <p class="trace">{esc(homotopy_trace)}</p>
+        <div class="chip-row">
+          <span class="chip">{esc(int((payload.get("homotopy_summary") or {}).get("cross_document_class_count") or 0))} cross-document classes</span>
+          <span class="chip">{esc(int((payload.get("homotopy_summary") or {}).get("within_document_class_count") or 0))} within-document families</span>
+          <span class="chip">{esc(int((payload.get("homotopy_summary") or {}).get("coherent_count") or 0))} coherent classes</span>
+          <span class="chip">{esc(int((payload.get("homotopy_summary") or {}).get("partially_glued_count") or 0))} partially glued classes</span>
+          <span class="chip">{esc(int((payload.get("homotopy_summary") or {}).get("disconnected_count") or 0))} disconnected classes</span>
+        </div>
+        <div class="claim-grid" style="margin-top:12px;">{homotopy_markup}</div>
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Regime Gluing</p>
+        <p class="trace">{esc(regime_trace)}</p>
+        <div class="chip-row">
+          <span class="chip">{esc(int((payload.get("regime_gluing_summary") or {}).get("multi_regime_glued_count") or 0))} multi-regime glued</span>
+          <span class="chip">{esc(int((payload.get("regime_gluing_summary") or {}).get("regime_sensitive_count") or 0))} regime-sensitive</span>
+          <span class="chip">{esc(int((payload.get("regime_gluing_summary") or {}).get("obstructed_count") or 0))} obstructed</span>
+        </div>
+        <div class="claim-grid" style="margin-top:12px;">{regime_markup}</div>
       </section>
       <section class="section-grid">
         <section class="panel">
