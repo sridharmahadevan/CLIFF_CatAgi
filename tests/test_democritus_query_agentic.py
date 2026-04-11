@@ -415,6 +415,24 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
         self.assertNotIn("pre requisite conditions", all_aliases)
         self.assertIn("pre requisite conditions intensification", all_aliases)
 
+    def test_topic_low_quality_filter_rejects_metadata_and_dangling_boundary_phrases(self) -> None:
+        bad_topics = (
+            "adaptation implication under",
+            "carrying capacity under",
+            "aotearoa zealand source",
+            "zealand source ncbi",
+            "center tuberculosis university",
+            "research trend agenda-setting",
+            "alerts health adaptation",
+            "central asia overlook",
+        )
+
+        for topic in bad_topics:
+            self.assertTrue(democritus_query_agentic_module._topic_is_low_quality_surface(topic), topic)
+
+        self.assertFalse(democritus_query_agentic_module._topic_is_low_quality_surface("climate change adaptation"))
+        self.assertFalse(democritus_query_agentic_module._topic_is_low_quality_surface("dengue epidemics"))
+
     def test_query_config_defaults_to_eight_workers(self) -> None:
         config = DemocritusQueryAgenticConfig(
             query="find me 10 recent studies on glp-1",

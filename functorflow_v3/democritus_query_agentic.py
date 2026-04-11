@@ -330,18 +330,27 @@ _TOPIC_CONTEXT_EXCLUDED_TOKENS = _TOPIC_GENERIC_SURFACE_TOKENS | {
     "discussion",
     "finding",
     "findings",
+    "implication",
+    "implications",
     "introduction",
     "journal",
     "manuscript",
     "method",
     "methods",
+    "ncbi",
+    "overlook",
     "preprint",
     "result",
     "results",
     "review",
     "reviews",
     "section",
+    "source",
     "supplementary",
+    "trend",
+    "trends",
+    "university",
+    "varying",
 }
 
 _SEC_COMPANY_QUERY_STOPWORDS = {
@@ -583,11 +592,39 @@ def _topic_is_low_quality_surface(value: str) -> bool:
     text = " ".join(str(value or "").split()).strip().lower()
     if not text:
         return True
-    trailing_bad_tokens = {"by", "for", "from", "in", "of", "on", "to", "with"}
+    trailing_bad_tokens = {
+        "attributable",
+        "by",
+        "find",
+        "for",
+        "from",
+        "in",
+        "of",
+        "on",
+        "over",
+        "source",
+        "to",
+        "under",
+        "varying",
+        "with",
+    }
     raw_tokens = text.split()
     if raw_tokens and raw_tokens[-1] in trailing_bad_tokens:
         return True
-    if any(token in {"artefact", "artefacts", "artifact", "artifacts"} for token in raw_tokens):
+    if any(
+        token in {
+            "artefact",
+            "artefacts",
+            "artifact",
+            "artifacts",
+            "center",
+            "find",
+            "ncbi",
+            "source",
+            "university",
+        }
+        for token in raw_tokens
+    ):
         return True
     normalized_surface_tokens: list[str] = []
     for raw_token in raw_tokens:
@@ -611,6 +648,8 @@ def _topic_is_low_quality_surface(value: str) -> bool:
         and len(non_generic_tokens) <= 1
         and any(token in _TOPIC_GENERIC_SURFACE_TOKENS for token in normalized_surface_tokens)
     ):
+        return True
+    if any(token in {"alert", "alerts", "implication", "overlook", "trend", "varying"} for token in normalized_surface_tokens):
         return True
     if any(len(token) >= 5 and token.endswith(("ndez", "tions")) for token in normalized_surface_tokens):
         return True
