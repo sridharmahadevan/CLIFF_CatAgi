@@ -307,6 +307,54 @@ class DashboardQueryLauncherTests(unittest.TestCase):
             {"route": "course_demo"},
         )
 
+    def test_archived_failed_worker_result_recovers_local_artifact_from_copied_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_root = Path(tmpdir) / "archive"
+            archived_run = archive_root / "cliff_session1-run-0002-20260409-111432-global_warming"
+            democritus_gui = archived_run / "democritus" / "democritus_runs" / "democritus_gui.html"
+            democritus_gui.parent.mkdir(parents=True, exist_ok=True)
+            democritus_gui.write_text("<html><body>Recovered archive GUI</body></html>", encoding="utf-8")
+            (archived_run / "router_error.html").write_text("<html><body>Old error</body></html>", encoding="utf-8")
+            (archived_run / "cliff_worker_result.json").write_text(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "system_name": "CLIFF",
+                        "query": "Analyze 20 recent studies of global warming and what they jointly support",
+                        "route_decision": {"route_name": "democritus"},
+                        "error_artifact_path": (
+                            "/private/tmp/cliff_session1-run-0002-20260409-111432-global_warming/router_error.html"
+                        ),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            launcher = DashboardQueryLauncher(
+                DashboardQueryLauncherConfig(
+                    title="CLIFF",
+                    subtitle="Test session",
+                    query_label="CLIFF query",
+                    query_placeholder="Ask a question",
+                    submit_label="Ask CLIFF",
+                    waiting_message="Runs stay in the background.",
+                    session_mode=True,
+                    enable_execution_mode=True,
+                    archive_roots=(archive_root,),
+                )
+            )
+            self.addCleanup(launcher.close)
+
+            payload = launcher._state_payload()
+            rendered = launcher._render_run_artifact_page(archived_run.name)
+
+        self.assertEqual(len(payload["archived_runs"]), 1)
+        archived = payload["archived_runs"][0]
+        self.assertEqual(archived["status"], "complete")
+        self.assertEqual(Path(archived["artifact_path"]).resolve(), democritus_gui.resolve())
+        self.assertIn("Recovered archive GUI", rendered)
+
     def test_cached_archive_index_reloads_archived_runs_without_rescanning(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

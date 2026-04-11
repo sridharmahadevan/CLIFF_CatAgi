@@ -21,6 +21,34 @@ except ModuleNotFoundError:
 
 
 class QueryRouterAgenticTests(unittest.TestCase):
+    def test_session_query_outdir_places_runs_inside_existing_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_root = Path(tmpdir) / "CLIFF_runs_archive"
+            archive_root.mkdir()
+
+            outdir = module._session_query_outdir(
+                archive_root,
+                run_id="run-0004",
+                query="Analyze 10 recent studies of climate change",
+            )
+
+        self.assertEqual(outdir.parent.resolve(), archive_root.resolve())
+        self.assertTrue(outdir.name.startswith("run-0004-"))
+        self.assertIn("analyze_10_recent_studies_of_climate_change", outdir.name)
+
+    def test_session_query_outdir_keeps_stem_style_behavior_for_missing_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_root = Path(tmpdir) / "cliff_session1"
+
+            outdir = module._session_query_outdir(
+                session_root,
+                run_id="run-0004",
+                query="Analyze 10 recent studies of climate change",
+            )
+
+        self.assertEqual(outdir.parent.resolve(), session_root.parent.resolve())
+        self.assertTrue(outdir.name.startswith("cliff_session1-run-0004-"))
+
     def test_route_ff2_query_selects_sec_runner_for_filing_language(self) -> None:
         decision = module.route_ff2_query("Find me 10 recent AMD 10-K filings")
 

@@ -341,6 +341,7 @@ class DashboardQueryLauncher:
                 entry = dict(item) if isinstance(item, dict) else {}
                 if not entry:
                     continue
+                entry = self._normalize_archived_entry(entry)
                 outdir_key = str(entry.get("outdir") or "")
                 if not outdir_key or outdir_key in discovered:
                     continue
@@ -373,6 +374,98 @@ class DashboardQueryLauncher:
         self._archived_runs = archived
         self._archived_runs_by_id = {str(item.get("run_id") or ""): item for item in archived if item.get("run_id")}
 
+    def _rebase_archived_path(self, run_dir: Path, stored_path: object) -> Path | None:
+        text = " ".join(str(stored_path or "").split()).strip()
+        if not text:
+            return None
+        candidate = Path(text).expanduser()
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        if resolved.exists():
+            return resolved
+        parts = list(candidate.parts)
+        for index, part in enumerate(parts):
+            if part != run_dir.name:
+                continue
+            mapped = run_dir.parent.joinpath(*parts[index:])
+            if mapped.exists():
+                return mapped.resolve()
+        direct = run_dir / candidate.name
+        if candidate.name and direct.exists():
+            return direct.resolve()
+        return None
+
+    def _preferred_archived_artifact_path(self, run_dir: Path, route_name: str) -> Path | None:
+        route = " ".join(str(route_name or "").split()).strip().lower()
+        candidates: list[Path] = []
+        if route == "democritus":
+            democritus_root = run_dir / "democritus" / "democritus_runs"
+            candidates.extend(
+                [
+                    democritus_root / "corpus_synthesis" / "democritus_corpus_synthesis.html",
+                    democritus_root / "democritus_gui.html",
+                    democritus_root / "dashboard.html",
+                    democritus_root / "democritus_query_clarification.html",
+                    democritus_root / _DEMOCRITUS_CHECKPOINT_HTML,
+                ]
+            )
+        elif route == "company_similarity":
+            company_root = run_dir / "company_similarity"
+            candidates.extend(
+                [
+                    company_root / "company_similarity_dashboard.html",
+                    company_root / _COMPANY_SIMILARITY_CHECKPOINT_HTML,
+                ]
+            )
+        else:
+            candidates.append(run_dir / route / f"{route}_dashboard.html")
+        candidates.extend(
+            [
+                run_dir / "selected_route_artifact.html",
+                run_dir / "router_error.html",
+            ]
+        )
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate.resolve()
+        return None
+
+    def _normalize_archived_entry(self, entry: dict[str, object]) -> dict[str, object]:
+        normalized = dict(entry)
+        if not normalized.get("archived"):
+            return normalized
+        source_path_value = str(normalized.get("archive_source_path") or "").strip()
+        if not source_path_value:
+            return normalized
+        try:
+            run_dir = Path(source_path_value).expanduser().resolve().parent
+        except Exception:
+            return normalized
+        if not run_dir.exists():
+            return normalized
+        route_name = " ".join(str(normalized.get("route_name") or "").split()).strip()
+        current_artifact = self._rebase_archived_path(run_dir, normalized.get("artifact_path"))
+        preferred_artifact = self._preferred_archived_artifact_path(run_dir, route_name)
+        recovered_artifact = False
+        if preferred_artifact is not None and (
+            current_artifact is None
+            or current_artifact.name == "router_error.html"
+            or not current_artifact.exists()
+        ):
+            current_artifact = preferred_artifact
+            recovered_artifact = current_artifact.name != "router_error.html"
+        if current_artifact is not None:
+            normalized["artifact_path"] = str(current_artifact)
+        rebased_outdir = self._rebase_archived_path(run_dir, normalized.get("outdir"))
+        normalized["outdir"] = str((rebased_outdir or run_dir).resolve())
+        status = " ".join(str(normalized.get("status") or "complete").split()).strip() or "complete"
+        if status == "failed" and recovered_artifact:
+            normalized["status"] = "complete"
+            normalized["note"] = "Archived run recovered from CLIFF worker output and copied artifacts."
+        return normalized
+
     def _load_archive_record(self, path: Path) -> dict[str, object]:
         payload = self._read_json_dict(path)
         if not payload:
@@ -386,7 +479,8 @@ class DashboardQueryLauncher:
         query = " ".join(str(payload.get("query") or "").split()).strip()
         if not query:
             return {}
-        return {
+        return self._normalize_archived_entry(
+            {
             "run_id": run_id,
             "query": query,
             "status": status,
@@ -402,7 +496,8 @@ class DashboardQueryLauncher:
             "submission_overrides": dict(payload.get("submission_overrides") or {}),
             "archived": True,
             "archive_source_path": str(path.resolve()),
-        }
+            }
+        )
 
     def _load_worker_result_archive_record(self, path: Path) -> dict[str, object]:
         payload = self._read_json_dict(path)
@@ -422,7 +517,8 @@ class DashboardQueryLauncher:
             if status == "complete"
             else "Archived run discovered from CLIFF worker output (failed run)."
         )
-        return {
+        return self._normalize_archived_entry(
+            {
             "run_id": path.parent.name,
             "query": query,
             "status": status,
@@ -438,7 +534,8 @@ class DashboardQueryLauncher:
             "submission_overrides": {"route": route_name} if route_name else {},
             "archived": True,
             "archive_source_path": str(path.resolve()),
-        }
+            }
+        )
 
     def _refresh_archived_runs(self, *, force: bool = False) -> None:
         if not self.config.session_mode:

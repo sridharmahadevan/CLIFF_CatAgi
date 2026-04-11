@@ -861,7 +861,11 @@ def _launcher_archive_roots(outdir: Path) -> tuple[Path, ...]:
         roots.append(resolved)
 
     try:
-        add_root(outdir.expanduser().resolve().parent)
+        resolved_outdir = outdir.expanduser().resolve()
+        if resolved_outdir.exists() and resolved_outdir.is_dir():
+            add_root(resolved_outdir)
+        else:
+            add_root(resolved_outdir.parent)
     except Exception:
         pass
     add_root(default_archive_root)

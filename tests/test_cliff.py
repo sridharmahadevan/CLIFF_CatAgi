@@ -21,6 +21,24 @@ except ModuleNotFoundError:
 
 
 class CLIFFTests(unittest.TestCase):
+    def test_launcher_archive_roots_prefers_existing_outdir_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "CLIFF_runs_archive"
+            outdir.mkdir()
+
+            roots = module._launcher_archive_roots(outdir)
+
+        self.assertIn(outdir.resolve(), roots)
+        self.assertNotIn(outdir.resolve().parent, roots)
+
+    def test_launcher_archive_roots_uses_parent_for_stem_style_outdir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "cliff_session1"
+
+            roots = module._launcher_archive_roots(outdir)
+
+        self.assertIn(outdir.resolve().parent, roots)
+
     def test_route_cliff_query_routes_sec_language(self) -> None:
         decision = module.route_cliff_query("Find me 10 recent AMD 10-K filings")
 

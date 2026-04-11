@@ -939,7 +939,13 @@ def _session_query_outdir(session_outdir: Path, *, run_id: str, query: str) -> P
     root = session_outdir.expanduser()
     if not root.is_absolute():
         root = (Path.cwd() / root).resolve()
-    return root.parent / f"{root.name}-{run_id}-{timestamp}-{_slugify_query(query)}"
+    run_name = f"{run_id}-{timestamp}-{_slugify_query(query)}"
+    try:
+        if root.exists() and root.is_dir():
+            return root / run_name
+    except Exception:
+        pass
+    return root.parent / f"{root.name}-{run_name}"
 
 
 def _run_session_query(
