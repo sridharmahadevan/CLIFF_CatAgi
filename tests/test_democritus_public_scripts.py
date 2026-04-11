@@ -312,6 +312,48 @@ class DemocritusPublicScriptTests(unittest.TestCase):
                 original_requests=original_requests,
             )
 
+    def test_topic_graph_builder_writes_root_only_graph_when_llm_client_missing(self) -> None:
+        module, repo_root, added, original_tqdm, original_requests = self._with_public_script_module(
+            "scripts.topic_graph_builder"
+        )
+        try:
+            original_factory = module.make_llm_client
+            module.make_llm_client = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("OPENAI_API_KEY not set"))
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cwd = os.getcwd()
+                os.chdir(tmpdir)
+                try:
+                    Path("root_topics.txt").write_text("rising ocean temperatures\ncoral reefs\n", encoding="utf-8")
+                    module.main(
+                        topics_file="root_topics.txt",
+                        depth_limit=1,
+                        max_total_topics=10,
+                        topic_graph_path="topic_graph.jsonl",
+                        topic_list_path="topic_list.txt",
+                    )
+                    output = Path("topic_graph.jsonl").read_text(encoding="utf-8").splitlines()
+                    topic_list = Path("topic_list.txt").read_text(encoding="utf-8")
+                finally:
+                    os.chdir(cwd)
+                    module.make_llm_client = original_factory
+
+            records = [json.loads(line) for line in output]
+            self.assertEqual(len(records), 2)
+            self.assertTrue(all(record["parent"] is None for record in records))
+            self.assertTrue(all(record["depth"] == 0 for record in records))
+            topics = {record["topic"] for record in records}
+            self.assertEqual(topics, {"rising ocean temperatures", "coral reefs"})
+            self.assertIn("rising ocean temperatures\t0", topic_list)
+            self.assertIn("coral reefs\t0", topic_list)
+        finally:
+            self._cleanup_public_script_module(
+                repo_root=repo_root,
+                added=added,
+                original_tqdm=original_tqdm,
+                original_requests=original_requests,
+            )
+
     def test_make_credibility_bundle_writes_tier_only_executive_summary(self) -> None:
         try:
             import pandas  # noqa: F401
