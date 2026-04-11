@@ -342,6 +342,24 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
         self.assertTrue(any("coral bleaching" in topic for topic in topics))
         self.assertTrue(any("ocean temperature" in topic or "ocean warming" in topic for topic in topics))
 
+    def test_prepare_document_topics_filters_author_name_fragments_without_context_support(self) -> None:
+        topics = democritus_query_agentic_module._prepare_document_topics(
+            (
+                "amaro carla",
+                "carla hern ndez cabanyero",
+                "ocean temperatures",
+                "pre monsoon cyclones",
+            ),
+            title="Rising ocean temperatures intensify pre-monsoon cyclones in the North Atlantic",
+            guide_summary="Ocean temperatures and atmospheric circulation shape cyclone intensification in the North Atlantic.",
+            causal_gestalt="Rising ocean temperatures increase pre-monsoon cyclone intensification through ocean heat content.",
+        )
+
+        self.assertNotIn("amaro carla", topics)
+        self.assertNotIn("carla hern ndez cabanyero", topics)
+        self.assertIn("ocean temperatures", topics)
+        self.assertIn("pre monsoon cyclones", topics)
+
     def test_query_config_defaults_to_eight_workers(self) -> None:
         config = DemocritusQueryAgenticConfig(
             query="find me 10 recent studies on glp-1",

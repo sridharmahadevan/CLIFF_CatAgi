@@ -659,6 +659,24 @@ def _fallback_topic_phrases_from_context(
     return tuple(fallback_topics)
 
 
+def _topic_support_tokens(*parts: str) -> set[str]:
+    supported: set[str] = set()
+    for part in parts:
+        raw_tokens = re.findall(r"[a-z][a-z\-]{2,}", " ".join(str(part or "").split()).strip().lower())
+        for raw_token in raw_tokens:
+            token = _TOPIC_TOKEN_REWRITES.get(raw_token, raw_token)
+            if len(token) > 4 and token.endswith("s") and token not in {"analysis"}:
+                token = token[:-1]
+            if (
+                token
+                and len(token) >= 4
+                and token not in _STOPWORDS
+                and token not in _TOPIC_CONTEXT_EXCLUDED_TOKENS
+            ):
+                supported.add(token)
+    return supported
+
+
 def _prepare_document_topics(
     raw_topics: tuple[str, ...] | list[str] | object,
     *,
@@ -669,10 +687,13 @@ def _prepare_document_topics(
 ) -> tuple[str, ...]:
     cleaned_topics: list[str] = []
     seen_signatures: set[tuple[str, ...]] = set()
+    support_tokens = _topic_support_tokens(title, guide_summary, causal_gestalt)
     for topic in _normalized_topics(raw_topics):
         if _topic_is_low_quality_surface(topic):
             continue
         signature = _topic_signature(topic) or (topic.lower(),)
+        if support_tokens and not any(token in support_tokens for token in signature):
+            continue
         if signature in seen_signatures:
             continue
         cleaned_topics.append(topic)
@@ -1245,14 +1266,14 @@ def _build_democritus_topic_checkpoint(
         guide_path = document.outdir / "configs" / "document_topic_guide.json"
         guide_payload = _read_document_guide(guide_path)
         title = document.pdf_path.stem.replace("_", " ")
-        guide_summary = " ".join(str(guide_payload.get("summary") or "").split()).strip()
-        if not guide_summary:
-            guide_summary = " ".join(str(guide_payload.get("raw") or "").split()).strip()
+        summary_text = " ".join(str(guide_payload.get("summary") or "").split()).strip()
+        raw_text = " ".join(str(guide_payload.get("raw") or "").split()).strip()
+        guide_summary = summary_text or raw_text
         causal_gestalt = " ".join(str(guide_payload.get("causal_gestalt") or "").split()).strip()
         topics = _prepare_document_topics(
             _read_topic_lines(topics_path),
             title=title,
-            guide_summary=guide_summary,
+            guide_summary=summary_text,
             causal_gestalt=causal_gestalt,
         )
         if guide_summary and len(guide_summary) > 280:
