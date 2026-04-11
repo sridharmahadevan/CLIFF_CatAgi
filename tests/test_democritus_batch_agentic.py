@@ -866,6 +866,110 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             rendered_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
             self.assertNotIn("1 same-direction variant(s)", rendered_html)
 
+    def test_corpus_synthesis_builds_topic_partitions_for_broad_mixed_corpus(self) -> None:
+        class FakeRunner:
+            def __init__(self, outdir: Path, name: str) -> None:
+                self.outdir = outdir
+                self.name = name
+
+            def _execute_agent(self, agent_name: str, frontier_index: int):
+                if agent_name == "root_topic_discovery_agent":
+                    config_dir = self.outdir / "configs"
+                    config_dir.mkdir(parents=True, exist_ok=True)
+                    topic_payloads = {
+                        "run_0": "malaria transmission\nvector ecology\n",
+                        "run_1": "malaria control\nclimate health\n",
+                        "run_2": "minimum wage\nemployment effects\n",
+                        "run_3": "minimum wage\nlabor market\n",
+                    }
+                    (config_dir / "root_topics.txt").write_text(topic_payloads[self.name], encoding="utf-8")
+                    return DemocritusAgentRecord(
+                        agent_name=agent_name,
+                        frontier_index=frontier_index,
+                        status="ok",
+                        started_at=0.0,
+                        ended_at=1.0,
+                        outputs=(str(config_dir / "root_topics.txt"),),
+                        log_path=None,
+                        notes="",
+                    )
+                triples_path = self.outdir / "relational_triples.jsonl"
+                triples_path.parent.mkdir(parents=True, exist_ok=True)
+                payload_by_name = {
+                    "run_0": (
+                        '{"topic":"malaria","path":["malaria"],"question":"q","statement":"Climate change increases malaria transmission risk in Africa.","subj":"climate change","rel":"increases","obj":"malaria transmission risk in africa","domain":"Malaria transmission dynamics"}'
+                    ),
+                    "run_1": (
+                        '{"topic":"malaria","path":["malaria"],"question":"q","statement":"Climate change increases malaria transmission risk in African regions.","subj":"climate change","rel":"increases","obj":"malaria transmission risk in african regions","domain":"Malaria control and adaptation"}'
+                    ),
+                    "run_2": (
+                        '{"topic":"minimum wage","path":["minimum wage"],"question":"q","statement":"Minimum wage increases employment in urban labor markets.","subj":"minimum wage","rel":"increases","obj":"employment in urban labor markets","domain":"Urban labor market outcomes"}'
+                    ),
+                    "run_3": (
+                        '{"topic":"minimum wage","path":["minimum wage"],"question":"q","statement":"Minimum wage increases employment in service labor markets.","subj":"minimum wage","rel":"increases","obj":"employment in service labor markets","domain":"Labor market employment effects"}'
+                    ),
+                }
+                triples_path.write_text(payload_by_name[self.name] + "\n", encoding="utf-8")
+                return DemocritusAgentRecord(
+                    agent_name=agent_name,
+                    frontier_index=frontier_index,
+                    status="ok",
+                    started_at=0.0,
+                    ended_at=1.0,
+                    outputs=(str(triples_path),),
+                    log_path=None,
+                    notes="",
+                )
+
+        class FakeBatchRunner(DemocritusBatchAgenticRunner):
+            def _discover_documents(self):
+                titles = {
+                    "run_0": "climate_change_malaria_africa.pdf",
+                    "run_1": "projected_impacts_malaria_control.pdf",
+                    "run_2": "minimum_wage_employment_study.pdf",
+                    "run_3": "minimum_wage_labor_market_study.pdf",
+                }
+                documents = []
+                for index in range(4):
+                    run_name = f"run_{index}"
+                    outdir = Path(self.config.outdir) / run_name
+                    documents.append(
+                        DemocritusBatchDocument(
+                            index=index,
+                            pdf_path=Path("/tmp") / titles[run_name],
+                            run_name=run_name,
+                            outdir=outdir,
+                            runner=FakeRunner(outdir, run_name),
+                            plan=(
+                                (SimpleNamespace(name="root_topic_discovery_agent"),),
+                                (SimpleNamespace(name="triple_extraction_agent"),),
+                            ),
+                        )
+                    )
+                return tuple(documents)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = FakeBatchRunner(
+                DemocritusBatchConfig(
+                    pdf_dir=Path(tmpdir),
+                    outdir=Path(tmpdir) / "runs",
+                    max_workers=4,
+                    dry_run=False,
+                )
+            )
+            result = runner.run_with_artifacts()
+
+            synthesis_payload = json.loads(result.corpus_synthesis.summary_path.read_text(encoding="utf-8"))
+            labels = " ".join(
+                str(item.get("label") or "").lower()
+                for item in synthesis_payload.get("topic_partitions") or []
+            )
+            self.assertGreaterEqual(int((synthesis_payload.get("topic_partition_summary") or {}).get("partition_count") or 0), 2)
+            self.assertIn("malaria", labels)
+            self.assertTrue("wage" in labels or "labor" in labels)
+            rendered_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
+            self.assertIn("Topic Partitions", rendered_html)
+
     def test_single_document_corpus_synthesis_coalesces_near_duplicate_claim_cards(self) -> None:
         class FakeRunner:
             def __init__(self, outdir: Path) -> None:

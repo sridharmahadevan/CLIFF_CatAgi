@@ -251,47 +251,71 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         GROUP BY c.canonical_subj, c.canonical_rel, c.canonical_polarity, c.canonical_obj, c.canonical_domain;
 
         CREATE VIEW regime_gluing_surfaces AS
+        WITH regime_surface_base AS (
+            SELECT
+                canonical_subj,
+                canonical_obj,
+                COUNT(*) AS regime_variant_count,
+                COUNT(DISTINCT canonical_domain) AS regime_count,
+                COUNT(DISTINCT canonical_rel) AS canonical_relation_count,
+                COUNT(DISTINCT canonical_polarity) AS polarity_count,
+                SUM(document_support) AS total_document_support,
+                MAX(document_support) AS max_regime_support
+            FROM regime_localized_claims
+            GROUP BY canonical_subj, canonical_obj
+        ),
+        regime_names AS (
+            SELECT
+                canonical_subj,
+                canonical_obj,
+                json_group_array(canonical_domain) AS regimes_json
+            FROM (
+                SELECT DISTINCT canonical_subj, canonical_obj, canonical_domain
+                FROM regime_localized_claims
+                ORDER BY canonical_subj, canonical_obj, canonical_domain
+            )
+            GROUP BY canonical_subj, canonical_obj
+        ),
+        relation_names AS (
+            SELECT
+                canonical_subj,
+                canonical_obj,
+                json_group_array(canonical_rel) AS canonical_relations_json
+            FROM (
+                SELECT DISTINCT canonical_subj, canonical_obj, canonical_rel
+                FROM regime_localized_claims
+                ORDER BY canonical_subj, canonical_obj, canonical_rel
+            )
+            GROUP BY canonical_subj, canonical_obj
+        )
         SELECT
-            canonical_subj,
-            canonical_obj,
-            COUNT(*) AS regime_variant_count,
-            COUNT(DISTINCT canonical_domain) AS regime_count,
-            COUNT(DISTINCT canonical_rel) AS canonical_relation_count,
-            COUNT(DISTINCT canonical_polarity) AS polarity_count,
-            SUM(document_support) AS total_document_support,
-            MAX(document_support) AS max_regime_support,
-            (
-                SELECT json_group_array(domain_name)
-                FROM (
-                    SELECT DISTINCT r2.canonical_domain AS domain_name
-                    FROM regime_localized_claims r2
-                    WHERE r2.canonical_subj = r.canonical_subj
-                      AND r2.canonical_obj = r.canonical_obj
-                    ORDER BY r2.canonical_domain
-                )
-            ) AS regimes_json,
-            (
-                SELECT json_group_array(relation_name)
-                FROM (
-                    SELECT DISTINCT r2.canonical_rel AS relation_name
-                    FROM regime_localized_claims r2
-                    WHERE r2.canonical_subj = r.canonical_subj
-                      AND r2.canonical_obj = r.canonical_obj
-                    ORDER BY r2.canonical_rel
-                )
-            ) AS canonical_relations_json,
+            b.canonical_subj,
+            b.canonical_obj,
+            b.regime_variant_count,
+            b.regime_count,
+            b.canonical_relation_count,
+            b.polarity_count,
+            b.total_document_support,
+            b.max_regime_support,
+            COALESCE(n.regimes_json, json('[]')) AS regimes_json,
+            COALESCE(r.canonical_relations_json, json('[]')) AS canonical_relations_json,
             CASE
-                WHEN COUNT(DISTINCT canonical_polarity) > 1 THEN 'obstructed'
-                WHEN COUNT(DISTINCT canonical_domain) > 1 AND COUNT(DISTINCT canonical_rel) > 1 THEN 'regime_sensitive'
-                WHEN COUNT(DISTINCT canonical_domain) > 1 THEN 'multi_regime_glued'
+                WHEN b.polarity_count > 1 THEN 'obstructed'
+                WHEN b.regime_count > 1 AND b.canonical_relation_count > 1 THEN 'regime_sensitive'
+                WHEN b.regime_count > 1 THEN 'multi_regime_glued'
                 ELSE 'single_regime'
             END AS gluing_state
-        FROM regime_localized_claims r
-        GROUP BY canonical_subj, canonical_obj
-        HAVING
-            COUNT(DISTINCT canonical_domain) > 1
-            OR COUNT(DISTINCT canonical_polarity) > 1
-            OR COUNT(DISTINCT canonical_rel) > 1;
+        FROM regime_surface_base b
+        LEFT JOIN regime_names n
+          ON n.canonical_subj = b.canonical_subj
+         AND n.canonical_obj = b.canonical_obj
+        LEFT JOIN relation_names r
+          ON r.canonical_subj = b.canonical_subj
+         AND r.canonical_obj = b.canonical_obj
+        WHERE
+            b.regime_count > 1
+            OR b.polarity_count > 1
+            OR b.canonical_relation_count > 1;
 
         CREATE VIEW document_claim_support AS
         SELECT

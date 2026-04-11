@@ -136,6 +136,25 @@ class RegimeGluingClaim:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class TopicPartition:
+    label: str
+    document_count: int
+    run_names: tuple[str, ...]
+    study_titles: tuple[str, ...]
+    root_topics: tuple[str, ...]
+    domain_hints: tuple[str, ...]
+    cross_document_claim_count: int
+    within_document_family_count: int
+    strong_claims: tuple[CorpusClaim, ...]
+    weak_claims: tuple[CorpusClaim, ...]
+    diagnostic_claims: tuple[DiagnosticCorpusClaim, ...]
+    homotopy_classes: tuple[HomotopyClaimClass, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
 _DISPLAY_TOKEN_STOPWORDS = {
     "a",
     "an",
@@ -161,6 +180,18 @@ _SURFACE_TOKEN_REWRITES: tuple[tuple[str, str], ...] = (
     (r"\bglp1 drugs\b", "glp1 receptor agonist"),
     (r"\bglp1 receptor agonists\b", "glp1 receptor agonist"),
 )
+
+_TOPIC_PARTITION_TOKEN_STOPWORDS = _DISPLAY_TOKEN_STOPWORDS | {
+    "change",
+    "changes",
+    "climate",
+    "effect",
+    "effects",
+    "impact",
+    "impacts",
+    "related",
+    "recent",
+}
 
 
 def build_democritus_corpus_synthesis(
@@ -204,6 +235,14 @@ def build_democritus_corpus_synthesis(
         strong_claims = _coalesce_display_claims(strong_claims, total_documents=total_documents)
         weak_claims = _coalesce_display_claims(weak_claims, total_documents=total_documents)
         study_cards = _load_study_cards(connection, batch_outdir=batch_outdir)
+        topic_partitions = _build_topic_partitions(
+            study_cards=study_cards,
+            claims=claims,
+            strong_claims=strong_claims,
+            weak_claims=weak_claims,
+            diagnostic_claims=diagnostic_claims,
+            homotopy_classes=homotopy_classes,
+        )
 
     homotopy_summary = {
         "class_count": len(homotopy_classes),
@@ -219,11 +258,19 @@ def build_democritus_corpus_synthesis(
         "regime_sensitive_count": sum(1 for item in regime_gluing_claims if item.gluing_state == "regime_sensitive"),
         "multi_regime_glued_count": sum(1 for item in regime_gluing_claims if item.gluing_state == "multi_regime_glued"),
     }
+    topic_partition_summary = {
+        "partition_count": len(topic_partitions),
+        "displayed_partition_count": min(len(topic_partitions), 8),
+        "largest_document_count": max((item.document_count for item in topic_partitions), default=0),
+        "multi_document_partition_count": sum(1 for item in topic_partitions if item.document_count > 1),
+    }
 
     payload = {
         "query": query,
         "csql_sqlite_path": str(csql_sqlite_path),
         "n_documents": total_documents,
+        "topic_partition_summary": topic_partition_summary,
+        "topic_partitions": [item.as_dict() for item in topic_partitions[:8]],
         "strongly_supported": [item.as_dict() for item in strong_claims[:12]],
         "weakly_supported": [item.as_dict() for item in weak_claims[:12]],
         "diagnostic_supported": [item.as_dict() for item in diagnostic_claims[:12]],
@@ -613,46 +660,90 @@ def _load_regime_gluing_claims(connection: sqlite3.Connection) -> list[RegimeGlu
         """
         SELECT
             canonical_subj,
+            canonical_rel,
+            canonical_polarity,
             canonical_obj,
-            regime_variant_count,
-            regime_count,
-            canonical_relation_count,
-            polarity_count,
-            total_document_support,
-            max_regime_support,
-            regimes_json,
-            canonical_relations_json,
-            gluing_state
-        FROM regime_gluing_surfaces
-        ORDER BY
-            CASE gluing_state
-                WHEN 'obstructed' THEN 0
-                WHEN 'regime_sensitive' THEN 1
-                WHEN 'multi_regime_glued' THEN 2
-                ELSE 3
-            END,
-            total_document_support DESC,
-            canonical_subj,
-            canonical_obj
+            canonical_domain,
+            document_support
+        FROM regime_localized_claims
+        ORDER BY canonical_subj, canonical_obj, canonical_domain, canonical_rel
         """
     ).fetchall()
-    claims: list[RegimeGluingClaim] = []
+    grouped: dict[tuple[str, str], dict[str, object]] = {}
     for row in rows:
+        canonical_subj = str(row[0] or "")
+        canonical_rel = str(row[1] or "")
+        canonical_polarity = str(row[2] or "")
+        canonical_obj = str(row[3] or "")
+        canonical_domain = str(row[4] or "")
+        document_support = int(row[5] or 0)
+        key = (canonical_subj, canonical_obj)
+        bucket = grouped.setdefault(
+            key,
+            {
+                "regime_variant_count": 0,
+                "regimes": set(),
+                "canonical_relations": set(),
+                "polarities": set(),
+                "total_document_support": 0,
+                "max_regime_support": 0,
+            },
+        )
+        bucket["regime_variant_count"] = int(bucket["regime_variant_count"]) + 1
+        cast_regimes = bucket["regimes"]
+        cast_relations = bucket["canonical_relations"]
+        cast_polarities = bucket["polarities"]
+        if isinstance(cast_regimes, set):
+            cast_regimes.add(canonical_domain)
+        if isinstance(cast_relations, set):
+            cast_relations.add(canonical_rel)
+        if isinstance(cast_polarities, set):
+            cast_polarities.add(canonical_polarity)
+        bucket["total_document_support"] = int(bucket["total_document_support"]) + document_support
+        bucket["max_regime_support"] = max(int(bucket["max_regime_support"]), document_support)
+    claims: list[RegimeGluingClaim] = []
+    for (canonical_subj, canonical_obj), bucket in grouped.items():
+        regimes = tuple(sorted(str(item) for item in bucket["regimes"] if str(item).strip()))
+        canonical_relations = tuple(
+            sorted(str(item) for item in bucket["canonical_relations"] if str(item).strip())
+        )
+        polarities = tuple(sorted(str(item) for item in bucket["polarities"] if str(item).strip()))
+        regime_count = len(regimes)
+        canonical_relation_count = len(canonical_relations)
+        polarity_count = len(polarities)
+        if polarity_count > 1:
+            gluing_state = "obstructed"
+        elif regime_count > 1 and canonical_relation_count > 1:
+            gluing_state = "regime_sensitive"
+        elif regime_count > 1:
+            gluing_state = "multi_regime_glued"
+        else:
+            gluing_state = "single_regime"
+        if regime_count <= 1 and polarity_count <= 1 and canonical_relation_count <= 1:
+            continue
         claims.append(
             RegimeGluingClaim(
-                canonical_subj=str(row[0] or ""),
-                canonical_obj=str(row[1] or ""),
-                regime_variant_count=int(row[2] or 0),
-                regime_count=int(row[3] or 0),
-                canonical_relation_count=int(row[4] or 0),
-                polarity_count=int(row[5] or 0),
-                total_document_support=int(row[6] or 0),
-                max_regime_support=int(row[7] or 0),
-                regimes=_decode_json_array(row[8]),
-                canonical_relations=_decode_json_array(row[9]),
-                gluing_state=str(row[10] or "single_regime"),
+                canonical_subj=canonical_subj,
+                canonical_obj=canonical_obj,
+                regime_variant_count=int(bucket["regime_variant_count"]),
+                regime_count=regime_count,
+                canonical_relation_count=canonical_relation_count,
+                polarity_count=polarity_count,
+                total_document_support=int(bucket["total_document_support"]),
+                max_regime_support=int(bucket["max_regime_support"]),
+                regimes=regimes,
+                canonical_relations=canonical_relations,
+                gluing_state=gluing_state,
             )
         )
+    claims.sort(
+        key=lambda item: (
+            {"obstructed": 0, "regime_sensitive": 1, "multi_regime_glued": 2}.get(item.gluing_state, 3),
+            -item.total_document_support,
+            item.canonical_subj,
+            item.canonical_obj,
+        )
+    )
     return claims
 
 
@@ -1079,17 +1170,363 @@ def _load_study_cards(connection: sqlite3.Connection, *, batch_outdir: Path) -> 
     for run_name, pdf_path in rows:
         run_name_str = str(run_name or "")
         pdf_path_obj = Path(str(pdf_path or ""))
+        root_topics_path = batch_outdir / run_name_str / "configs" / "root_topics.txt"
+        root_topics: list[str] = []
+        if root_topics_path.exists():
+            root_topics = [
+                " ".join(line.split()).strip()
+                for line in root_topics_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                if " ".join(line.split()).strip()
+            ][:6]
         summary_viewer = batch_outdir / run_name_str / "reports" / f"{run_name_str}_executive_summary.html"
         credibility_viewer = batch_outdir / run_name_str / "reports" / f"{run_name_str}_credibility_report.html"
         cards.append(
             {
                 "run_name": run_name_str,
                 "title": pdf_path_obj.stem.replace("_", " ") if pdf_path_obj.name else run_name_str,
+                "root_topics": root_topics,
                 "summary_href": _relative_href(summary_viewer, start=batch_outdir / "corpus_synthesis"),
                 "credibility_href": _relative_href(credibility_viewer, start=batch_outdir / "corpus_synthesis"),
             }
         )
     return cards
+
+
+def _topic_partition_signature(value: object) -> tuple[str, ...]:
+    tokens = [
+        token
+        for token in _surface_signature(str(value or ""))
+        if token and token not in _TOPIC_PARTITION_TOKEN_STOPWORDS
+    ]
+    return tuple(tokens)
+
+
+def _topic_partition_label_key(value: object) -> str:
+    return " ".join(_topic_partition_signature(value))
+
+
+def _topic_partition_display_label(signature: tuple[str, ...], *, fallback: str) -> str:
+    if signature:
+        words = [token.upper() if token in {"tb", "aqi"} else token.capitalize() for token in signature[:5]]
+        label = " ".join(words).strip()
+        if label:
+            return label
+    text = " ".join(str(fallback or "").split()).strip()
+    if len(text) <= 72:
+        return text
+    return _truncate_text(text, maxlen=72)
+
+
+def _topic_profile_should_link(left: dict[str, object], right: dict[str, object]) -> bool:
+    left_signature = tuple(left.get("signature") or ())
+    right_signature = tuple(right.get("signature") or ())
+    if not left_signature or not right_signature:
+        return False
+    overlap = len(set(left_signature) & set(right_signature))
+    if overlap <= 0:
+        return False
+    similarity = _jaccard_similarity(left_signature, right_signature)
+    shared_root_topics = set(left.get("root_topic_keys") or ()) & set(right.get("root_topic_keys") or ())
+    shared_domains = set(left.get("domain_keys") or ()) & set(right.get("domain_keys") or ())
+    if shared_root_topics or shared_domains:
+        return True
+    if overlap >= 3:
+        return True
+    if overlap >= 2 and similarity >= 0.25:
+        return True
+    return similarity >= 0.45
+
+
+def _select_topic_partition_label(candidates: list[tuple[str, float]]) -> tuple[str, ...]:
+    scored: dict[tuple[str, ...], float] = {}
+    examples: dict[tuple[str, ...], list[str]] = {}
+    for text, weight in candidates:
+        normalized_text = " ".join(str(text or "").split()).strip()
+        signature = _topic_partition_signature(normalized_text)
+        if not normalized_text or not signature:
+            continue
+        scored[signature] = scored.get(signature, 0.0) + float(weight)
+        examples.setdefault(signature, []).append(normalized_text)
+    if not scored:
+        return ()
+    best_signature = max(
+        scored,
+        key=lambda signature: (
+            scored[signature],
+            len(examples.get(signature) or []),
+            len(signature),
+        ),
+    )
+    return best_signature
+
+
+def _claim_partition_assignment_score(
+    *,
+    partition_runs: set[str],
+    partition_signature: tuple[str, ...],
+    supporting_runs: tuple[str, ...],
+    domain: str,
+    statement: str,
+) -> tuple[int, float, float, int]:
+    overlap = len(partition_runs & set(supporting_runs))
+    domain_similarity = _jaccard_similarity(_topic_partition_signature(domain), partition_signature)
+    statement_similarity = _jaccard_similarity(_topic_partition_signature(statement), partition_signature)
+    return (overlap, domain_similarity, statement_similarity, len(partition_runs))
+
+
+def _build_topic_partitions(
+    *,
+    study_cards: list[dict[str, object]],
+    claims: list[CorpusClaim],
+    strong_claims: list[CorpusClaim],
+    weak_claims: list[CorpusClaim],
+    diagnostic_claims: list[DiagnosticCorpusClaim],
+    homotopy_classes: list[HomotopyClaimClass],
+) -> list[TopicPartition]:
+    if not study_cards:
+        return []
+
+    run_domain_scores: dict[str, dict[str, int]] = {}
+    for claim in claims:
+        weight = max(1, int(claim.claim_count or 0))
+        for run_name in claim.supporting_runs:
+            bucket = run_domain_scores.setdefault(str(run_name), {})
+            bucket[claim.domain] = bucket.get(claim.domain, 0) + weight
+
+    profiles: list[dict[str, object]] = []
+    for card in study_cards:
+        run_name = str(card.get("run_name") or "")
+        title = " ".join(str(card.get("title") or run_name).split()).strip()
+        root_topics = tuple(
+            " ".join(str(topic).split()).strip()
+            for topic in (card.get("root_topics") or [])
+            if " ".join(str(topic).split()).strip()
+        )
+        domain_scores = run_domain_scores.get(run_name, {})
+        domain_hints = tuple(
+            domain
+            for domain, _ in sorted(
+                domain_scores.items(),
+                key=lambda item: (item[1], _domain_rank(item[0])),
+                reverse=True,
+            )[:4]
+        )
+        candidates: list[tuple[str, float]] = []
+        candidates.extend((topic, 3.0) for topic in root_topics)
+        candidates.extend((domain, 2.0) for domain in domain_hints)
+        if title:
+            candidates.append((title, 1.0))
+        signature = _select_topic_partition_label(candidates)
+        if not signature:
+            signature = _topic_partition_signature(title)
+        profiles.append(
+            {
+                "run_name": run_name,
+                "title": title,
+                "root_topics": root_topics,
+                "domain_hints": domain_hints,
+                "signature": signature,
+                "root_topic_keys": {
+                    _topic_partition_label_key(topic)
+                    for topic in root_topics
+                    if _topic_partition_label_key(topic)
+                },
+                "domain_keys": {
+                    _topic_partition_label_key(domain)
+                    for domain in domain_hints
+                    if _topic_partition_label_key(domain)
+                },
+            }
+        )
+
+    parent = list(range(len(profiles)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left_index: int, right_index: int) -> None:
+        left_root = find(left_index)
+        right_root = find(right_index)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for left_index in range(len(profiles)):
+        for right_index in range(left_index + 1, len(profiles)):
+            if _topic_profile_should_link(profiles[left_index], profiles[right_index]):
+                union(left_index, right_index)
+
+    components: dict[int, list[dict[str, object]]] = {}
+    for index, profile in enumerate(profiles):
+        components.setdefault(find(index), []).append(profile)
+
+    partition_builders: list[dict[str, object]] = []
+    for component_profiles in components.values():
+        candidates: list[tuple[str, float]] = []
+        for profile in component_profiles:
+            candidates.extend((topic, 3.0) for topic in tuple(profile.get("root_topics") or ()))
+            candidates.extend((domain, 2.0) for domain in tuple(profile.get("domain_hints") or ()))
+            title = " ".join(str(profile.get("title") or "").split()).strip()
+            if title:
+                candidates.append((title, 1.0))
+        signature = _select_topic_partition_label(candidates)
+        fallback_title = max(
+            component_profiles,
+            key=lambda profile: len(str(profile.get("title") or "")),
+            default={"title": "Local topic cover"},
+        ).get("title") or "Local topic cover"
+        label = _topic_partition_display_label(signature, fallback=str(fallback_title))
+        run_names = tuple(
+            sorted(
+                str(profile.get("run_name") or "")
+                for profile in component_profiles
+                if str(profile.get("run_name") or "").strip()
+            )
+        )
+        study_titles = tuple(
+            sorted(
+                dict.fromkeys(
+                    str(profile.get("title") or "")
+                    for profile in component_profiles
+                    if str(profile.get("title") or "").strip()
+                )
+            )
+        )
+        root_topics = tuple(
+            dict.fromkeys(
+                topic
+                for profile in component_profiles
+                for topic in tuple(profile.get("root_topics") or ())
+                if str(topic).strip()
+            )
+        )[:6]
+        domain_hints = tuple(
+            dict.fromkeys(
+                domain
+                for profile in component_profiles
+                for domain in tuple(profile.get("domain_hints") or ())
+                if str(domain).strip()
+            )
+        )[:6]
+        partition_builders.append(
+            {
+                "label": label,
+                "signature": signature,
+                "run_set": set(run_names),
+                "run_names": run_names,
+                "study_titles": study_titles[:4],
+                "root_topics": root_topics,
+                "domain_hints": domain_hints,
+                "strong_claims": [],
+                "weak_claims": [],
+                "diagnostic_claims": [],
+                "homotopy_classes": [],
+            }
+        )
+
+    def assign_item(
+        item: object,
+        *,
+        supporting_runs: tuple[str, ...],
+        domain: str,
+        statement: str,
+        bucket_name: str,
+    ) -> None:
+        if not partition_builders:
+            return
+        best_index: int | None = None
+        best_score: tuple[int, float, float, int] = (-1, -1.0, -1.0, -1)
+        for index, partition in enumerate(partition_builders):
+            score = _claim_partition_assignment_score(
+                partition_runs=set(partition["run_set"]),
+                partition_signature=tuple(partition["signature"]),
+                supporting_runs=supporting_runs,
+                domain=domain,
+                statement=statement,
+            )
+            if score > best_score:
+                best_score = score
+                best_index = index
+        if best_index is None:
+            return
+        partition_builders[best_index][bucket_name].append(item)
+
+    for item in strong_claims:
+        assign_item(
+            item,
+            supporting_runs=item.supporting_runs,
+            domain=item.domain,
+            statement=item.statement,
+            bucket_name="strong_claims",
+        )
+    for item in weak_claims:
+        assign_item(
+            item,
+            supporting_runs=item.supporting_runs,
+            domain=item.domain,
+            statement=item.statement,
+            bucket_name="weak_claims",
+        )
+    for item in diagnostic_claims:
+        assign_item(
+            item,
+            supporting_runs=item.supporting_runs,
+            domain=item.domain,
+            statement=item.statement,
+            bucket_name="diagnostic_claims",
+        )
+    for item in homotopy_classes:
+        assign_item(
+            item,
+            supporting_runs=item.supporting_runs,
+            domain=item.domain,
+            statement=item.statement,
+            bucket_name="homotopy_classes",
+        )
+
+    partitions: list[TopicPartition] = []
+    for builder in partition_builders:
+        strong_partition_claims = tuple(builder["strong_claims"][:2])
+        weak_partition_claims = tuple(builder["weak_claims"][:2])
+        diagnostic_partition_claims = tuple(builder["diagnostic_claims"][:2])
+        homotopy_partition_claims = tuple(builder["homotopy_classes"][:2])
+        cross_document_claim_count = (
+            len(builder["strong_claims"])
+            + len(builder["weak_claims"])
+            + sum(1 for item in builder["diagnostic_claims"] if int(item.document_support) > 1)
+            + sum(1 for item in builder["homotopy_classes"] if int(item.document_support) > 1)
+        )
+        within_document_family_count = sum(
+            1 for item in builder["homotopy_classes"] if int(item.document_support) <= 1
+        )
+        partitions.append(
+            TopicPartition(
+                label=str(builder["label"] or "Local topic cover"),
+                document_count=len(builder["run_names"]),
+                run_names=tuple(builder["run_names"]),
+                study_titles=tuple(builder["study_titles"]),
+                root_topics=tuple(builder["root_topics"]),
+                domain_hints=tuple(builder["domain_hints"]),
+                cross_document_claim_count=cross_document_claim_count,
+                within_document_family_count=within_document_family_count,
+                strong_claims=strong_partition_claims,
+                weak_claims=weak_partition_claims,
+                diagnostic_claims=diagnostic_partition_claims,
+                homotopy_classes=homotopy_partition_claims,
+            )
+        )
+
+    partitions.sort(
+        key=lambda item: (
+            -item.document_count,
+            -item.cross_document_claim_count,
+            -item.within_document_family_count,
+            item.label.lower(),
+        )
+    )
+    return partitions
 
 
 def _relative_href(target: Path, *, start: Path) -> str:
@@ -1113,6 +1550,52 @@ def _render_claim_card(claim: dict[str, object]) -> str:
         + (f' · Runs: {esc(runs)}' if runs else "")
         + "</p>"
         "</article>"
+    )
+
+
+def _render_topic_partition_card(item: dict[str, object]) -> str:
+    def esc(value: object) -> str:
+        return html.escape(str(value))
+
+    study_titles = [str(title).strip() for title in (item.get("study_titles") or []) if str(title).strip()]
+    root_topics = [str(topic).strip() for topic in (item.get("root_topics") or []) if str(topic).strip()]
+    domain_hints = [str(domain).strip() for domain in (item.get("domain_hints") or []) if str(domain).strip()]
+    strong_claims = list(item.get("strong_claims") or [])
+    weak_claims = list(item.get("weak_claims") or [])
+    diagnostic_claims = list(item.get("diagnostic_claims") or [])
+    homotopy_classes = list(item.get("homotopy_classes") or [])
+    representative_claim = strong_claims[:1] or weak_claims[:1] or diagnostic_claims[:1] or homotopy_classes[:1]
+    representative_markup = ""
+    if representative_claim:
+        claim = representative_claim[0]
+        representative_markup = (
+            '<p class="trace"><strong>Representative claim:</strong> '
+            f'{esc(_truncate_text(claim.get("statement") or claim.get("obj") or claim.get("domain") or "", maxlen=150))}'
+            "</p>"
+        )
+    return (
+        '<article class="topic-partition-card">'
+        f'<div class="claim-meta">{esc(item.get("document_count") or 0)} study(s) · '
+        f'{esc(item.get("cross_document_claim_count") or 0)} cross-document claim surface(s) · '
+        f'{esc(item.get("within_document_family_count") or 0)} within-document family/families</div>'
+        f'<h3>{esc(item.get("label") or "Local topic cover")}</h3>'
+        + (
+            f'<p class="trace">Root topics: {esc(" | ".join(root_topics[:3]))}</p>'
+            if root_topics
+            else ""
+        )
+        + (
+            f'<p class="trace">Domain hints: {esc(" | ".join(domain_hints[:3]))}</p>'
+            if domain_hints
+            else ""
+        )
+        + (
+            f'<p class="trace">Representative studies: {esc(" | ".join(_truncate_text(title, maxlen=70) for title in study_titles[:3]))}</p>'
+            if study_titles
+            else ""
+        )
+        + representative_markup
+        + "</article>"
     )
 
 
@@ -1397,6 +1880,11 @@ def _render_dashboard_html(
     regime_markup = "".join(_render_regime_gluing_card(item) for item in payload.get("regime_gluing_claims") or []) or (
         '<div class="empty">No cross-regime gluing surfaces were detected yet.</div>'
     )
+    topic_partition_markup = "".join(
+        _render_topic_partition_card(item) for item in payload.get("topic_partitions") or []
+    ) or (
+        '<div class="empty">The current corpus did not separate into multiple local covers yet.</div>'
+    )
     study_markup = "".join(_render_study_card(item) for item in payload.get("study_cards") or []) or (
         '<div class="empty">Study cards will appear once document-level artifacts are available.</div>'
     )
@@ -1443,7 +1931,9 @@ def _render_dashboard_html(
       .link-row a, .trace a {{ color: var(--green); text-decoration: none; font-weight: 700; }}
       .link-row a:hover, .trace a:hover {{ text-decoration: underline; }}
       .claim-grid, .study-grid {{ display: grid; gap: 12px; }}
+      .topic-grid {{ display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }}
       .claim-card, .equivalence-card, .disagreement-card, .homotopy-card, .regime-card, .study-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 16px; background: #fffdf9; }}
+      .topic-partition-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 16px; background: #fff8f1; }}
       .equivalence-card {{ background: #fcf8ef; }}
       .homotopy-card {{ background: #f7f4ff; }}
       .regime-card {{ background: #eef7f2; }}
@@ -1467,6 +1957,7 @@ def _render_dashboard_html(
             <span class="chip">{esc(len(payload.get("strongly_supported") or []))} strongly supported claims</span>
             <span class="chip">{esc(len(payload.get("weakly_supported") or []))} weak or provisional claims</span>
             <span class="chip">{esc(len(payload.get("diagnostic_supported") or []))} normalized diagnostic claims</span>
+            <span class="chip">{esc(int((payload.get("topic_partition_summary") or {}).get("partition_count") or 0))} topic partition(s)</span>
             <span class="chip">{esc(len(payload.get("equivalence_classes") or []))} {esc(equivalence_chip)}</span>
             <span class="chip">{esc(len(payload.get("disagreements") or []))} {esc(disagreement_chip)}</span>
             <span class="chip">{esc(int((payload.get("homotopy_summary") or {}).get("class_count") or 0))} homotopy-localized claim classes</span>
@@ -1484,6 +1975,17 @@ def _render_dashboard_html(
       </section>
       <section class="panel">
         {textbook_html}
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Topic Partitions</p>
+        <p class="trace">Before reading the global synthesis as one object, this section decomposes the retrieved corpus into local topic covers inferred from study titles, root topics, and dominant claim domains. On broader queries, these partitions are often a better first read than the flattened global verdict.</p>
+        <div class="chip-row">
+          <span class="chip">{esc(int((payload.get("topic_partition_summary") or {}).get("partition_count") or 0))} total partition(s)</span>
+          <span class="chip">{esc(int((payload.get("topic_partition_summary") or {}).get("displayed_partition_count") or 0))} displayed</span>
+          <span class="chip">{esc(int((payload.get("topic_partition_summary") or {}).get("largest_document_count") or 0))} docs in largest partition</span>
+          <span class="chip">{esc(int((payload.get("topic_partition_summary") or {}).get("multi_document_partition_count") or 0))} multi-document partition(s)</span>
+        </div>
+        <div class="topic-grid" style="margin-top:12px;">{topic_partition_markup}</div>
       </section>
       <section class="section-grid">
         <section class="panel">
