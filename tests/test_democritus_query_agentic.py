@@ -286,6 +286,62 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
         }
         self.assertNotIn("Cereal production deficits by", all_aliases)
 
+    def test_collapse_topic_equivalence_classes_filters_single_word_impacts_fallbacks(self) -> None:
+        collapsed = democritus_query_agentic_module._collapse_topic_equivalence_classes(
+            [
+                {
+                    "run_name": "run_0",
+                    "title": "Ocean warming and coral bleaching",
+                    "topics": [
+                        "temperature impacts",
+                        "ocean impacts",
+                        "article impacts",
+                        "coral bleaching dynamics",
+                        "rising ocean temperatures and coral bleaching",
+                    ],
+                },
+                {
+                    "run_name": "run_1",
+                    "title": "Atlantic heat stress on reefs",
+                    "topics": [
+                        "temperatures impacts",
+                        "climate impacts on coral bleaching",
+                        "heat wave driven bleaching",
+                    ],
+                },
+            ],
+            limit=16,
+        )
+
+        all_aliases = {
+            alias
+            for item in collapsed
+            for alias in item["aliases"]
+        }
+        self.assertNotIn("temperature impacts", all_aliases)
+        self.assertNotIn("ocean impacts", all_aliases)
+        self.assertNotIn("article impacts", all_aliases)
+        self.assertNotIn("temperatures impacts", all_aliases)
+        self.assertIn("rising ocean temperatures and coral bleaching", all_aliases)
+        self.assertIn("climate impacts on coral bleaching", all_aliases)
+
+    def test_prepare_document_topics_recovers_contextual_phrases_from_low_quality_root_topics(self) -> None:
+        topics = democritus_query_agentic_module._prepare_document_topics(
+            (
+                "temperature impacts",
+                "ocean impacts",
+                "article impacts",
+            ),
+            title="Rising ocean temperatures and coral bleaching",
+            guide_summary="Rising ocean temperatures intensify marine heat stress and coral bleaching across reef systems.",
+            causal_gestalt="Ocean warming drives bleaching risk through persistent heat stress in corals.",
+        )
+
+        self.assertNotIn("temperature impacts", topics)
+        self.assertNotIn("ocean impacts", topics)
+        self.assertTrue(any("coral bleaching" in topic for topic in topics))
+        self.assertTrue(any("ocean temperature" in topic or "ocean warming" in topic for topic in topics))
+
     def test_query_config_defaults_to_eight_workers(self) -> None:
         config = DemocritusQueryAgenticConfig(
             query="find me 10 recent studies on glp-1",

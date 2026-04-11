@@ -296,6 +296,46 @@ _TOPIC_TOKEN_REWRITES = {
     "strategies": "strategy",
 }
 
+_TOPIC_GENERIC_SURFACE_TOKENS = _GENERIC_RETRIEVAL_TOKENS | {
+    "article",
+    "articles",
+    "author",
+    "authors",
+    "data",
+    "document",
+    "documents",
+    "paper",
+    "papers",
+    "study",
+    "studies",
+}
+
+_TOPIC_CONTEXT_EXCLUDED_TOKENS = _TOPIC_GENERIC_SURFACE_TOKENS | {
+    "abstract",
+    "analysis",
+    "author",
+    "authors",
+    "background",
+    "biorxiv",
+    "conclusion",
+    "copyright",
+    "discussion",
+    "finding",
+    "findings",
+    "introduction",
+    "journal",
+    "manuscript",
+    "method",
+    "methods",
+    "preprint",
+    "result",
+    "results",
+    "review",
+    "reviews",
+    "section",
+    "supplementary",
+}
+
 _SEC_COMPANY_QUERY_STOPWORDS = {
     "10",
     "8",
@@ -539,7 +579,120 @@ def _topic_is_low_quality_surface(value: str) -> bool:
     raw_tokens = text.split()
     if raw_tokens and raw_tokens[-1] in trailing_bad_tokens:
         return True
+    normalized_surface_tokens: list[str] = []
+    for raw_token in raw_tokens:
+        token = _TOPIC_TOKEN_REWRITES.get(raw_token, raw_token)
+        if len(token) > 4 and token.endswith("s") and token not in {"analysis"}:
+            token = token[:-1]
+        if token:
+            normalized_surface_tokens.append(token)
+    content_tokens = [
+        token
+        for token in normalized_surface_tokens
+        if token not in _TOPIC_EQUIVALENCE_STOPWORDS
+    ]
+    non_generic_tokens = [
+        token
+        for token in content_tokens
+        if token not in _TOPIC_GENERIC_SURFACE_TOKENS
+    ]
+    if (
+        len(content_tokens) <= 2
+        and len(non_generic_tokens) <= 1
+        and any(token in _TOPIC_GENERIC_SURFACE_TOKENS for token in normalized_surface_tokens)
+    ):
+        return True
     return not _topic_signature(text)
+
+
+def _fallback_topic_phrases_from_context(
+    *,
+    title: str,
+    guide_summary: str,
+    causal_gestalt: str,
+    limit: int = 6,
+) -> tuple[str, ...]:
+    context_parts = [
+        " ".join(str(title or "").split()).strip(),
+        " ".join(str(guide_summary or "").split()).strip(),
+        " ".join(str(causal_gestalt or "").split()).strip(),
+    ]
+    context_text = " ".join(part for part in context_parts if part).strip().lower()
+    if not context_text:
+        return ()
+    raw_tokens = re.findall(r"[a-z][a-z\-]{2,}", context_text)
+    normalized_tokens: list[str] = []
+    for raw_token in raw_tokens:
+        token = _TOPIC_TOKEN_REWRITES.get(raw_token, raw_token)
+        if len(token) > 4 and token.endswith("s") and token not in {"analysis"}:
+            token = token[:-1]
+        if (
+            token
+            and len(token) >= 4
+            and token not in _STOPWORDS
+            and token not in _TOPIC_CONTEXT_EXCLUDED_TOKENS
+        ):
+            normalized_tokens.append(token)
+    if not normalized_tokens:
+        return ()
+    counts: Counter[str] = Counter()
+    for size in (3, 2):
+        for index in range(len(normalized_tokens) - size + 1):
+            phrase = " ".join(normalized_tokens[index : index + size])
+            if _topic_is_low_quality_surface(phrase):
+                continue
+            counts[phrase] += 1
+    ordered = sorted(
+        counts.items(),
+        key=lambda item: (-int(item[1]), -len(item[0].split()), item[0]),
+    )
+    fallback_topics: list[str] = []
+    seen_signatures: set[tuple[str, ...]] = set()
+    for phrase, _count in ordered:
+        signature = _topic_signature(phrase)
+        if not signature or signature in seen_signatures:
+            continue
+        fallback_topics.append(phrase)
+        seen_signatures.add(signature)
+        if len(fallback_topics) >= max(1, int(limit)):
+            break
+    return tuple(fallback_topics)
+
+
+def _prepare_document_topics(
+    raw_topics: tuple[str, ...] | list[str] | object,
+    *,
+    title: str,
+    guide_summary: str,
+    causal_gestalt: str,
+    limit: int = 8,
+) -> tuple[str, ...]:
+    cleaned_topics: list[str] = []
+    seen_signatures: set[tuple[str, ...]] = set()
+    for topic in _normalized_topics(raw_topics):
+        if _topic_is_low_quality_surface(topic):
+            continue
+        signature = _topic_signature(topic) or (topic.lower(),)
+        if signature in seen_signatures:
+            continue
+        cleaned_topics.append(topic)
+        seen_signatures.add(signature)
+        if len(cleaned_topics) >= max(1, int(limit)):
+            return tuple(cleaned_topics)
+    for topic in _fallback_topic_phrases_from_context(
+        title=title,
+        guide_summary=guide_summary,
+        causal_gestalt=causal_gestalt,
+        limit=limit,
+    ):
+        signature = _topic_signature(topic) or (topic.lower(),)
+        if signature in seen_signatures:
+            continue
+        cleaned_topics.append(topic)
+        seen_signatures.add(signature)
+        if len(cleaned_topics) >= max(1, int(limit)):
+            break
+    return tuple(cleaned_topics)
 
 
 def _collapse_topic_equivalence_classes(
@@ -1090,12 +1243,18 @@ def _build_democritus_topic_checkpoint(
     for document in batch_runner._documents_snapshot():
         topics_path = document.outdir / "configs" / "root_topics.txt"
         guide_path = document.outdir / "configs" / "document_topic_guide.json"
-        topics = _read_topic_lines(topics_path)
         guide_payload = _read_document_guide(guide_path)
+        title = document.pdf_path.stem.replace("_", " ")
         guide_summary = " ".join(str(guide_payload.get("summary") or "").split()).strip()
         if not guide_summary:
             guide_summary = " ".join(str(guide_payload.get("raw") or "").split()).strip()
         causal_gestalt = " ".join(str(guide_payload.get("causal_gestalt") or "").split()).strip()
+        topics = _prepare_document_topics(
+            _read_topic_lines(topics_path),
+            title=title,
+            guide_summary=guide_summary,
+            causal_gestalt=causal_gestalt,
+        )
         if guide_summary and len(guide_summary) > 280:
             guide_summary = guide_summary[:277].rstrip() + "..."
         if causal_gestalt and len(causal_gestalt) > 280:
@@ -1105,7 +1264,7 @@ def _build_democritus_topic_checkpoint(
         documents_payload.append(
             {
                 "run_name": document.run_name,
-                "title": document.pdf_path.stem.replace("_", " "),
+                "title": title,
                 "pdf_path": str(document.pdf_path),
                 "topic_count": len(topics),
                 "topics": topics,
