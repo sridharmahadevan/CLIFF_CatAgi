@@ -855,8 +855,8 @@ def main() -> None:
                 DashboardQueryLauncherConfig(
                     title="CLIFF",
                     subtitle=(
-                        "CLIFF for Categories for AGI asks about ideas from the textbook, course demos, project directions, "
-                        "and supporting applications. It helps connect the book to runnable examples, code fragments, "
+                        "CLIFF for Categories for AGI helps answer questions about ideas from the textbook, course demos, "
+                        "project directions, and runs demos illustrating potential applications. It helps connect the book to runnable examples, code fragments, "
                         "comparisons, and guided explorations. CLIFF is a research prototype, and its analyses should not "
                         "be treated as product endorsements, product criticism, or professional advice. AI-based analyses "
                         "can make mistakes."
