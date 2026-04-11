@@ -91,15 +91,200 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
                 "n_documents": 3,
                 "query_focus_terms": ["climate", "change"],
                 "suspicious_topics": [{"topic": "air conditioning adoption"}],
+                "retrieval_components": [
+                    {
+                        "topic": "malaria",
+                        "document_count": 2,
+                        "matched_query_terms": ["climate"],
+                        "representative_titles": ["Climate change impacts on malaria"],
+                    }
+                ],
                 "top_topics": [{"topic": "air conditioning adoption", "document_count": 1}],
                 "documents": [],
             }
         )
 
         self.assertIn("Atlas Drift Signal", html)
+        self.assertIn("Retrieved Local Components", html)
+        self.assertIn("Climate change impacts on malaria", html)
         self.assertIn("air conditioning adoption", html)
         self.assertIn("class=\"chip focus\"", html)
         self.assertIn("class=\"chip drift\"", html)
+
+    def test_rebalance_discovered_documents_promotes_breadth_across_local_components(self) -> None:
+        plan = QueryPlan(
+            query="Analyze 10 recent studies on climate change",
+            normalized_query="analyze 10 recent studies on climate change",
+            keyword_tokens=("climate", "change"),
+            target_documents=4,
+            retrieval_query="climate change",
+        )
+        documents = (
+            DiscoveredDocument(
+                title="Climate change impacts on malaria transmission in Africa",
+                score=9.8,
+                retrieval_backend="semantic_scholar",
+                abstract="Malaria transmission shifts under climate change.",
+            ),
+            DiscoveredDocument(
+                title="Climate change impacts on malaria control strategy design",
+                score=9.6,
+                retrieval_backend="semantic_scholar",
+                abstract="Malaria interventions adapt to climate change.",
+            ),
+            DiscoveredDocument(
+                title="Climate change effects on child health outcomes",
+                score=8.9,
+                retrieval_backend="semantic_scholar",
+                abstract="Child health outcomes worsen under climate change.",
+            ),
+            DiscoveredDocument(
+                title="Environmental drivers of vector ecology under warming",
+                score=8.7,
+                retrieval_backend="semantic_scholar",
+                abstract="Vector ecology changes under climate warming.",
+            ),
+        )
+
+        reordered = democritus_query_agentic_module._rebalance_discovered_documents(
+            plan,
+            documents,
+            component_cap=1,
+            score_floor_ratio=0.4,
+        )
+
+        first_two_components = [
+            str(item.metadata.get("dominant_local_topic") or "")
+            for item in reordered[:2]
+        ]
+        self.assertEqual(first_two_components[0], "malaria")
+        self.assertNotEqual(first_two_components[1], "malaria")
+
+    def test_scholarly_backend_fans_out_broad_climate_queries_before_merging_results(self) -> None:
+        class FakeBackend:
+            backend_name = "fake"
+
+            def __init__(self) -> None:
+                self.queries: list[str] = []
+
+            def search(self, plan: QueryPlan, *, limit: int):
+                self.queries.append(plan.retrieval_query)
+                payload_by_query = {
+                    "climate change": (
+                        DiscoveredDocument(
+                            title="Climate change effects on malaria transmission",
+                            score=9.8,
+                            retrieval_backend="fake",
+                            abstract="Malaria transmission changes under climate change.",
+                            document_format="pdf",
+                        ),
+                    ),
+                    "climate change agriculture": (
+                        DiscoveredDocument(
+                            title="Climate change effects on crop yields",
+                            score=8.9,
+                            retrieval_backend="fake",
+                            abstract="Agriculture changes under climate change.",
+                            document_format="pdf",
+                        ),
+                    ),
+                    "climate change energy": (
+                        DiscoveredDocument(
+                            title="Climate change and electricity demand",
+                            score=8.7,
+                            retrieval_backend="fake",
+                            abstract="Energy demand changes under climate change.",
+                            document_format="pdf",
+                        ),
+                    ),
+                }
+                return payload_by_query.get(plan.retrieval_query, ())
+
+        backend = FakeBackend()
+        scholarly = ScholarlyRetrievalBackend((backend,))
+        plan = QueryPlan(
+            query="Analyze 10 recent studies on climate change",
+            normalized_query="climate change",
+            keyword_tokens=("climate", "change"),
+            target_documents=5,
+            retrieval_query="climate change",
+        )
+
+        results = scholarly.search(plan, limit=5)
+
+        self.assertIn("climate change", backend.queries)
+        self.assertIn("climate change agriculture", backend.queries)
+        self.assertIn("climate change energy", backend.queries)
+        titles = {item.title for item in results}
+        self.assertIn("Climate change effects on malaria transmission", titles)
+        self.assertIn("Climate change effects on crop yields", titles)
+        self.assertIn("Climate change and electricity demand", titles)
+
+    def test_collapse_topic_equivalence_classes_merges_heat_health_paraphrases(self) -> None:
+        collapsed = democritus_query_agentic_module._collapse_topic_equivalence_classes(
+            [
+                {
+                    "run_name": "run_0",
+                    "title": "Heat health study A",
+                    "topics": [
+                        "Heat-related morbidity and mortality",
+                        "Climate change adaptation policy",
+                        "Ambient temperature and mortality",
+                    ],
+                },
+                {
+                    "run_name": "run_1",
+                    "title": "Heat health study B",
+                    "topics": [
+                        "Heat-related illnesses and deaths",
+                        "Climate change adaptation policy gaps",
+                        "Ambient temperature effects on mortality",
+                    ],
+                },
+                {
+                    "run_name": "run_2",
+                    "title": "Heat health study C",
+                    "topics": [
+                        "Heat-related illnesses and mortality",
+                        "Climate adaptation policies",
+                        "Cereal production deficits by",
+                    ],
+                },
+            ],
+            limit=16,
+        )
+
+        by_topic = {item["topic"]: item for item in collapsed}
+        heat_topic = next(
+            item
+            for item in collapsed
+            if "Heat-related morbidity and mortality" in item["aliases"]
+        )
+        self.assertEqual(heat_topic["document_count"], 3)
+        self.assertEqual(heat_topic["equivalence_class_size"], 3)
+        self.assertIn("Heat-related illnesses and deaths", heat_topic["aliases"])
+        self.assertIn("Heat-related illnesses and mortality", heat_topic["aliases"])
+        climate_policy_topic = next(
+            item
+            for item in collapsed
+            if "Climate change adaptation policy" in item["aliases"]
+        )
+        self.assertEqual(climate_policy_topic["equivalence_class_size"], 2)
+        self.assertIn("Climate adaptation policies", climate_policy_topic["aliases"])
+        self.assertIn("Climate change adaptation policy gaps", by_topic)
+        ambient_topic = next(
+            item
+            for item in collapsed
+            if "Ambient temperature and mortality" in item["aliases"]
+        )
+        self.assertEqual(ambient_topic["equivalence_class_size"], 2)
+        self.assertIn("Ambient temperature effects on mortality", ambient_topic["aliases"])
+        all_aliases = {
+            alias
+            for item in collapsed
+            for alias in item["aliases"]
+        }
+        self.assertNotIn("Cereal production deficits by", all_aliases)
 
     def test_query_config_defaults_to_eight_workers(self) -> None:
         config = DemocritusQueryAgenticConfig(
@@ -2194,6 +2379,8 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
             self.assertEqual(payload["stage_label"], "Atlas Drift Checkpoint")
             self.assertEqual(payload["n_documents"], 2)
             self.assertTrue(any(item["topic"] == "minimum wage increases" for item in payload["top_topics"]))
+            minimum_wage_topic = next(item for item in payload["top_topics"] if item["topic"] == "minimum wage increases")
+            self.assertEqual(minimum_wage_topic["equivalence_class_size"], 1)
             self.assertEqual(payload["query_focus_terms"], ["minimum", "wage"])
             self.assertIn("drift_metrics", payload)
             self.assertEqual(payload["drift_metrics"]["suspicious_topic_count"], 0)

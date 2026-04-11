@@ -232,6 +232,70 @@ _EVIDENCE_ACQUISITION_TOKENS = {
     "datasets",
 }
 
+_BROAD_CLIMATE_QUERY_TERMS = {
+    "climate",
+    "change",
+    "global",
+    "warming",
+}
+
+_CLIMATE_BREADTH_FACETS: tuple[str, ...] = (
+    "ecosystems",
+    "agriculture",
+    "energy",
+    "water resources",
+    "biodiversity",
+    "adaptation policy",
+    "public health",
+    "extreme weather",
+)
+
+_TOPIC_EQUIVALENCE_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "by",
+    "effect",
+    "effects",
+    "for",
+    "impact",
+    "impacts",
+    "in",
+    "of",
+    "on",
+    "the",
+    "to",
+}
+
+_TOPIC_PHRASE_REWRITES: tuple[tuple[str, str], ...] = (
+    (r"\bclimate change\b", "climate"),
+    (r"\bpublic health\b", "health"),
+    (r"\bheat waves\b", "heat wave"),
+    (r"\bheat-related\b", "heat related"),
+    (r"\bagenda-setting\b", "agenda setting"),
+)
+
+_TOPIC_TOKEN_REWRITES = {
+    "adaptative": "adaptation",
+    "adaptive": "adaptation",
+    "adaptation": "adaptation",
+    "agenda": "agenda",
+    "deaths": "death",
+    "death": "death",
+    "diseases": "disease",
+    "gaps": "gap",
+    "governances": "governance",
+    "illness": "illness",
+    "illnesses": "illness",
+    "impacts": "impact",
+    "morbidity": "illness",
+    "mortalities": "death",
+    "mortality": "death",
+    "policies": "policy",
+    "strategies": "strategy",
+}
+
 _SEC_COMPANY_QUERY_STOPWORDS = {
     "10",
     "8",
@@ -441,6 +505,306 @@ def _normalized_topics(values: tuple[str, ...] | list[str] | object) -> tuple[st
     return tuple(dict.fromkeys(topics))
 
 
+def _topic_signature(value: str) -> tuple[str, ...]:
+    text = " ".join(str(value or "").lower().split()).strip()
+    if not text:
+        return ()
+    for pattern, replacement in _TOPIC_PHRASE_REWRITES:
+        text = re.sub(pattern, replacement, text)
+    text = re.sub(r"[^\w\s-]", " ", text)
+    text = text.replace("-", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ()
+    tokens: list[str] = []
+    for raw_token in text.split():
+        token = _TOPIC_TOKEN_REWRITES.get(raw_token, raw_token)
+        if len(token) > 4 and token.endswith("s") and token not in {"analysis"}:
+            token = token[:-1]
+        if token and token not in _TOPIC_EQUIVALENCE_STOPWORDS:
+            tokens.append(token)
+    return tuple(sorted(dict.fromkeys(tokens)))
+
+
+def _topic_display_rank(value: str) -> tuple[int, int]:
+    text = " ".join(str(value or "").split()).strip()
+    return (len(_topic_signature(text)), -len(text))
+
+
+def _topic_is_low_quality_surface(value: str) -> bool:
+    text = " ".join(str(value or "").split()).strip().lower()
+    if not text:
+        return True
+    trailing_bad_tokens = {"by", "for", "from", "in", "of", "on", "to", "with"}
+    raw_tokens = text.split()
+    if raw_tokens and raw_tokens[-1] in trailing_bad_tokens:
+        return True
+    return not _topic_signature(text)
+
+
+def _collapse_topic_equivalence_classes(
+    documents_payload: list[dict[str, object]],
+    *,
+    limit: int = 16,
+) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, ...], dict[str, object]] = {}
+    for document in documents_payload:
+        run_name = str(document.get("run_name") or "")
+        title = " ".join(str(document.get("title") or "").split()).strip()
+        for raw_topic in list(document.get("topics") or []):
+            topic = " ".join(str(raw_topic or "").split()).strip()
+            if not topic or _topic_is_low_quality_surface(topic):
+                continue
+            signature = _topic_signature(topic) or (topic.lower(),)
+            record = grouped.setdefault(
+                signature,
+                {
+                    "topic": topic,
+                    "document_runs": set(),
+                    "aliases": [],
+                    "representative_titles": [],
+                },
+            )
+            current_topic = str(record.get("topic") or "")
+            if _topic_display_rank(topic) > _topic_display_rank(current_topic):
+                record["topic"] = topic
+            alias_values = list(record.get("aliases") or [])
+            if topic not in alias_values:
+                alias_values.append(topic)
+            record["aliases"] = alias_values
+            if run_name:
+                cast_runs = record.get("document_runs")
+                if isinstance(cast_runs, set):
+                    cast_runs.add(run_name)
+            title_values = list(record.get("representative_titles") or [])
+            if title and title not in title_values:
+                title_values.append(title)
+            record["representative_titles"] = title_values[:3]
+    collapsed = [
+        {
+            "topic": str(item.get("topic") or ""),
+            "document_count": len(item.get("document_runs") or ()),
+            "aliases": list(item.get("aliases") or []),
+            "equivalence_class_size": len(list(item.get("aliases") or [])),
+            "representative_titles": list(item.get("representative_titles") or []),
+        }
+        for item in grouped.values()
+    ]
+    collapsed.sort(
+        key=lambda item: (
+            -int(item.get("document_count") or 0),
+            -int(item.get("equivalence_class_size") or 0),
+            str(item.get("topic") or "").lower(),
+        )
+    )
+    return collapsed[:limit]
+
+
+def _scholarly_query_variants(plan: "QueryPlan") -> tuple[str, ...]:
+    base_query = " ".join(str(plan.retrieval_query or plan.query or "").split()).strip()
+    if not base_query:
+        return ()
+    variants = [base_query]
+    lowered = base_query.lower()
+    focus_terms = _checkpoint_query_focus_terms(base_query)
+    non_climate_focus = [
+        term for term in focus_terms
+        if term not in _BROAD_CLIMATE_QUERY_TERMS
+    ]
+    if (
+        any(phrase in lowered for phrase in ("climate change", "global warming", "climate crisis"))
+        and not non_climate_focus
+    ):
+        for facet in _CLIMATE_BREADTH_FACETS[:6]:
+            variants.append(f"{base_query} {facet}")
+    return tuple(dict.fromkeys(variants))
+
+
+def _document_context_text(document: "DiscoveredDocument") -> str:
+    metadata_text = " ".join(
+        str(value or "").strip()
+        for value in dict(document.metadata or {}).values()
+        if str(value or "").strip()
+    )
+    return " ".join(
+        part
+        for part in (
+            str(document.title or "").strip(),
+            str(document.abstract or "").strip(),
+            metadata_text,
+        )
+        if part
+    ).strip()
+
+
+def _document_local_topic_profile(
+    document: "DiscoveredDocument",
+    *,
+    query_focus_terms: tuple[str, ...],
+) -> dict[str, object]:
+    focus_term_set = {term for term in query_focus_terms if term}
+    title_tokens = tuple(
+        token
+        for token in _tokenize(str(document.title or ""))
+        if token not in focus_term_set and token not in _GENERIC_RETRIEVAL_TOKENS and len(token) >= 4
+    )
+    context_tokens = tuple(
+        token
+        for token in _tokenize(_document_context_text(document))
+        if token not in focus_term_set and token not in _GENERIC_RETRIEVAL_TOKENS and len(token) >= 4
+    )
+    weighted = Counter()
+    for token in context_tokens:
+        weighted[token] += 1
+    for token in title_tokens:
+        weighted[token] += 2
+    local_topics = tuple(token for token, _count in weighted.most_common(3))
+    full_token_set = set(_tokenize(_document_context_text(document)))
+    matched_query_terms = tuple(term for term in query_focus_terms if term in full_token_set)
+    dominant_local_topic = (
+        local_topics[0]
+        if local_topics
+        else (matched_query_terms[0] if matched_query_terms else str(document.retrieval_backend or "document"))
+    )
+    return {
+        "local_topics": local_topics,
+        "dominant_local_topic": dominant_local_topic,
+        "matched_query_terms": matched_query_terms,
+    }
+
+
+def _annotate_document_with_local_topics(
+    document: "DiscoveredDocument",
+    *,
+    profile: dict[str, object],
+) -> "DiscoveredDocument":
+    metadata = dict(document.metadata or {})
+    metadata["dominant_local_topic"] = str(profile.get("dominant_local_topic") or "")
+    metadata["local_topics"] = "|".join(str(item) for item in tuple(profile.get("local_topics") or ()) if str(item))
+    metadata["matched_query_terms"] = "|".join(
+        str(item) for item in tuple(profile.get("matched_query_terms") or ()) if str(item)
+    )
+    return replace(document, metadata=metadata)
+
+
+def _rebalance_discovered_documents(
+    plan: "QueryPlan",
+    documents: tuple["DiscoveredDocument", ...],
+    *,
+    component_cap: int,
+    score_floor_ratio: float,
+    prior_selected: tuple["DiscoveredDocument", ...] = (),
+) -> tuple["DiscoveredDocument", ...]:
+    if len(documents) <= 2:
+        return documents
+    if plan.direct_document_paths or plan.direct_document_directories or plan.direct_document_urls:
+        return documents
+    if plan.sec_company_targets:
+        return documents
+
+    query_focus_terms = _checkpoint_query_focus_terms(plan.retrieval_query or plan.query)
+    if not query_focus_terms:
+        return documents
+
+    profiles = [
+        _document_local_topic_profile(document, query_focus_terms=query_focus_terms)
+        for document in documents
+    ]
+    prior_component_counts: Counter[str] = Counter()
+    for prior_document in prior_selected:
+        prior_profile = _document_local_topic_profile(prior_document, query_focus_terms=query_focus_terms)
+        prior_component = str(prior_profile.get("dominant_local_topic") or "").strip()
+        if prior_component:
+            prior_component_counts[prior_component] += 1
+
+    best_score = max((float(document.score) for document in documents), default=0.0)
+    score_floor = max(1.0, best_score * max(0.0, float(score_floor_ratio)))
+    remaining = list(range(len(documents)))
+    ordered: list[DiscoveredDocument] = []
+    selected_component_counts: Counter[str] = Counter(prior_component_counts)
+
+    while remaining:
+        best_index = min(
+            remaining,
+            key=lambda index: _diversity_rank_key(
+                document=documents[index],
+                profile=profiles[index],
+                selected_component_counts=selected_component_counts,
+                component_cap=component_cap,
+                score_floor=score_floor,
+                original_index=index,
+            ),
+        )
+        profile = profiles[best_index]
+        annotated = _annotate_document_with_local_topics(documents[best_index], profile=profile)
+        ordered.append(annotated)
+        dominant_component = str(profile.get("dominant_local_topic") or "").strip()
+        if dominant_component:
+            selected_component_counts[dominant_component] += 1
+        remaining.remove(best_index)
+
+    return tuple(ordered)
+
+
+def _diversity_rank_key(
+    *,
+    document: "DiscoveredDocument",
+    profile: dict[str, object],
+    selected_component_counts: Counter[str],
+    component_cap: int,
+    score_floor: float,
+    original_index: int,
+) -> tuple[int, int, int, int, float, int]:
+    dominant_component = str(profile.get("dominant_local_topic") or "").strip()
+    component_count = int(selected_component_counts.get(dominant_component, 0))
+    query_overlap = len(tuple(profile.get("matched_query_terms") or ()))
+    is_below_floor = float(document.score) < score_floor
+    has_seen_component = 1 if component_count > 0 else 0
+    exceeds_cap = 1 if component_count >= max(1, int(component_cap)) else 0
+    return (
+        has_seen_component if not is_below_floor else 1,
+        exceeds_cap if not is_below_floor else 1,
+        component_count if not is_below_floor else max(component_count, 1),
+        -query_overlap,
+        -float(document.score),
+        original_index,
+    )
+
+
+def _summarize_retrieval_components(
+    documents: tuple["DiscoveredDocument", ...],
+    *,
+    query: str,
+) -> list[dict[str, object]]:
+    query_focus_terms = _checkpoint_query_focus_terms(query)
+    grouped: dict[str, dict[str, object]] = {}
+    for document in documents:
+        profile = _document_local_topic_profile(document, query_focus_terms=query_focus_terms)
+        dominant_component = str(profile.get("dominant_local_topic") or "").strip()
+        if not dominant_component:
+            continue
+        record = grouped.setdefault(
+            dominant_component,
+            {
+                "topic": dominant_component,
+                "document_count": 0,
+                "matched_query_terms": list(profile.get("matched_query_terms") or ()),
+                "representative_titles": [],
+            },
+        )
+        record["document_count"] = int(record.get("document_count") or 0) + 1
+        titles = list(record.get("representative_titles") or [])
+        title = " ".join(str(document.title or "").split()).strip()
+        if title and title not in titles:
+            titles.append(title)
+        record["representative_titles"] = titles[:3]
+    components = sorted(
+        grouped.values(),
+        key=lambda item: (-int(item.get("document_count") or 0), str(item.get("topic") or "")),
+    )
+    return components[:8]
+
+
 def _topic_alignment_diagnostics(
     *,
     query: str,
@@ -470,10 +834,31 @@ def _topic_alignment_diagnostics(
         topic = " ".join(str(dict(item).get("topic") or "").split()).strip()
         if not topic:
             continue
-        context_text = " ".join(topic_context.get(topic) or ())
-        context_tokens = set(_tokenize(" ".join(part for part in (topic, context_text) if part)))
+        aliases = [
+            " ".join(str(alias or "").split()).strip()
+            for alias in list(dict(item).get("aliases") or [])
+            if " ".join(str(alias or "").split()).strip()
+        ]
+        alias_topics = tuple(dict.fromkeys([topic] + aliases))
+        context_text = " ".join(
+            entry
+            for alias_topic in alias_topics
+            for entry in topic_context.get(alias_topic, [])
+        )
+        context_tokens = set(
+            _tokenize(
+                " ".join(
+                    part
+                    for part in (
+                        " ".join(alias_topics),
+                        context_text,
+                    )
+                    if part
+                )
+            )
+        )
         matched_query_terms = tuple(term for term in focus_terms if term in context_tokens)
-        exact_phrase_match = bool(topic and topic.lower() in normalized_query)
+        exact_phrase_match = any(alias_topic.lower() in normalized_query for alias_topic in alias_topics if alias_topic)
         alignment_score = float(len(matched_query_terms))
         if exact_phrase_match:
             alignment_score += 1.0
@@ -489,6 +874,7 @@ def _topic_alignment_diagnostics(
             {
                 "topic": topic,
                 "document_count": int(dict(item).get("document_count") or 0),
+                "aliases": list(alias_topics),
                 "matched_query_terms": list(matched_query_terms),
                 "alignment_score": round(alignment_score, 3),
                 "exact_phrase_match": exact_phrase_match,
@@ -521,8 +907,18 @@ def _render_democritus_topic_checkpoint_html(payload: dict[str, object]) -> str:
     documents = list(payload.get("documents") or [])
     suspicious_topics = list(payload.get("suspicious_topics") or [])
     query_focus_terms = list(payload.get("query_focus_terms") or [])
+    retrieval_components = list(payload.get("retrieval_components") or [])
     topic_chips = "".join(
-        f'<span class="chip">{escape(str(item.get("topic") or ""))} · {escape(str(item.get("document_count") or 0))} docs</span>'
+        (
+            f'<span class="chip" title="{escape("Aliases: " + " | ".join(str(alias) for alias in list(item.get("aliases") or [])[:4]))}">'
+            f'{escape(str(item.get("topic") or ""))} · {escape(str(item.get("document_count") or 0))} docs'
+            + (
+                f' · {escape(str(int(item.get("equivalence_class_size") or 0)))} variants'
+                if int(item.get("equivalence_class_size") or 0) > 1
+                else ""
+            )
+            + "</span>"
+        )
         for item in top_topics[:16]
     ) or '<span class="chip">No recurring topics detected yet</span>'
     suspicious_chips = "".join(
@@ -533,6 +929,25 @@ def _render_democritus_topic_checkpoint_html(payload: dict[str, object]) -> str:
         f'<span class="chip focus">{escape(str(term))}</span>'
         for term in query_focus_terms[:8]
     ) or '<span class="chip">No strong query anchors were extracted.</span>'
+    retrieval_component_cards = "".join(
+        (
+            '<article class="component-card">'
+            f'<div class="doc-meta">{escape(str(item.get("document_count") or 0))} retrieved doc(s)</div>'
+            f'<h3 class="doc-title">{escape(str(item.get("topic") or ""))}</h3>'
+            + (
+                f'<p class="trace">Query overlap: {escape(" | ".join(str(term) for term in list(item.get("matched_query_terms") or [])[:3]))}</p>'
+                if list(item.get("matched_query_terms") or [])
+                else '<p class="trace">Query overlap: local retrieval component only</p>'
+            )
+            + (
+                f'<p class="guide">Representative titles: {escape(" | ".join(str(title) for title in list(item.get("representative_titles") or [])[:3]))}</p>'
+                if list(item.get("representative_titles") or [])
+                else ""
+            )
+            + "</article>"
+        )
+        for item in retrieval_components
+    ) or '<div class="empty">No retrieval-component summary was recorded for this checkpoint.</div>'
     document_cards = "".join(
         (
             '<article class="doc-card">'
@@ -597,7 +1012,7 @@ def _render_democritus_topic_checkpoint_html(payload: dict[str, object]) -> str:
       .chip.drift {{ background: #f8ede0; color: #8b4a1f; }}
       .topic-pill {{ background: #f5efe4; max-width: 100%; overflow-wrap: anywhere; }}
       .doc-grid {{ display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); align-items: start; }}
-      .doc-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 18px; background: #fffdf9; display: grid; gap: 12px; min-width: 0; align-content: start; overflow: hidden; }}
+      .doc-card, .component-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 18px; background: #fffdf9; display: grid; gap: 12px; min-width: 0; align-content: start; overflow: hidden; }}
       .doc-meta {{ color: var(--muted); font-size: 0.9rem; }}
       .doc-title {{
         display: -webkit-box;
@@ -633,9 +1048,14 @@ def _render_democritus_topic_checkpoint_html(payload: dict[str, object]) -> str:
       </section>
       <section class="panel">
         <p class="eyebrow">Atlas Drift Signal</p>
-        <p class="trace">Democritus now treats the atlas pass as an anti-drift checkpoint before deeper extraction. Query anchors and suspicious topics are surfaced here so you can tighten the corpus early.</p>
+        <p class="trace">Democritus now treats the atlas pass as an anti-drift checkpoint before deeper extraction. Query-global anchors and suspicious retrieved-local topics are surfaced here so you can tighten the corpus early.</p>
         <div class="chip-row" style="margin-top:14px;">{focus_term_chips}</div>
         <div class="chip-row" style="margin-top:12px;">{suspicious_chips}</div>
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Retrieved Local Components</p>
+        <p class="trace">These cards summarize the dominant local retrieval components before Democritus expands them into root-topic cards. If a broad query gets trapped in one basin, it should become visible here immediately.</p>
+        <div class="doc-grid" style="margin-top:12px;">{retrieval_component_cards}</div>
       </section>
       <section class="panel">
         <p class="eyebrow">Corpus Topic Atlas</p>
@@ -660,6 +1080,7 @@ def _build_democritus_topic_checkpoint(
     retrieval_refinement: str = "",
     outdir: Path,
     batch_runner: DemocritusBatchAgenticRunner,
+    selected_documents: tuple["DiscoveredDocument", ...] = (),
 ) -> tuple[Path, Path]:
     checkpoint_dir = outdir / "interactive_checkpoint"
     manifest_path = checkpoint_dir / "democritus_topic_checkpoint.json"
@@ -692,10 +1113,7 @@ def _build_democritus_topic_checkpoint(
                 "causal_gestalt": causal_gestalt,
             }
         )
-    top_topics = [
-        {"topic": topic, "document_count": count}
-        for topic, count in topic_counter.most_common(16)
-    ]
+    top_topics = _collapse_topic_equivalence_classes(documents_payload, limit=16)
     focus_query = _retrieval_source_query(
         base_query=base_query,
         selected_topics=selected_topics,
@@ -711,6 +1129,7 @@ def _build_democritus_topic_checkpoint(
     suspicious_topics = list(drift_payload.get("suspicious_topics") or [])
     drift_metrics = dict(drift_payload.get("drift_metrics") or {})
     suspicious_count = int(drift_metrics.get("suspicious_topic_count") or 0)
+    retrieval_components = _summarize_retrieval_components(selected_documents, query=focus_query)
     payload = {
         "query": query,
         "base_query": base_query,
@@ -725,6 +1144,7 @@ def _build_democritus_topic_checkpoint(
         "topic_alignment": alignment_payload,
         "query_focus_terms": list(drift_payload.get("query_focus_terms") or []),
         "suspicious_topics": suspicious_topics,
+        "retrieval_components": retrieval_components,
         "drift_metrics": drift_metrics,
         "documents": documents_payload,
         "summary_text": (
@@ -1712,6 +2132,8 @@ class DemocritusQueryAgenticConfig:
     retrieval_timeout_seconds: float = 20.0
     corpus_name: str = "query_corpus"
     max_docs: int = 0
+    retrieval_topic_component_cap: int = 2
+    retrieval_diversity_score_floor_ratio: float = 0.45
     consensus_enabled: bool = True
     consensus_batch_size: int = 1
     consensus_similarity_threshold: float = 0.9
@@ -1820,6 +2242,8 @@ class DemocritusQueryAgenticConfig:
             retrieval_timeout_seconds=self.retrieval_timeout_seconds,
             corpus_name=self.corpus_name,
             max_docs=max_docs,
+            retrieval_topic_component_cap=max(1, int(self.retrieval_topic_component_cap)),
+            retrieval_diversity_score_floor_ratio=min(1.0, max(0.0, float(self.retrieval_diversity_score_floor_ratio))),
             consensus_enabled=self.consensus_enabled,
             consensus_batch_size=self.consensus_batch_size,
             consensus_similarity_threshold=self.consensus_similarity_threshold,
@@ -2354,18 +2778,40 @@ class ScholarlyRetrievalBackend:
     def search(self, plan: QueryPlan, *, limit: int) -> tuple[DiscoveredDocument, ...]:
         merged: dict[str, DiscoveredDocument] = {}
         backend_limit = min(max(limit, plan.target_documents * 4, 20), 100)
+        variant_queries = _scholarly_query_variants(plan)
+        per_variant_limit = min(max(limit, plan.target_documents, 8), backend_limit)
         backend_failures: list[str] = []
         for backend in self.backends:
-            try:
-                results = backend.search(plan, limit=backend_limit)
-            except Exception as exc:
-                backend_failures.append(f"{getattr(backend, 'backend_name', type(backend).__name__)}: {exc}")
-                continue
-            for item in results:
-                key = (item.identifier or item.download_url or item.url or item.title).lower()
-                existing = merged.get(key)
-                if existing is None or self._rank_key(item) > self._rank_key(existing):
-                    merged[key] = item
+            backend_had_success = False
+            backend_variant_failures: list[str] = []
+            for variant_query in variant_queries:
+                variant_plan = plan
+                if variant_query != (plan.retrieval_query or plan.query):
+                    variant_plan = replace(
+                        plan,
+                        retrieval_query=variant_query,
+                        normalized_query=variant_query,
+                        keyword_tokens=_tokenize(variant_query),
+                    )
+                try:
+                    results = backend.search(variant_plan, limit=per_variant_limit)
+                    backend_had_success = True
+                except Exception as exc:
+                    backend_variant_failures.append(f"{variant_query}: {exc}")
+                    continue
+                for item in results:
+                    metadata = dict(item.metadata or {})
+                    metadata.setdefault("retrieval_query_variant", variant_query)
+                    annotated = replace(item, metadata=metadata)
+                    key = (annotated.identifier or annotated.download_url or annotated.url or annotated.title).lower()
+                    existing = merged.get(key)
+                    if existing is None or self._rank_key(annotated) > self._rank_key(existing):
+                        merged[key] = annotated
+            if not backend_had_success and backend_variant_failures:
+                backend_failures.append(
+                    f"{getattr(backend, 'backend_name', type(backend).__name__)}: "
+                    + "; ".join(backend_variant_failures[:3])
+                )
         ranked = sorted(merged.values(), key=self._sort_key, reverse=True)
         if not ranked and backend_failures:
             raise RuntimeError("All scholarly backends failed: " + "; ".join(backend_failures))
@@ -2580,6 +3026,7 @@ class DemocritusQueryAgenticRunner:
                 retrieval_refinement=plan.retrieval_refinement,
                 outdir=self.config.outdir,
                 batch_runner=batch_runner,
+                selected_documents=selected_documents,
             )
         result = DemocritusQueryRunResult(
             query_plan=plan,
@@ -2952,6 +3399,12 @@ class DemocritusQueryAgenticRunner:
         provider = self._provider()
         discovery_limit = self._discovery_limit(plan)
         discovered = self._search_documents(provider, plan, limit=discovery_limit)
+        discovered = _rebalance_discovered_documents(
+            plan,
+            discovered,
+            component_cap=self.config.retrieval_topic_component_cap,
+            score_floor_ratio=self.config.retrieval_diversity_score_floor_ratio,
+        )
         if not discovered:
             raise FileNotFoundError(
                 f"No candidate documents matched query: {self.config.query} "
@@ -2967,8 +3420,17 @@ class DemocritusQueryAgenticRunner:
                 f"[DISCOVERED] {len(discovered)}",
                 f"[TARGET] {plan.target_documents}",
                 *[
+                    f"[RETRIEVAL_COMPONENT {component}] {count}"
+                    for component, count in Counter(
+                        str(item.metadata.get('dominant_local_topic') or '')
+                        for item in discovered[: max(plan.target_documents, 8)]
+                        if str(item.metadata.get('dominant_local_topic') or '').strip()
+                    ).most_common(5)
+                ],
+                *[
                     f"[DOC {index:02d}] score={item.score:.3f} backend={item.retrieval_backend} "
-                    f"format={item.document_format} title={item.title}"
+                    f"format={item.document_format} local_topic={item.metadata.get('dominant_local_topic') or 'n/a'} "
+                    f"title={item.title}"
                     for index, item in enumerate(discovered[: plan.target_documents], start=1)
                 ],
             ],
@@ -3034,12 +3496,31 @@ class DemocritusQueryAgenticRunner:
                     discovered_documents.append(document)
                     if max_documents > 0 and len(discovered_documents) >= max_documents:
                         break
+                if len(discovered_documents) > previous_count:
+                    reordered_pending = _rebalance_discovered_documents(
+                        plan,
+                        tuple(discovered_documents[previous_count:]),
+                        component_cap=self.config.retrieval_topic_component_cap,
+                        score_floor_ratio=self.config.retrieval_diversity_score_floor_ratio,
+                        prior_selected=tuple(selected),
+                    )
+                    discovered_documents[previous_count:] = list(reordered_pending)
                 _write_json(self.discovered_path, [asdict(item) for item in discovered_documents])
                 log_lines.append(
                     f"[DISCOVERY] round={discovery_round} backend={getattr(provider, 'backend_name', self._backend_name())} "
                     f"requested_limit={requested_limit} total_candidates={len(discovered_documents)} "
                     f"retrieval_query={plan.retrieval_query}"
                 )
+                component_preview = Counter(
+                    str(item.metadata.get("dominant_local_topic") or "")
+                    for item in discovered_documents[previous_count: min(len(discovered_documents), previous_count + 8)]
+                    if str(item.metadata.get("dominant_local_topic") or "").strip()
+                )
+                if component_preview:
+                    log_lines.append(
+                        "[DISCOVERY_COMPONENTS] "
+                        + ", ".join(f"{component}:{count}" for component, count in component_preview.most_common(4))
+                    )
                 if len(discovered_documents) == previous_count:
                     discovery_exhausted = True
                     log_lines.append("[DISCOVERY] no new candidates returned; treating retrieval as exhausted")

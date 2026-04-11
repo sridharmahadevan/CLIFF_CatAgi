@@ -941,24 +941,31 @@ class DashboardQueryLauncher:
                 normalized = self._normalize_checkpoint_topic(topic)
                 if normalized:
                     topic_counts[normalized] += 1
-        atlas_topics: list[tuple[str, int]] = []
+        atlas_topics: list[tuple[str, int, tuple[str, ...], int]] = []
         seen_topics: set[str] = set()
         for item in list(payload.get("top_topics") or []):
-            topic = self._normalize_checkpoint_topic(dict(item).get("topic"))
+            item_dict = dict(item)
+            topic = self._normalize_checkpoint_topic(item_dict.get("topic"))
             if not topic or topic in seen_topics:
                 continue
-            count = int(dict(item).get("document_count") or topic_counts.get(topic) or 0)
-            atlas_topics.append((topic, count))
+            count = int(item_dict.get("document_count") or topic_counts.get(topic) or 0)
+            aliases = tuple(
+                self._normalize_checkpoint_topic(alias)
+                for alias in list(item_dict.get("aliases") or [])
+                if self._normalize_checkpoint_topic(alias)
+            )
+            equivalence_class_size = int(item_dict.get("equivalence_class_size") or len(aliases) or 1)
+            atlas_topics.append((topic, count, aliases, equivalence_class_size))
             seen_topics.add(topic)
         for topic, count in topic_counts.most_common(16):
             if topic in seen_topics:
                 continue
-            atlas_topics.append((topic, int(count)))
+            atlas_topics.append((topic, int(count), (topic,), 1))
             seen_topics.add(topic)
         for topic in list(selected_topics) + list(rejected_topics):
             if topic in seen_topics:
                 continue
-            atlas_topics.append((topic, int(topic_counts.get(topic) or 0)))
+            atlas_topics.append((topic, int(topic_counts.get(topic) or 0), (topic,), 1))
             seen_topics.add(topic)
         topic_hidden_inputs = "".join(
             f'<input type="hidden" name="selected_topic" value="{html.escape(topic)}" data-topic-hidden="selected" />'
@@ -1011,11 +1018,18 @@ class DashboardQueryLauncher:
                 else ''
             )
             + f'" data-topic="{html.escape(topic)}"'
+            + f' title="{html.escape("Aliases: " + " | ".join(alias for alias in aliases[:4]))}"'
             + f' data-topic-state="{html.escape("selected" if topic in selected_topics else "rejected" if topic in rejected_topics else "neutral")}">'
             + f'<span class="topic-chip-label">{html.escape(topic)}</span>'
-            + f'<span class="topic-chip-count">{html.escape(str(count))} doc{"s" if int(count) != 1 else ""}</span>'
+            + f'<span class="topic-chip-count">{html.escape(str(count))} doc{"s" if int(count) != 1 else ""}'
+            + (
+                f' · {html.escape(str(equivalence_class_size))} variants'
+                if int(equivalence_class_size) > 1
+                else ""
+            )
+            + '</span>'
             + "</button>"
-            for topic, count in atlas_topics[:24]
+            for topic, count, aliases, equivalence_class_size in atlas_topics[:24]
         ) or '<span class="chip">No recurring topics detected yet</span>'
         document_cards = []
         for item in documents:
