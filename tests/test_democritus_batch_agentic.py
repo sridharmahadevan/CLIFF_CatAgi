@@ -970,6 +970,85 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             rendered_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
             self.assertIn("Topic Partitions", rendered_html)
 
+    def test_corpus_synthesis_study_cards_expose_lcm_gallery_artifacts(self) -> None:
+        class FakeRunner:
+            def __init__(self, outdir: Path) -> None:
+                self.outdir = outdir
+
+            def _execute_agent(self, agent_name: str, frontier_index: int):
+                triples_path = self.outdir / "relational_triples.jsonl"
+                triples_path.parent.mkdir(parents=True, exist_ok=True)
+                triples_path.write_text(
+                    '{"topic":"glp1","path":["glp1"],"question":"q","statement":"GLP-1 receptor agonists increase satiety.","subj":"glp-1 receptor agonists","rel":"increases","obj":"satiety","domain":"GLP-1 receptor agonists"}\n',
+                    encoding="utf-8",
+                )
+                if agent_name == "root_topic_discovery_agent":
+                    config_dir = self.outdir / "configs"
+                    config_dir.mkdir(parents=True, exist_ok=True)
+                    (config_dir / "root_topics.txt").write_text("GLP-1 receptor agonists\nweight loss\n", encoding="utf-8")
+                if agent_name == "credibility_bundle_agent":
+                    reports_dir = self.outdir / "reports"
+                    reports_dir.mkdir(parents=True, exist_ok=True)
+                    (reports_dir / "run_0_executive_summary.md").write_text("# Executive Summary\n\nTier 1 Claims\n", encoding="utf-8")
+                    (reports_dir / "run_0_credibility_report.md").write_text("# Credibility Report\n\nSupported.\n", encoding="utf-8")
+                    assets_dir = reports_dir / "assets"
+                    assets_dir.mkdir(parents=True, exist_ok=True)
+                    (assets_dir / "lcm_01_satiety.png").write_bytes(b"fakepng")
+                    (reports_dir / "run_0_lcm_gallery.html").write_text("<html><body>LCM gallery</body></html>", encoding="utf-8")
+                if agent_name == "manifold_visualization_agent":
+                    viz_dir = self.outdir / "viz"
+                    viz_dir.mkdir(parents=True, exist_ok=True)
+                    (viz_dir / "relational_manifold_viewer.html").write_text("<html><body>Manifold</body></html>", encoding="utf-8")
+                return DemocritusAgentRecord(
+                    agent_name=agent_name,
+                    frontier_index=frontier_index,
+                    status="ok",
+                    started_at=0.0,
+                    ended_at=1.0,
+                    outputs=(str(triples_path),),
+                    log_path=None,
+                    notes="",
+                )
+
+        class FakeBatchRunner(DemocritusBatchAgenticRunner):
+            def _discover_documents(self):
+                run_name = "run_0"
+                outdir = Path(self.config.outdir) / run_name
+                return (
+                    DemocritusBatchDocument(
+                        index=0,
+                        pdf_path=Path("/tmp/glp1_study.pdf"),
+                        run_name=run_name,
+                        outdir=outdir,
+                        runner=FakeRunner(outdir),
+                        plan=(
+                            (SimpleNamespace(name="root_topic_discovery_agent"),),
+                            (SimpleNamespace(name="triple_extraction_agent"),),
+                            (SimpleNamespace(name="manifold_visualization_agent"),),
+                            (SimpleNamespace(name="credibility_bundle_agent"),),
+                        ),
+                    ),
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = FakeBatchRunner(
+                DemocritusBatchConfig(
+                    pdf_dir=Path(tmpdir),
+                    outdir=Path(tmpdir) / "runs",
+                    max_workers=1,
+                    dry_run=False,
+                )
+            )
+            result = runner.run_with_artifacts()
+
+            synthesis_payload = json.loads(result.corpus_synthesis.summary_path.read_text(encoding="utf-8"))
+            study_card = (synthesis_payload.get("study_cards") or [])[0]
+            self.assertTrue(str(study_card.get("lcm_viewer_href") or "").endswith("run_0_lcm_gallery.html"))
+            self.assertIn("lcm_01_satiety.png", str(study_card.get("lcm_preview_href") or ""))
+            rendered_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
+            self.assertIn("LCM graph gallery", rendered_html)
+            self.assertIn("lcm_01_satiety.png", rendered_html)
+
     def test_single_document_corpus_synthesis_coalesces_near_duplicate_claim_cards(self) -> None:
         class FakeRunner:
             def __init__(self, outdir: Path) -> None:
@@ -1564,6 +1643,28 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             )
             (run_dir / "viz").mkdir(parents=True, exist_ok=True)
             (run_dir / "viz" / "relational_manifold_2d.png").write_bytes(b"fakepng")
+            (run_dir / "viz" / "relational_manifold_labels.json").write_text(
+                json.dumps(
+                    {
+                        "clusters": [
+                            {
+                                "id": "cluster-1",
+                                "label": "GLP-1 agonists / satiety / caloric intake",
+                                "sample_labels": [
+                                    "GLP-1 agonists",
+                                    "satiety",
+                                    "caloric intake",
+                                ],
+                                "point_count": 14,
+                                "x_norm": 0.38,
+                                "y_norm": 0.44,
+                                "radius_norm": 0.09,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
             (run_dir / "reports" / "assets" / "lcm_01_appetite_suppression_pathway.png").write_bytes(b"fakepng")
 
             runner._write_telemetry(
@@ -1626,6 +1727,10 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             self.assertIn("Topic Labels", manifold_html)
             self.assertIn("GLP-1 agonists", manifold_html)
             self.assertIn("lcm_01_appetite_suppression_pathway.png", manifold_html)
+            self.assertIn("Hover the manifold", manifold_html)
+            self.assertIn("manifold-hotspot", manifold_html)
+            self.assertIn("Hovered Cluster", manifold_html)
+            self.assertIn("matched topic", manifold_html)
             lcm_html = lcm_viewer.read_text(encoding="utf-8")
             self.assertIn("LCM Graph Gallery", lcm_html)
             self.assertIn("appetite suppression pathway", lcm_html)

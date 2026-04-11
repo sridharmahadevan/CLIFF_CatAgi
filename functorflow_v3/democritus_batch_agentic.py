@@ -94,6 +94,16 @@ def _read_lines(path: Path) -> list[str]:
     return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def _read_json_object(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
 def _markdown_excerpt(path: Path) -> str:
     if not path.exists():
         return ""
@@ -269,6 +279,61 @@ def _safe_int(value: object, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _topic_tokens(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", str(value).lower())
+        if len(token) > 2 and token not in {"the", "and", "for", "with", "from", "into"}
+    }
+
+
+def _match_hover_topic(label: str, root_topics: list[str]) -> str:
+    label_tokens = _topic_tokens(label)
+    if not label_tokens:
+        return ""
+    best_topic = ""
+    best_score = 0
+    for topic in root_topics:
+        overlap = len(label_tokens & _topic_tokens(topic))
+        if overlap > best_score:
+            best_topic = topic
+            best_score = overlap
+    return best_topic if best_score > 0 else ""
+
+
+def _load_manifold_hover_clusters(*, labels_path: Path, root_topics: list[str]) -> list[dict[str, object]]:
+    payload = _read_json_object(labels_path)
+    raw_clusters = payload.get("clusters")
+    if not isinstance(raw_clusters, list):
+        return []
+    clusters: list[dict[str, object]] = []
+    for index, raw in enumerate(raw_clusters):
+        if not isinstance(raw, dict):
+            continue
+        label = str(raw.get("label") or "").strip()
+        if not label:
+            continue
+        sample_labels = [
+            str(item).strip()
+            for item in list(raw.get("sample_labels") or [])
+            if str(item).strip()
+        ][:5]
+        matched_topic = _match_hover_topic(label, root_topics)
+        clusters.append(
+            {
+                "id": str(raw.get("id") or f"cluster-{index + 1}"),
+                "label": label,
+                "sample_labels": sample_labels,
+                "x_norm": min(0.96, max(0.04, _safe_float(raw.get("x_norm"), 0.5))),
+                "y_norm": min(0.96, max(0.04, _safe_float(raw.get("y_norm"), 0.5))),
+                "radius_norm": min(0.24, max(0.045, _safe_float(raw.get("radius_norm"), 0.08))),
+                "point_count": max(1, _safe_int(raw.get("point_count"), len(sample_labels) or 1)),
+                "matched_topic": matched_topic,
+            }
+        )
+    return clusters[:10]
 
 
 @dataclass(frozen=True)
@@ -1510,6 +1575,10 @@ class DemocritusBatchAgenticRunner:
         summary_path = run_dir / "reports" / f"{document.run_name}_executive_summary.md"
         credibility_path = run_dir / "reports" / f"{document.run_name}_credibility_report.md"
         manifold_path = run_dir / "viz" / "relational_manifold_2d.png"
+        manifold_hover_clusters = _load_manifold_hover_clusters(
+            labels_path=run_dir / "viz" / "relational_manifold_labels.json",
+            root_topics=root_topics,
+        )
         summary_viewer_path, credibility_viewer_path, manifold_viewer_path, lcm_viewer_path = self._write_artifact_viewers(
             document,
             summary_path=summary_path,
@@ -1518,6 +1587,7 @@ class DemocritusBatchAgenticRunner:
             root_topics=root_topics,
             top_triples=top_triples,
             top_lcms=top_lcms,
+            manifold_hover_clusters=manifold_hover_clusters,
         )
         bundled_pdf_path = run_dir / "input.pdf"
         pdf_target_path = bundled_pdf_path if bundled_pdf_path.exists() else document.pdf_path
@@ -1576,6 +1646,7 @@ class DemocritusBatchAgenticRunner:
         root_topics: list[str],
         top_triples: list[dict[str, object]],
         top_lcms: list[dict[str, object]],
+        manifold_hover_clusters: list[dict[str, object]],
     ) -> tuple[Path, Path, Path, Path]:
         summary_viewer_path = summary_path.with_suffix(".html")
         credibility_viewer_path = credibility_path.with_suffix(".html")
@@ -1609,6 +1680,7 @@ class DemocritusBatchAgenticRunner:
                 root_topics=root_topics,
                 top_triples=top_triples,
                 top_lcms=top_lcms,
+                hover_clusters=manifold_hover_clusters,
             ),
             encoding="utf-8",
         )
@@ -1744,11 +1816,15 @@ class DemocritusBatchAgenticRunner:
         root_topics: list[str],
         top_triples: list[dict[str, object]],
         top_lcms: list[dict[str, object]],
+        hover_clusters: list[dict[str, object]],
     ) -> str:
         def esc(value: object) -> str:
             return html.escape(str(value))
 
-        topic_markup = "".join(f'<span class="chip">{esc(topic)}</span>' for topic in root_topics[:10])
+        topic_markup = "".join(
+            f'<span class="chip" data-topic-label="{esc(topic)}">{esc(topic)}</span>'
+            for topic in root_topics[:10]
+        )
         triple_markup = "".join(
             '<article class="mini-card">'
             f'<div class="mini-title">{esc(item.get("subj") or "")} <span class="arrow">→</span> {esc(item.get("obj") or "")}</div>'
@@ -1770,8 +1846,35 @@ class DemocritusBatchAgenticRunner:
             )
             for item in top_lcms[:4]
         )
+        hover_markup = "".join(
+            (
+                '<button class="manifold-hotspot" type="button"'
+                f' style="left: {100.0 * _safe_float(item.get("x_norm"), 0.5):.2f}%; top: {100.0 * _safe_float(item.get("y_norm"), 0.5):.2f}%; '
+                f'width: {200.0 * _safe_float(item.get("radius_norm"), 0.08):.2f}%; height: {200.0 * _safe_float(item.get("radius_norm"), 0.08):.2f}%;"'
+                f' data-label="{esc(item.get("label") or "")}"'
+                f' data-topic="{esc(item.get("matched_topic") or "")}"'
+                f' data-size="{esc(item.get("point_count") or 0)}"'
+                f' data-samples="{esc(" | ".join(str(part) for part in list(item.get("sample_labels") or [])[:4]))}">'
+                '<span class="sr-only">Show manifold label</span>'
+                "</button>"
+            )
+            for item in hover_clusters
+        )
+        hover_help = (
+            '<div class="viewer-note">Hover the manifold to surface the nearest recovered cluster label and its matched topic chip.</div>'
+            if hover_clusters
+            else '<div class="viewer-note">Cluster hover labels will appear automatically when manifold metadata is available.</div>'
+        )
         image_markup = (
+            '<div class="manifold-stage">'
             f'<img src="{esc(manifold_path.name)}" alt="{esc(title)} relational manifold" loading="eager">'
+            f'{hover_markup}'
+            '<div class="hover-card" id="hover-card" hidden>'
+            '<div class="hover-eyebrow">Hovered Cluster</div>'
+            '<div class="hover-title" id="hover-title">Move over the manifold</div>'
+            '<div class="hover-meta" id="hover-meta">Recovered local labels will appear here.</div>'
+            "</div>"
+            "</div>"
             if manifold_path.exists()
             else '<div class="empty">The manifold image is not available yet.</div>'
         )
@@ -1813,7 +1916,60 @@ class DemocritusBatchAgenticRunner:
     .hero p {{ margin: 0; color: var(--muted); font-size: 17px; line-height: 1.65; max-width: 920px; }}
     .layout {{ display: grid; grid-template-columns: 1.3fr 0.7fr; gap: 18px; }}
     .viewer {{ padding: 18px; }}
+    .manifold-stage {{ position: relative; }}
     .viewer img {{ width: 100%; border-radius: 22px; display: block; background: white; }}
+    .viewer-note {{
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }}
+    .manifold-hotspot {{
+      position: absolute;
+      transform: translate(-50%, -50%);
+      border-radius: 999px;
+      border: 2px solid rgba(15, 118, 110, 0.18);
+      background: rgba(15, 118, 110, 0.06);
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+    }}
+    .manifold-hotspot:hover,
+    .manifold-hotspot:focus-visible,
+    .manifold-hotspot.is-active {{
+      border-color: rgba(15, 118, 110, 0.9);
+      background: rgba(15, 118, 110, 0.18);
+      box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.14);
+      outline: none;
+    }}
+    .hover-card {{
+      position: absolute;
+      left: 18px;
+      bottom: 18px;
+      max-width: min(420px, calc(100% - 36px));
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(20, 36, 51, 0.9);
+      color: white;
+      box-shadow: 0 12px 32px rgba(20, 36, 51, 0.2);
+      backdrop-filter: blur(8px);
+    }}
+    .hover-eyebrow {{
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      opacity: 0.72;
+    }}
+    .hover-title {{
+      margin-top: 6px;
+      font-size: 20px;
+      line-height: 1.25;
+    }}
+    .hover-meta {{
+      margin-top: 8px;
+      font-size: 14px;
+      line-height: 1.55;
+      opacity: 0.92;
+    }}
     .panel {{ padding: 22px; }}
     .section-label {{
       margin: 0 0 10px;
@@ -1831,6 +1987,12 @@ class DemocritusBatchAgenticRunner:
       font-size: 13px;
       background: #edf2f7;
       color: var(--ink);
+      transition: background 120ms ease, color 120ms ease, transform 120ms ease;
+    }}
+    .chip.is-active {{
+      background: rgba(15, 118, 110, 0.16);
+      color: #0b5e57;
+      transform: translateY(-1px);
     }}
     .mini-card, .lcm-row {{
       background: white;
@@ -1861,6 +2023,17 @@ class DemocritusBatchAgenticRunner:
       color: var(--muted);
       background: rgba(255,255,255,0.72);
     }}
+    .sr-only {{
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }}
     @media (max-width: 960px) {{
       .layout {{ grid-template-columns: 1fr; }}
     }}
@@ -1876,6 +2049,7 @@ class DemocritusBatchAgenticRunner:
     <div class="layout">
       <section class="viewer">
         {image_markup}
+        {hover_help}
       </section>
       <aside class="panel">
         <div class="section-label">Topic Labels</div>
@@ -1887,6 +2061,59 @@ class DemocritusBatchAgenticRunner:
       </aside>
     </div>
   </div>
+  <script>
+    (() => {{
+      const card = document.getElementById("hover-card");
+      const titleNode = document.getElementById("hover-title");
+      const metaNode = document.getElementById("hover-meta");
+      const chips = Array.from(document.querySelectorAll("[data-topic-label]"));
+      const hotspots = Array.from(document.querySelectorAll(".manifold-hotspot"));
+      const clearActive = () => {{
+        hotspots.forEach((node) => node.classList.remove("is-active"));
+        chips.forEach((node) => node.classList.remove("is-active"));
+      }};
+      hotspots.forEach((node) => {{
+        const activate = () => {{
+          clearActive();
+          node.classList.add("is-active");
+          if (!card || !titleNode || !metaNode) {{
+            return;
+          }}
+          card.hidden = false;
+          titleNode.textContent = node.dataset.label || "Recovered cluster";
+          const matchedTopic = node.dataset.topic || "";
+          const sampleText = node.dataset.samples || "";
+          const parts = [];
+          if (matchedTopic) {{
+            parts.push(`matched topic: ${{matchedTopic}}`);
+          }}
+          if (node.dataset.size) {{
+            parts.push(`${{node.dataset.size}} manifold point(s)`);
+          }}
+          if (sampleText) {{
+            parts.push(sampleText.split(" | ").join(" · "));
+          }}
+          metaNode.textContent = parts.join(" • ") || "Recovered local labels will appear here.";
+          if (matchedTopic) {{
+            chips.forEach((chip) => {{
+              if ((chip.dataset.topicLabel || "") === matchedTopic) {{
+                chip.classList.add("is-active");
+              }}
+            }});
+          }}
+        }};
+        node.addEventListener("mouseenter", activate);
+        node.addEventListener("focus", activate);
+        node.addEventListener("click", activate);
+      }});
+      const stage = document.querySelector(".manifold-stage");
+      if (stage) {{
+        stage.addEventListener("mouseleave", () => {{
+          clearActive();
+        }});
+      }}
+    }})();
+  </script>
 </body>
 </html>"""
 

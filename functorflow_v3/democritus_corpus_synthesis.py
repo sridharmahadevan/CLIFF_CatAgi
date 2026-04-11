@@ -1180,6 +1180,13 @@ def _load_study_cards(connection: sqlite3.Connection, *, batch_outdir: Path) -> 
             ][:6]
         summary_viewer = batch_outdir / run_name_str / "reports" / f"{run_name_str}_executive_summary.html"
         credibility_viewer = batch_outdir / run_name_str / "reports" / f"{run_name_str}_credibility_report.html"
+        manifold_viewer = batch_outdir / run_name_str / "viz" / "relational_manifold_viewer.html"
+        lcm_viewer = batch_outdir / run_name_str / "reports" / f"{run_name_str}_lcm_gallery.html"
+        lcm_preview_rel = ""
+        for graph_path in sorted((batch_outdir / run_name_str / "reports").glob("assets/lcm_*.png"))[:1]:
+            lcm_preview_rel = _relative_href(graph_path, start=batch_outdir / "corpus_synthesis")
+            if lcm_preview_rel:
+                break
         cards.append(
             {
                 "run_name": run_name_str,
@@ -1187,6 +1194,9 @@ def _load_study_cards(connection: sqlite3.Connection, *, batch_outdir: Path) -> 
                 "root_topics": root_topics,
                 "summary_href": _relative_href(summary_viewer, start=batch_outdir / "corpus_synthesis"),
                 "credibility_href": _relative_href(credibility_viewer, start=batch_outdir / "corpus_synthesis"),
+                "manifold_href": _relative_href(manifold_viewer, start=batch_outdir / "corpus_synthesis"),
+                "lcm_viewer_href": _relative_href(lcm_viewer, start=batch_outdir / "corpus_synthesis"),
+                "lcm_preview_href": lcm_preview_rel,
             }
         )
     return cards
@@ -1790,12 +1800,25 @@ def _render_study_card(item: dict[str, object]) -> str:
         links.append(f'<a href="{esc(item["summary_href"])}" target="_blank" rel="noreferrer">Executive summary</a>')
     if item.get("credibility_href"):
         links.append(f'<a href="{esc(item["credibility_href"])}" target="_blank" rel="noreferrer">Credibility report</a>')
+    if item.get("manifold_href"):
+        links.append(f'<a href="{esc(item["manifold_href"])}" target="_blank" rel="noreferrer">Manifold viewer</a>')
+    if item.get("lcm_viewer_href"):
+        links.append(f'<a href="{esc(item["lcm_viewer_href"])}" target="_blank" rel="noreferrer">LCM graph gallery</a>')
     link_markup = " · ".join(links) if links else "Artifacts pending"
+    lcm_preview_markup = ""
+    if item.get("lcm_preview_href"):
+        lcm_preview_markup = (
+            '<div style="margin-top:10px;">'
+            f'<img src="{esc(item["lcm_preview_href"])}" alt="LCM graph preview for {esc(item.get("title") or item.get("run_name") or "study")}" '
+            'loading="lazy" style="width:100%; max-height:220px; object-fit:contain; border-radius:12px; border:1px solid #d8ccb5; background:#fff;">'
+            '</div>'
+        )
     return (
         '<article class="study-card">'
         f'<div class="claim-meta">{esc(item["run_name"])}</div>'
         f'<h3>{esc(item["title"])}</h3>'
         f'<p class="trace">{link_markup}</p>'
+        f'{lcm_preview_markup}'
         "</article>"
     )
 
