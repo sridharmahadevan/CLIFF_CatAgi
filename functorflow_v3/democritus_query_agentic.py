@@ -299,6 +299,10 @@ _TOPIC_TOKEN_REWRITES = {
 _TOPIC_GENERIC_SURFACE_TOKENS = _GENERIC_RETRIEVAL_TOKENS | {
     "article",
     "articles",
+    "artefact",
+    "artefacts",
+    "artifact",
+    "artifacts",
     "author",
     "authors",
     "data",
@@ -313,6 +317,10 @@ _TOPIC_GENERIC_SURFACE_TOKENS = _GENERIC_RETRIEVAL_TOKENS | {
 _TOPIC_CONTEXT_EXCLUDED_TOKENS = _TOPIC_GENERIC_SURFACE_TOKENS | {
     "abstract",
     "analysis",
+    "artefact",
+    "artefacts",
+    "artifact",
+    "artifacts",
     "author",
     "authors",
     "background",
@@ -579,6 +587,8 @@ def _topic_is_low_quality_surface(value: str) -> bool:
     raw_tokens = text.split()
     if raw_tokens and raw_tokens[-1] in trailing_bad_tokens:
         return True
+    if any(token in {"artefact", "artefacts", "artifact", "artifacts"} for token in raw_tokens):
+        return True
     normalized_surface_tokens: list[str] = []
     for raw_token in raw_tokens:
         token = _TOPIC_TOKEN_REWRITES.get(raw_token, raw_token)
@@ -602,7 +612,44 @@ def _topic_is_low_quality_surface(value: str) -> bool:
         and any(token in _TOPIC_GENERIC_SURFACE_TOKENS for token in normalized_surface_tokens)
     ):
         return True
+    if any(len(token) >= 5 and token.endswith(("ndez", "tions")) for token in normalized_surface_tokens):
+        return True
     return not _topic_signature(text)
+
+
+def _topic_has_truncated_token(topic: str, *, support_tokens: set[str]) -> bool:
+    signature = _topic_signature(topic)
+    if not signature or not support_tokens:
+        return False
+    for token in signature:
+        if token in support_tokens or len(token) < 5:
+            continue
+        if any(
+            support.startswith(token) and len(support) >= len(token) + 2
+            for support in support_tokens
+        ):
+            return True
+    return False
+
+
+def _topic_is_subsumed_fragment(topic: str, *, other_topics: tuple[str, ...]) -> bool:
+    signature = set(_topic_signature(topic))
+    if not signature:
+        return True
+    topic_text = " ".join(str(topic or "").split()).strip().lower()
+    for other in other_topics:
+        other_text = " ".join(str(other or "").split()).strip().lower()
+        if other_text == topic_text:
+            continue
+        other_signature = set(_topic_signature(other))
+        if not other_signature:
+            continue
+        if signature < other_signature and (
+            topic_text in other_text
+            or len(other_signature) - len(signature) <= 2
+        ):
+            return True
+    return False
 
 
 def _fallback_topic_phrases_from_context(
@@ -685,21 +732,21 @@ def _prepare_document_topics(
     causal_gestalt: str,
     limit: int = 8,
 ) -> tuple[str, ...]:
-    cleaned_topics: list[str] = []
-    seen_signatures: set[tuple[str, ...]] = set()
     support_tokens = _topic_support_tokens(title, guide_summary, causal_gestalt)
+    candidate_topics: list[str] = []
+    seen_signatures: set[tuple[str, ...]] = set()
     for topic in _normalized_topics(raw_topics):
         if _topic_is_low_quality_surface(topic):
             continue
         signature = _topic_signature(topic) or (topic.lower(),)
         if support_tokens and not any(token in support_tokens for token in signature):
             continue
+        if _topic_has_truncated_token(topic, support_tokens=support_tokens):
+            continue
         if signature in seen_signatures:
             continue
-        cleaned_topics.append(topic)
+        candidate_topics.append(topic)
         seen_signatures.add(signature)
-        if len(cleaned_topics) >= max(1, int(limit)):
-            return tuple(cleaned_topics)
     for topic in _fallback_topic_phrases_from_context(
         title=title,
         guide_summary=guide_summary,
@@ -709,11 +756,62 @@ def _prepare_document_topics(
         signature = _topic_signature(topic) or (topic.lower(),)
         if signature in seen_signatures:
             continue
-        cleaned_topics.append(topic)
+        candidate_topics.append(topic)
         seen_signatures.add(signature)
+    cleaned_topics: list[str] = []
+    for topic in candidate_topics:
+        if _topic_is_subsumed_fragment(topic, other_topics=tuple(candidate_topics)):
+            continue
+        cleaned_topics.append(topic)
         if len(cleaned_topics) >= max(1, int(limit)):
             break
     return tuple(cleaned_topics)
+
+
+def _merge_fragmented_topic_records(
+    grouped: dict[tuple[str, ...], dict[str, object]],
+) -> dict[tuple[str, ...], dict[str, object]]:
+    merged = dict(grouped)
+    signatures = list(merged.keys())
+    removed: set[tuple[str, ...]] = set()
+    for signature in signatures:
+        if signature in removed or signature not in merged:
+            continue
+        record = merged[signature]
+        runs = set(record.get("document_runs") or ())
+        topic = str(record.get("topic") or "")
+        for other_signature in signatures:
+            if (
+                other_signature == signature
+                or other_signature in removed
+                or other_signature not in merged
+            ):
+                continue
+            other_record = merged[other_signature]
+            other_runs = set(other_record.get("document_runs") or ())
+            other_topic = str(other_record.get("topic") or "")
+            if not set(signature) < set(other_signature):
+                continue
+            if runs and other_runs and not runs.issubset(other_runs):
+                continue
+            if not (
+                topic.lower() in other_topic.lower()
+                or len(other_signature) - len(signature) <= 2
+            ):
+                continue
+            title_values = list(other_record.get("representative_titles") or [])
+            for item in list(record.get("representative_titles") or []):
+                if item not in title_values:
+                    title_values.append(item)
+            other_record["representative_titles"] = title_values[:3]
+            cast_runs = other_record.get("document_runs")
+            if isinstance(cast_runs, set):
+                cast_runs.update(runs)
+            removed.add(signature)
+            break
+    for signature in removed:
+        merged.pop(signature, None)
+    return merged
 
 
 def _collapse_topic_equivalence_classes(
@@ -754,6 +852,7 @@ def _collapse_topic_equivalence_classes(
             if title and title not in title_values:
                 title_values.append(title)
             record["representative_titles"] = title_values[:3]
+    grouped = _merge_fragmented_topic_records(grouped)
     collapsed = [
         {
             "topic": str(item.get("topic") or ""),

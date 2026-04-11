@@ -357,8 +357,63 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
 
         self.assertNotIn("amaro carla", topics)
         self.assertNotIn("carla hern ndez cabanyero", topics)
-        self.assertIn("ocean temperatures", topics)
         self.assertIn("pre monsoon cyclones", topics)
+        self.assertTrue(any("ocean" in topic and "temperature" in topic for topic in topics))
+
+    def test_prepare_document_topics_filters_truncated_and_artifact_phrases(self) -> None:
+        topics = democritus_query_agentic_module._prepare_document_topics(
+            (
+                "artefact ocean",
+                "carbon degradation increa",
+                "annual coral",
+                "annual coral bleaching",
+                "bottom water temperatures",
+            ),
+            title="Annual coral bleaching follows rising bottom water temperatures",
+            guide_summary="Bottom water temperatures and coral bleaching events reveal annual reef stress.",
+            causal_gestalt="Rising bottom water temperatures increase annual coral bleaching events.",
+        )
+
+        self.assertNotIn("artefact ocean", topics)
+        self.assertNotIn("carbon degradation increa", topics)
+        self.assertNotIn("annual coral", topics)
+        self.assertIn("annual coral bleaching", topics)
+        self.assertIn("bottom water temperatures", topics)
+
+    def test_collapse_topic_equivalence_classes_merges_subsumed_fragments(self) -> None:
+        collapsed = democritus_query_agentic_module._collapse_topic_equivalence_classes(
+            [
+                {
+                    "run_name": "run_0",
+                    "title": "Coral bleaching study",
+                    "topics": [
+                        "annual coral",
+                        "annual coral bleaching",
+                        "bottom water temperatures",
+                    ],
+                },
+                {
+                    "run_name": "run_1",
+                    "title": "Cyclone study",
+                    "topics": [
+                        "pre requisite conditions",
+                        "pre requisite conditions intensification",
+                        "pre monsoon cyclones",
+                    ],
+                },
+            ],
+            limit=16,
+        )
+
+        all_aliases = {
+            alias
+            for item in collapsed
+            for alias in item["aliases"]
+        }
+        self.assertNotIn("annual coral", all_aliases)
+        self.assertIn("annual coral bleaching", all_aliases)
+        self.assertNotIn("pre requisite conditions", all_aliases)
+        self.assertIn("pre requisite conditions intensification", all_aliases)
 
     def test_query_config_defaults_to_eight_workers(self) -> None:
         config = DemocritusQueryAgenticConfig(
