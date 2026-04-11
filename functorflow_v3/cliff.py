@@ -839,6 +839,41 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _launcher_archive_roots(outdir: Path) -> tuple[Path, ...]:
+    roots: list[Path] = []
+    seen: set[str] = set()
+    default_archive_root = Path.home() / "Downloads" / "CLIFF_runs_archive"
+
+    def add_root(candidate: str | Path | None) -> None:
+        if candidate is None:
+            return
+        text = str(candidate).strip()
+        if not text:
+            return
+        try:
+            resolved = Path(text).expanduser().resolve()
+        except Exception:
+            return
+        key = str(resolved)
+        if key in seen:
+            return
+        seen.add(key)
+        roots.append(resolved)
+
+    try:
+        add_root(outdir.expanduser().resolve().parent)
+    except Exception:
+        pass
+    add_root(default_archive_root)
+    for candidate in os.environ.get("CLIFF_RUN_ARCHIVE_ROOTS", "").split(os.pathsep):
+        add_root(candidate)
+    return tuple(roots)
+
+
+def _launcher_archive_cache_dir() -> Path:
+    return Path(__file__).resolve().parents[2] / ".cliff_archive_cache"
+
+
 def main() -> None:
     args = _parse_args()
     launcher_artifact_path: Path | None = None
@@ -887,6 +922,8 @@ def main() -> None:
                     artifact_path=launcher_artifact_path,
                     session_mode=True,
                     enable_execution_mode=True,
+                    archive_roots=_launcher_archive_roots(Path(args.outdir)),
+                    archive_cache_dir=_launcher_archive_cache_dir(),
                     run_control_handler=lambda action, run_id: _handle_cliff_run_control(
                         action,
                         run_id,

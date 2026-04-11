@@ -215,6 +215,164 @@ class DashboardQueryLauncherTests(unittest.TestCase):
             },
         )
 
+    def test_state_payload_discovers_archived_runs_from_worker_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_root = Path(tmpdir) / "archive"
+            archived_run = archive_root / "cliff_session1-run-0007-20260411-090000-mediterranean_diet"
+            artifact_path = archived_run / "democritus" / "democritus_runs" / "corpus_synthesis" / "democritus_corpus_synthesis.html"
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_path.write_text("<html><body>Mediterranean archive</body></html>", encoding="utf-8")
+            (archived_run / "cliff_worker_result.json").write_text(
+                json.dumps(
+                    {
+                        "status": "complete",
+                        "system_name": "CLIFF",
+                        "query": "Analyze 10 recent studies of the Mediterranean diet and synthesize their joint support",
+                        "route_decision": {"route_name": "democritus"},
+                        "route_outdir": str((archived_run / "democritus").resolve()),
+                        "artifact_path": str(artifact_path.resolve()),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            launcher = DashboardQueryLauncher(
+                DashboardQueryLauncherConfig(
+                    title="CLIFF",
+                    subtitle="Test session",
+                    query_label="CLIFF query",
+                    query_placeholder="Ask a question",
+                    submit_label="Ask CLIFF",
+                    waiting_message="Runs stay in the background.",
+                    session_mode=True,
+                    enable_execution_mode=True,
+                    archive_roots=(archive_root,),
+                )
+            )
+            self.addCleanup(launcher.close)
+
+            payload = launcher._state_payload()
+            rendered = launcher._render_run_artifact_page(archived_run.name)
+
+        self.assertEqual(len(payload["archived_runs"]), 1)
+        self.assertEqual(payload["archived_runs"][0]["run_id"], archived_run.name)
+        self.assertEqual(payload["archived_runs"][0]["route_name"], "democritus")
+        self.assertTrue(payload["archived_runs"][0]["archived"])
+        self.assertIn("Mediterranean archive", rendered)
+
+    def test_request_archived_run_rerun_queues_followup_from_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_root = Path(tmpdir) / "archive"
+            archived_run = archive_root / "cliff_session1-run-0008-20260411-093000-kan_extension"
+            archived_run.mkdir(parents=True, exist_ok=True)
+            (archived_run / "cliff_worker_result.json").write_text(
+                json.dumps(
+                    {
+                        "status": "complete",
+                        "system_name": "CLIFF",
+                        "query": "Explain the Kan Extension Transformer",
+                        "route_decision": {"route_name": "course_demo"},
+                        "route_outdir": str((archived_run / "course_demo").resolve()),
+                        "artifact_path": str((archived_run / "course_demo" / "course_demo_dashboard.html").resolve()),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            launcher = DashboardQueryLauncher(
+                DashboardQueryLauncherConfig(
+                    title="CLIFF",
+                    subtitle="Test session",
+                    query_label="CLIFF query",
+                    query_placeholder="Ask a question",
+                    submit_label="Ask CLIFF",
+                    waiting_message="Runs stay in the background.",
+                    session_mode=True,
+                    enable_execution_mode=True,
+                    archive_roots=(archive_root,),
+                )
+            )
+            self.addCleanup(launcher.close)
+
+            launcher._state_payload()
+            rerun_id = launcher.request_archived_run_rerun(archived_run.name)
+            queued = launcher.wait_for_next_submission(timeout=0.01)
+
+        self.assertIsNotNone(rerun_id)
+        self.assertEqual(queued, (rerun_id, "Explain the Kan Extension Transformer", "quick"))
+        self.assertEqual(
+            launcher.submission_overrides_for_run(str(rerun_id)),
+            {"route": "course_demo"},
+        )
+
+    def test_cached_archive_index_reloads_archived_runs_without_rescanning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            archive_root = root / "archive"
+            cache_dir = root / "cache"
+            archived_run = archive_root / "cliff_session1-run-0009-20260411-101500-red_wine"
+            archived_run.mkdir(parents=True, exist_ok=True)
+            worker_result = archived_run / "cliff_worker_result.json"
+            worker_result.write_text(
+                json.dumps(
+                    {
+                        "status": "complete",
+                        "system_name": "CLIFF",
+                        "query": "Analyze 10 recent studies on red wine and synthesize what they jointly support",
+                        "route_decision": {"route_name": "democritus"},
+                        "route_outdir": str((archived_run / "democritus").resolve()),
+                        "artifact_path": str((archived_run / "democritus" / "result.html").resolve()),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            launcher = DashboardQueryLauncher(
+                DashboardQueryLauncherConfig(
+                    title="CLIFF",
+                    subtitle="Test session",
+                    query_label="CLIFF query",
+                    query_placeholder="Ask a question",
+                    submit_label="Ask CLIFF",
+                    waiting_message="Runs stay in the background.",
+                    session_mode=True,
+                    enable_execution_mode=True,
+                    archive_roots=(archive_root,),
+                    archive_cache_dir=cache_dir,
+                )
+            )
+            self.addCleanup(launcher.close)
+            payload = launcher._state_payload()
+
+            worker_result.unlink()
+
+            launcher_cached = DashboardQueryLauncher(
+                DashboardQueryLauncherConfig(
+                    title="CLIFF",
+                    subtitle="Test session",
+                    query_label="CLIFF query",
+                    query_placeholder="Ask a question",
+                    submit_label="Ask CLIFF",
+                    waiting_message="Runs stay in the background.",
+                    session_mode=True,
+                    enable_execution_mode=True,
+                    archive_roots=(archive_root,),
+                    archive_cache_dir=cache_dir,
+                )
+            )
+            self.addCleanup(launcher_cached.close)
+            cached_payload = launcher_cached._state_payload()
+
+        self.assertEqual(len(payload["archived_runs"]), 1)
+        self.assertEqual(len(cached_payload["archived_runs"]), 1)
+        self.assertEqual(
+            cached_payload["archived_runs"][0]["query"],
+            "Analyze 10 recent studies on red wine and synthesize what they jointly support",
+        )
+
     def test_render_run_artifact_page_for_democritus_checkpoint_includes_curation_controls(self) -> None:
         launcher = DashboardQueryLauncher(
             DashboardQueryLauncherConfig(

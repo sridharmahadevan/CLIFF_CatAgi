@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import mimetypes
@@ -22,6 +23,10 @@ _ARTIFACT_REFRESH_SECONDS = 15
 _ARTIFACT_REFRESH_MS = _ARTIFACT_REFRESH_SECONDS * 1000
 _SESSION_REFRESH_SECONDS = 5
 _SESSION_REFRESH_MS = _SESSION_REFRESH_SECONDS * 1000
+_ARCHIVE_REFRESH_SECONDS = 20
+_ARCHIVE_INDEX_FRESH_SECONDS = 12 * 60 * 60
+_ARCHIVE_RECORD_FILENAME = "cliff_run_record.json"
+_WORKER_RESULT_FILENAME = "cliff_worker_result.json"
 _DEMOCRITUS_CHECKPOINT_HTML = "democritus_topic_checkpoint.html"
 _DEMOCRITUS_CHECKPOINT_MANIFEST = "democritus_topic_checkpoint.json"
 _DEMOCRITUS_CURATION_STATE = "user_curation.json"
@@ -50,6 +55,9 @@ class DashboardQueryLauncherConfig:
     run_control_handler: Callable[[str, str], None] | None = None
     enable_execution_mode: bool = False
     default_execution_mode: str = "quick"
+    archive_roots: tuple[Path, ...] = ()
+    archive_max_runs: int = 120
+    archive_cache_dir: Path | None = None
 
 
 class DashboardQueryLauncher:
@@ -73,6 +81,10 @@ class DashboardQueryLauncher:
         self._submission_queue: deque[tuple[str, str, str]] = deque()
         self._session_runs: list[dict[str, object]] = []
         self._session_runs_by_id: dict[str, dict[str, object]] = {}
+        self._archived_runs: list[dict[str, object]] = []
+        self._archived_runs_by_id: dict[str, dict[str, object]] = {}
+        self._archive_last_scan_at = 0.0
+        self._archive_cache_refresh_pending = False
         self._server: ThreadingHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
         self.url = ""
@@ -256,6 +268,271 @@ class DashboardQueryLauncher:
             if outdir is not None:
                 run_state["outdir"] = str(outdir)
             run_state["updated_at"] = time.time()
+            self._persist_run_record(run_state)
+
+    def _persist_run_record(self, run_state: dict[str, object]) -> None:
+        outdir_value = str(run_state.get("outdir") or "").strip()
+        if not outdir_value:
+            return
+        try:
+            outdir = Path(outdir_value).resolve()
+        except Exception:
+            return
+        payload = {
+            "run_id": str(run_state.get("run_id") or outdir.name),
+            "query": str(run_state.get("query") or "").strip(),
+            "status": str(run_state.get("status") or "").strip(),
+            "route_name": str(run_state.get("route_name") or "").strip(),
+            "artifact_path": str(run_state.get("artifact_path") or "").strip() or None,
+            "outdir": str(outdir),
+            "execution_mode": self._normalize_execution_mode(run_state.get("execution_mode")),
+            "parent_run_id": str(run_state.get("parent_run_id") or "").strip() or None,
+            "note": str(run_state.get("note") or "").strip(),
+            "created_at": run_state.get("created_at"),
+            "updated_at": run_state.get("updated_at"),
+            "submission_overrides": dict(run_state.get("submission_overrides") or {}),
+            "source": "dashboard_session",
+        }
+        self._write_json_file(outdir / _ARCHIVE_RECORD_FILENAME, payload)
+
+    def _archive_roots(self) -> tuple[Path, ...]:
+        roots: list[Path] = []
+        seen: set[str] = set()
+        for root in self.config.archive_roots:
+            try:
+                resolved = root.expanduser().resolve()
+            except Exception:
+                continue
+            key = str(resolved)
+            if key in seen or not resolved.exists():
+                continue
+            seen.add(key)
+            roots.append(resolved)
+        return tuple(roots)
+
+    def _archive_cache_file(self, root: Path) -> Path | None:
+        cache_dir = self.config.archive_cache_dir
+        if cache_dir is None:
+            return None
+        try:
+            resolved_cache_dir = cache_dir.expanduser().resolve()
+        except Exception:
+            return None
+        digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:20]
+        return resolved_cache_dir / f"{digest}.json"
+
+    def _load_cached_archive_entries(self, roots: tuple[Path, ...]) -> tuple[list[dict[str, object]], bool]:
+        discovered: dict[str, dict[str, object]] = {}
+        all_fresh = True
+        limit = max(1, int(self.config.archive_max_runs))
+        for root in roots:
+            cache_file = self._archive_cache_file(root)
+            if cache_file is None or not cache_file.exists():
+                all_fresh = False
+                continue
+            payload = self._read_json_dict(cache_file)
+            if not payload:
+                all_fresh = False
+                continue
+            generated_at = float(payload.get("generated_at") or 0.0)
+            if (time.time() - generated_at) > _ARCHIVE_INDEX_FRESH_SECONDS:
+                all_fresh = False
+            for item in list(payload.get("runs") or []):
+                entry = dict(item) if isinstance(item, dict) else {}
+                if not entry:
+                    continue
+                outdir_key = str(entry.get("outdir") or "")
+                if not outdir_key or outdir_key in discovered:
+                    continue
+                if str(entry.get("run_id") or "") in self._session_runs_by_id:
+                    continue
+                discovered[outdir_key] = entry
+                if len(discovered) >= limit:
+                    break
+            if len(discovered) >= limit:
+                break
+        cached = sorted(
+            discovered.values(),
+            key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0.0),
+            reverse=True,
+        )
+        return cached, all_fresh and bool(cached)
+
+    def _write_cached_archive_entries(self, root: Path, runs: list[dict[str, object]]) -> None:
+        cache_file = self._archive_cache_file(root)
+        if cache_file is None:
+            return
+        payload = {
+            "root": str(root),
+            "generated_at": time.time(),
+            "runs": runs,
+        }
+        self._write_json_file(cache_file, payload)
+
+    def _set_archived_runs(self, archived: list[dict[str, object]]) -> None:
+        self._archived_runs = archived
+        self._archived_runs_by_id = {str(item.get("run_id") or ""): item for item in archived if item.get("run_id")}
+
+    def _load_archive_record(self, path: Path) -> dict[str, object]:
+        payload = self._read_json_dict(path)
+        if not payload:
+            return {}
+        run_id = " ".join(str(payload.get("run_id") or path.parent.name).split()).strip() or path.parent.name
+        outdir_value = " ".join(str(payload.get("outdir") or path.parent).split()).strip()
+        artifact_value = " ".join(str(payload.get("artifact_path") or "").split()).strip()
+        route_name = " ".join(str(payload.get("route_name") or "").split()).strip()
+        execution_mode = self._normalize_execution_mode(payload.get("execution_mode"))
+        status = " ".join(str(payload.get("status") or "complete").split()).strip() or "complete"
+        query = " ".join(str(payload.get("query") or "").split()).strip()
+        if not query:
+            return {}
+        return {
+            "run_id": run_id,
+            "query": query,
+            "status": status,
+            "mind_layer": "conscious",
+            "route_name": route_name,
+            "note": "Archived run discovered from saved CLIFF metadata.",
+            "artifact_path": artifact_value or None,
+            "outdir": outdir_value or str(path.parent),
+            "execution_mode": execution_mode,
+            "parent_run_id": str(payload.get("parent_run_id") or "").strip(),
+            "created_at": payload.get("created_at") or path.stat().st_mtime,
+            "updated_at": payload.get("updated_at") or path.stat().st_mtime,
+            "submission_overrides": dict(payload.get("submission_overrides") or {}),
+            "archived": True,
+            "archive_source_path": str(path.resolve()),
+        }
+
+    def _load_worker_result_archive_record(self, path: Path) -> dict[str, object]:
+        payload = self._read_json_dict(path)
+        if not payload:
+            return {}
+        query = " ".join(str(payload.get("query") or "").split()).strip()
+        if not query:
+            return {}
+        route_name = " ".join(str(dict(payload.get("route_decision") or {}).get("route_name") or "").split()).strip()
+        artifact_value = " ".join(
+            str(payload.get("artifact_path") or payload.get("error_artifact_path") or "").split()
+        ).strip()
+        status = " ".join(str(payload.get("status") or "complete").split()).strip() or "complete"
+        outdir_value = " ".join(str(payload.get("route_outdir") or path.parent).split()).strip()
+        note = (
+            "Archived run discovered from CLIFF worker output."
+            if status == "complete"
+            else "Archived run discovered from CLIFF worker output (failed run)."
+        )
+        return {
+            "run_id": path.parent.name,
+            "query": query,
+            "status": status,
+            "mind_layer": "conscious",
+            "route_name": route_name,
+            "note": note,
+            "artifact_path": artifact_value or None,
+            "outdir": outdir_value or str(path.parent),
+            "execution_mode": "quick",
+            "parent_run_id": "",
+            "created_at": path.stat().st_mtime,
+            "updated_at": path.stat().st_mtime,
+            "submission_overrides": {"route": route_name} if route_name else {},
+            "archived": True,
+            "archive_source_path": str(path.resolve()),
+        }
+
+    def _refresh_archived_runs(self, *, force: bool = False) -> None:
+        if not self.config.session_mode:
+            return
+        now = time.time()
+        if (
+            not force
+            and (now - self._archive_last_scan_at) < _ARCHIVE_REFRESH_SECONDS
+            and not self._archive_cache_refresh_pending
+        ):
+            return
+        roots = self._archive_roots()
+        if not force and not self._archived_runs:
+            cached, all_fresh = self._load_cached_archive_entries(roots)
+            if cached:
+                self._set_archived_runs(cached)
+                self._archive_last_scan_at = now
+                self._archive_cache_refresh_pending = not all_fresh
+                if all_fresh:
+                    return
+                return
+        discovered: dict[str, dict[str, object]] = {}
+        limit = max(1, int(self.config.archive_max_runs))
+        for root in roots:
+            root_entries: list[dict[str, object]] = []
+            for pattern, loader in (
+                (_ARCHIVE_RECORD_FILENAME, self._load_archive_record),
+                (_WORKER_RESULT_FILENAME, self._load_worker_result_archive_record),
+            ):
+                try:
+                    matches = sorted(root.rglob(pattern), key=lambda item: item.stat().st_mtime, reverse=True)
+                except Exception:
+                    continue
+                for candidate in matches:
+                    entry = loader(candidate)
+                    if not entry:
+                        continue
+                    outdir_key = str(entry.get("outdir") or candidate.parent)
+                    if outdir_key in discovered:
+                        continue
+                    if str(entry.get("run_id") or "") in self._session_runs_by_id:
+                        continue
+                    discovered[outdir_key] = entry
+                    root_entries.append(entry)
+                    if len(discovered) >= limit:
+                        break
+                if len(discovered) >= limit:
+                    break
+            self._write_cached_archive_entries(
+                root,
+                sorted(
+                    root_entries,
+                    key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0.0),
+                    reverse=True,
+                ),
+            )
+            if len(discovered) >= limit:
+                break
+        archived = sorted(
+            discovered.values(),
+            key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0.0),
+            reverse=True,
+        )
+        self._set_archived_runs(archived)
+        self._archive_last_scan_at = now
+        self._archive_cache_refresh_pending = False
+
+    def _lookup_run_state(self, run_id: str) -> dict[str, object]:
+        with self._lock:
+            run_state = self._session_runs_by_id.get(run_id)
+            if run_state is not None:
+                return dict(run_state)
+            self._refresh_archived_runs()
+            archived = self._archived_runs_by_id.get(run_id)
+            return dict(archived or {})
+
+    def request_archived_run_rerun(self, run_id: str) -> str | None:
+        with self._lock:
+            self._refresh_archived_runs()
+            run_state = dict(self._archived_runs_by_id.get(run_id) or {})
+        query = " ".join(str(run_state.get("query") or "").split()).strip()
+        if not query:
+            return None
+        submission_overrides = dict(run_state.get("submission_overrides") or {})
+        route_name = " ".join(str(run_state.get("route_name") or "").split()).strip()
+        if route_name and "route" not in submission_overrides:
+            submission_overrides["route"] = route_name
+        return self.submit_query(
+            query,
+            execution_mode=self._normalize_execution_mode(run_state.get("execution_mode")),
+            parent_run_id=run_id,
+            submission_overrides=submission_overrides or None,
+            queued_note=f"Queued by re-running archived run {run_id}.",
+        )
 
     def request_session_run_deepen(
         self,
@@ -1947,6 +2224,13 @@ class DashboardQueryLauncher:
                     ok = launcher.request_session_run_stop(run_id)
                     self._send_json({"ok": ok, "run_id": run_id})
                     return
+                if parsed.path == "/rerun-archived":
+                    content_length = int(self.headers.get("Content-Length") or "0")
+                    payload = self.rfile.read(content_length).decode("utf-8", errors="replace")
+                    run_id = " ".join(parse_qs(payload).get("run_id", [""])[0].split()).strip()
+                    new_run_id = launcher.request_archived_run_rerun(run_id)
+                    self._send_json({"ok": bool(new_run_id), "run_id": run_id, "new_run_id": new_run_id})
+                    return
                 if parsed.path != "/submit":
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
@@ -1998,6 +2282,7 @@ class DashboardQueryLauncher:
 
     def _state_payload(self) -> dict[str, object]:
         with self._lock:
+            self._refresh_archived_runs()
             payload = {
                 "session_mode": self.config.session_mode,
                 "execution_mode_enabled": self.config.enable_execution_mode,
@@ -2007,6 +2292,7 @@ class DashboardQueryLauncher:
             }
             if self.config.session_mode:
                 payload["runs"] = [self._enriched_run_state(dict(item)) for item in self._session_runs]
+                payload["archived_runs"] = [self._enriched_run_state(dict(item)) for item in self._archived_runs]
             return payload
 
     def _democritus_telemetry(self, run_state: dict[str, object]) -> dict[str, object]:
@@ -2163,8 +2449,7 @@ class DashboardQueryLauncher:
 """
 
     def _render_run_artifact_page(self, run_id: str) -> str:
-        with self._lock:
-            run_state = dict(self._session_runs_by_id.get(run_id) or {})
+        run_state = self._lookup_run_state(run_id)
         run_status = str(run_state.get("status") or "").strip()
         route_name = str(run_state.get("route_name") or "").strip()
         artifact_path_value = str(run_state.get("artifact_path") or "").strip()
@@ -3164,8 +3449,7 @@ class DashboardQueryLauncher:
 """
 
     def _resolve_run_file_path(self, run_id: str, requested_path: str) -> Path | None:
-        with self._lock:
-            run_state = dict(self._session_runs_by_id.get(run_id) or {})
+        run_state = self._lookup_run_state(run_id)
         if not run_state:
             return None
         normalized_request = str(requested_path).strip()
@@ -3322,7 +3606,9 @@ class DashboardQueryLauncher:
     def _render_launcher_page(self, *, error_message: str = "") -> str:
         with self._lock:
             query_received = self._query_received
+            self._refresh_archived_runs()
             session_runs = [self._enriched_run_state(dict(item)) for item in self._session_runs]
+            archived_runs = [self._enriched_run_state(dict(item)) for item in self._archived_runs]
         title = html.escape(self.config.title)
         subtitle = html.escape(self.config.subtitle)
         eyebrow = html.escape(self.config.eyebrow)
@@ -3416,6 +3702,13 @@ class DashboardQueryLauncher:
               </div>
               <div id="session-runs">{self._render_session_runs_markup(session_runs)}</div>
             </section>
+            <section class="session-runs">
+              <div class="session-header">
+                <h2>Archived Runs</h2>
+                <p>Saved CLIFF runs discovered from archive roots can be reopened or rerun here.</p>
+              </div>
+              <div id="archived-runs">{self._render_session_runs_markup(archived_runs, empty_message="No archived CLIFF runs were discovered under the configured archive roots yet.")}</div>
+            </section>
           </section>
           <script>
             function escapeHtml(value) {{
@@ -3427,11 +3720,12 @@ class DashboardQueryLauncher:
                 .replace(/'/g, "&#39;");
             }}
 
-            function renderRuns(runs) {{
+            function renderRuns(runs, emptyMessage) {{
               if (!Array.isArray(runs) || runs.length === 0) {{
-                return '<div class="empty-state">No queries have been submitted in this session yet.</div>';
+                return '<div class="empty-state">' + escapeHtml(emptyMessage || 'No queries have been submitted in this session yet.') + '</div>';
               }}
               return runs.map(function (run) {{
+                var archived = !!run.archived;
                 var cardClass = 'run-card';
                 if ((run.status || '') === 'complete') {{
                   cardClass += ' run-card-complete';
@@ -3440,16 +3734,20 @@ class DashboardQueryLauncher:
                 }}
                 var executionMode = String(run.execution_mode || 'quick');
                 var route = run.route_name ? '<span class="run-chip">' + escapeHtml(run.route_name) + '</span>' : '';
+                var archiveChip = archived ? '<span class="run-chip archived-chip">archived</span>' : '';
                 var researchProfile = run.research_profile_label
                   ? '<span class="run-chip route-profile-' + escapeHtml(run.research_profile_class || 'route-warming-up') + '">' + escapeHtml(run.research_profile_label) + '</span>'
                   : '';
                 var mode = executionMode ? '<span class="run-chip mode-' + escapeHtml(executionMode) + '">' + escapeHtml(executionMode) + '</span>' : '';
                 var eta = run.eta_label ? '<span class="run-chip eta-chip">' + escapeHtml(run.eta_label) + '</span>' : '';
-                var stopAction = ((run.status || '') === 'queued' || (run.status || '') === 'routing' || (run.status || '') === 'running')
+                var stopAction = (!archived && ((run.status || '') === 'queued' || (run.status || '') === 'routing' || (run.status || '') === 'running'))
                   ? '<div class="run-actions"><button type="button" class="run-stop-button" onclick="requestStopRun(\\'' + escapeHtml(run.run_id || '') + '\\')">Stop query</button></div>'
                   : '';
-                var deepenAction = ((run.status || '') === 'complete' && (executionMode === 'quick' || executionMode === 'interactive') && ((run.route_name || '') === 'democritus' || (run.route_name || '') === 'company_similarity'))
+                var deepenAction = (!archived && (run.status || '') === 'complete' && (executionMode === 'quick' || executionMode === 'interactive') && ((run.route_name || '') === 'democritus' || (run.route_name || '') === 'company_similarity'))
                   ? '<div class="run-actions"><button type="button" class="run-deepen-button" onclick="requestDeepRun(\\'' + escapeHtml(run.run_id || '') + '\\')">Go deeper</button></div>'
+                  : '';
+                var rerunAction = archived
+                  ? '<div class="run-actions"><button type="button" class="run-deepen-button" onclick="requestArchivedRerun(\\'' + escapeHtml(run.run_id || '') + '\\')">Re-run query</button></div>'
                   : '';
                 var inspectLabel = ((run.status || '') === 'queued' || (run.status || '') === 'routing' || (run.status || '') === 'running' || (run.status || '') === 'stopping')
                   ? 'Inspect run'
@@ -3473,12 +3771,13 @@ class DashboardQueryLauncher:
                   + '<article class="' + cardClass + '">'
                   + '<div class="run-topline">'
                   + '<div class="run-id">' + escapeHtml(run.run_id) + '</div>'
-                  + '<div class="run-badges"><span class="run-chip status-' + escapeHtml(run.status || 'queued') + '">' + escapeHtml(run.status || 'queued') + '</span>' + route + researchProfile + mode + eta + '</div>'
+                  + '<div class="run-badges"><span class="run-chip status-' + escapeHtml(run.status || 'queued') + '">' + escapeHtml(run.status || 'queued') + '</span>' + archiveChip + route + researchProfile + mode + eta + '</div>'
                   + '</div>'
                   + '<div class="run-query">' + escapeHtml(run.query || '') + '</div>'
                   + '<div class="run-note">' + escapeHtml(run.note || '') + '</div>'
                   + stopAction
                   + deepenAction
+                  + rerunAction
                   + openAction
                   + researchNote
                   + unconscious
@@ -3503,7 +3802,7 @@ class DashboardQueryLauncher:
                   if (!container) {{
                     return;
                   }}
-                  container.innerHTML = renderRuns(payload.runs || []);
+                  container.innerHTML = renderRuns(payload.runs || [], 'No queries have been submitted in this session yet.');
                 }})
                 .catch(function () {{}});
             }}
@@ -3523,7 +3822,30 @@ class DashboardQueryLauncher:
                   if (!container) {{
                     return;
                   }}
-                  container.innerHTML = renderRuns(payload.runs || []);
+                  container.innerHTML = renderRuns(payload.runs || [], 'No queries have been submitted in this session yet.');
+                }})
+                .catch(function () {{}});
+            }}
+
+            function requestArchivedRerun(runId) {{
+              fetch('/rerun-archived', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' }},
+                body: 'run_id=' + encodeURIComponent(runId || '')
+              }})
+                .then(function () {{
+                  return fetch('/state?ts=' + Date.now(), {{ cache: 'no-store' }});
+                }})
+                .then(function (response) {{ return response.json(); }})
+                .then(function (payload) {{
+                  var container = document.getElementById('session-runs');
+                  if (container) {{
+                    container.innerHTML = renderRuns(payload.runs || [], 'No queries have been submitted in this session yet.');
+                  }}
+                  var archived = document.getElementById('archived-runs');
+                  if (archived) {{
+                    archived.innerHTML = renderRuns(payload.archived_runs || [], 'No archived CLIFF runs were discovered under the configured archive roots yet.');
+                  }}
                 }})
                 .catch(function () {{}});
             }}
@@ -3533,10 +3855,13 @@ class DashboardQueryLauncher:
                 .then(function (response) {{ return response.json(); }})
                 .then(function (payload) {{
                   var container = document.getElementById('session-runs');
-                  if (!container) {{
-                    return;
+                  if (container) {{
+                    container.innerHTML = renderRuns(payload.runs || [], 'No queries have been submitted in this session yet.');
                   }}
-                  container.innerHTML = renderRuns(payload.runs || []);
+                  var archived = document.getElementById('archived-runs');
+                  if (archived) {{
+                    archived.innerHTML = renderRuns(payload.archived_runs || [], 'No archived CLIFF runs were discovered under the configured archive roots yet.');
+                  }}
                 }})
                 .catch(function () {{}});
             }}, {_SESSION_REFRESH_MS});
@@ -3861,6 +4186,10 @@ class DashboardQueryLauncher:
         background: #edf3f1;
         color: var(--accent-strong);
       }}
+      .archived-chip {{
+        background: #eee5f5;
+        color: #62427c;
+      }}
       .status-queued,
       .status-routing {{
         background: #f5ecd6;
@@ -4075,15 +4404,16 @@ class DashboardQueryLauncher:
             "</section>"
         )
 
-    def _render_session_runs_markup(self, runs: list[dict[str, object]]) -> str:
+    def _render_session_runs_markup(self, runs: list[dict[str, object]], *, empty_message: str = "No queries have been submitted in this session yet.") -> str:
         if not runs:
-            return '<div class="empty-state">No queries have been submitted in this session yet.</div>'
+            return f'<div class="empty-state">{html.escape(empty_message)}</div>'
 
         def esc(value: object) -> str:
             return html.escape(str(value))
 
         cards: list[str] = []
         for run in (self._enriched_run_state(dict(item)) for item in runs):
+            archived = bool(run.get("archived"))
             card_class = "run-card"
             if run.get("status") == "complete":
                 card_class += " run-card-complete"
@@ -4092,6 +4422,11 @@ class DashboardQueryLauncher:
             route_markup = (
                 f'<span class="run-chip">{esc(run.get("route_name"))}</span>'
                 if run.get("route_name")
+                else ""
+            )
+            archived_markup = (
+                '<span class="run-chip archived-chip">archived</span>'
+                if archived
                 else ""
             )
             research_profile_markup = (
@@ -4107,14 +4442,19 @@ class DashboardQueryLauncher:
             )
             stop_action_markup = (
                 f'<div class="run-actions"><button type="button" class="run-stop-button" onclick="requestStopRun(\'{esc(run.get("run_id") or "")}\')">Stop query</button></div>'
-                if run.get("status") in {"queued", "routing", "running"}
+                if (not archived and run.get("status") in {"queued", "routing", "running"})
                 else ""
             )
             deepen_action_markup = (
                 f'<div class="run-actions"><button type="button" class="run-deepen-button" onclick="requestDeepRun(\'{esc(run.get("run_id") or "")}\')">Go deeper</button></div>'
-                if run.get("status") == "complete"
+                if (not archived and run.get("status") == "complete")
                 and run.get("execution_mode") in {"quick", "interactive"}
                 and run.get("route_name") in {"democritus", "company_similarity"}
+                else ""
+            )
+            rerun_action_markup = (
+                f'<div class="run-actions"><button type="button" class="run-deepen-button" onclick="requestArchivedRerun(\'{esc(run.get("run_id") or "")}\')">Re-run query</button></div>'
+                if archived
                 else ""
             )
             open_action_markup = (
@@ -4151,6 +4491,7 @@ class DashboardQueryLauncher:
                 f'<div class="run-id">{esc(run.get("run_id") or "")}</div>'
                 '<div class="run-badges">'
                 f'<span class="run-chip status-{esc(run.get("status") or "queued")}">{esc(run.get("status") or "queued")}</span>'
+                f"{archived_markup}"
                 f"{route_markup}"
                 f"{research_profile_markup}"
                 f"{mode_markup}"
@@ -4161,6 +4502,7 @@ class DashboardQueryLauncher:
                 f'<div class="run-note">{esc(run.get("note") or "")}</div>'
                 f"{stop_action_markup}"
                 f"{deepen_action_markup}"
+                f"{rerun_action_markup}"
                 f"{open_action_markup}"
                 f"{research_note_markup}"
                 f"{unconscious_markup}"
