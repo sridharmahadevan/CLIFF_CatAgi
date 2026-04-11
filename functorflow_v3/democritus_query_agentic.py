@@ -2163,7 +2163,7 @@ class DemocritusQueryAgenticConfig:
     dedupe_focus: bool = False
     require_anchor_in_focus: bool = False
     focus_blacklist_regex: str = ""
-    render_topk_pngs: bool = False
+    render_topk_pngs: bool = True
     assets_dir: str = "assets"
     png_dpi: int = 200
     write_deep_dive: bool = False
@@ -4493,7 +4493,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dedupe-focus", action="store_true")
     parser.add_argument("--require-anchor-in-focus", action="store_true")
     parser.add_argument("--focus-blacklist-regex", default="")
-    parser.add_argument("--render-topk-pngs", action="store_true")
+    parser.add_argument(
+        "--render-topk-pngs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--assets-dir", default="assets")
     parser.add_argument("--png-dpi", type=int, default=200)
     parser.add_argument("--write-deep-dive", action="store_true")

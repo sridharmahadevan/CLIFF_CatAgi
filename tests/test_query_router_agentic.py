@@ -410,6 +410,7 @@ class QueryRouterAgenticTests(unittest.TestCase):
 
         self.assertEqual(router.config.democritus_target_documents, 5)
         self.assertEqual(router.config.democritus_max_docs, 15)
+        self.assertTrue(router.config.democritus_render_topk_pngs)
 
     def test_build_router_from_args_honors_explicit_democritus_overrides(self) -> None:
         args = SimpleNamespace(

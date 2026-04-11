@@ -160,7 +160,7 @@ class FF2QueryRouterConfig:
     democritus_dedupe_focus: bool = False
     democritus_require_anchor_in_focus: bool = False
     democritus_focus_blacklist_regex: str = ""
-    democritus_render_topk_pngs: bool = False
+    democritus_render_topk_pngs: bool = True
     democritus_assets_dir: str = "assets"
     democritus_png_dpi: int = 200
     democritus_write_deep_dive: bool = False
@@ -896,7 +896,7 @@ def _build_router_from_args_with_outdir(
             democritus_dedupe_focus=bool(getattr(args, "democritus_dedupe_focus", False)),
             democritus_require_anchor_in_focus=bool(getattr(args, "democritus_require_anchor_in_focus", False)),
             democritus_focus_blacklist_regex=getattr(args, "democritus_focus_blacklist_regex", ""),
-            democritus_render_topk_pngs=bool(getattr(args, "democritus_render_topk_pngs", False)),
+            democritus_render_topk_pngs=bool(getattr(args, "democritus_render_topk_pngs", True)),
             democritus_assets_dir=getattr(args, "democritus_assets_dir", "assets"),
             democritus_png_dpi=getattr(args, "democritus_png_dpi", 200),
             democritus_write_deep_dive=bool(getattr(args, "democritus_write_deep_dive", False)),

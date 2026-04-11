@@ -68,7 +68,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--democritus-dedupe-focus", action="store_true")
     parser.add_argument("--democritus-require-anchor-in-focus", action="store_true")
     parser.add_argument("--democritus-focus-blacklist-regex", default="")
-    parser.add_argument("--democritus-render-topk-pngs", action="store_true")
+    parser.add_argument(
+        "--democritus-render-topk-pngs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--democritus-assets-dir", default="assets")
     parser.add_argument("--democritus-png-dpi", type=int, default=200)
     parser.add_argument("--democritus-write-deep-dive", action="store_true")

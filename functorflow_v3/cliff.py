@@ -288,7 +288,7 @@ def _build_worker_command(
         command.append("--democritus-require-anchor-in-focus")
     if getattr(args, "democritus_focus_blacklist_regex", ""):
         command.extend(["--democritus-focus-blacklist-regex", str(args.democritus_focus_blacklist_regex)])
-    if getattr(args, "democritus_render_topk_pngs", False):
+    if getattr(args, "democritus_render_topk_pngs", True):
         command.append("--democritus-render-topk-pngs")
     if getattr(args, "democritus_write_deep_dive", False):
         command.append("--democritus-write-deep-dive")
@@ -794,7 +794,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--democritus-dedupe-focus", action="store_true")
     parser.add_argument("--democritus-require-anchor-in-focus", action="store_true")
     parser.add_argument("--democritus-focus-blacklist-regex", default="")
-    parser.add_argument("--democritus-render-topk-pngs", action="store_true")
+    parser.add_argument(
+        "--democritus-render-topk-pngs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--democritus-assets-dir", default="assets")
     parser.add_argument("--democritus-png-dpi", type=int, default=200)
     parser.add_argument("--democritus-write-deep-dive", action="store_true")

@@ -369,7 +369,7 @@ class DemocritusBatchConfig:
     dedupe_focus: bool = False
     require_anchor_in_focus: bool = False
     focus_blacklist_regex: str = ""
-    render_topk_pngs: bool = False
+    render_topk_pngs: bool = True
     assets_dir: str = "assets"
     png_dpi: int = 200
     write_deep_dive: bool = False
@@ -1866,13 +1866,17 @@ class DemocritusBatchAgenticRunner:
             else '<div class="viewer-note">Cluster hover labels will appear automatically when manifold metadata is available.</div>'
         )
         image_markup = (
-            '<div class="manifold-stage">'
-            f'<img src="{esc(manifold_path.name)}" alt="{esc(title)} relational manifold" loading="eager">'
-            f'{hover_markup}'
-            '<div class="hover-card" id="hover-card" hidden>'
+            '<div class="viewer-grid">'
+            '<aside class="hover-rail">'
+            '<div class="hover-card" id="hover-card">'
             '<div class="hover-eyebrow">Hovered Cluster</div>'
             '<div class="hover-title" id="hover-title">Move over the manifold</div>'
             '<div class="hover-meta" id="hover-meta">Recovered local labels will appear here.</div>'
+            "</div>"
+            "</aside>"
+            '<div class="manifold-stage">'
+            f'<img src="{esc(manifold_path.name)}" alt="{esc(title)} relational manifold" loading="eager">'
+            f'{hover_markup}'
             "</div>"
             "</div>"
             if manifold_path.exists()
@@ -1916,6 +1920,15 @@ class DemocritusBatchAgenticRunner:
     .hero p {{ margin: 0; color: var(--muted); font-size: 17px; line-height: 1.65; max-width: 920px; }}
     .layout {{ display: grid; grid-template-columns: 1.3fr 0.7fr; gap: 18px; }}
     .viewer {{ padding: 18px; }}
+    .viewer-grid {{
+      display: grid;
+      grid-template-columns: minmax(220px, 0.34fr) minmax(0, 1fr);
+      gap: 16px;
+      align-items: start;
+    }}
+    .hover-rail {{
+      min-width: 0;
+    }}
     .manifold-stage {{ position: relative; }}
     .viewer img {{ width: 100%; border-radius: 22px; display: block; background: white; }}
     .viewer-note {{
@@ -1942,13 +1955,12 @@ class DemocritusBatchAgenticRunner:
       outline: none;
     }}
     .hover-card {{
-      position: absolute;
-      left: 18px;
-      bottom: 18px;
-      max-width: min(420px, calc(100% - 36px));
+      position: sticky;
+      top: 0;
+      min-height: 150px;
       padding: 14px 16px;
       border-radius: 18px;
-      background: rgba(20, 36, 51, 0.9);
+      background: rgba(20, 36, 51, 0.94);
       color: white;
       box-shadow: 0 12px 32px rgba(20, 36, 51, 0.2);
       backdrop-filter: blur(8px);
@@ -2034,6 +2046,10 @@ class DemocritusBatchAgenticRunner:
       white-space: nowrap;
       border: 0;
     }}
+    @media (max-width: 1120px) {{
+      .viewer-grid {{ grid-template-columns: 1fr; }}
+      .hover-card {{ position: static; min-height: 0; }}
+    }}
     @media (max-width: 960px) {{
       .layout {{ grid-template-columns: 1fr; }}
     }}
@@ -2079,7 +2095,6 @@ class DemocritusBatchAgenticRunner:
           if (!card || !titleNode || !metaNode) {{
             return;
           }}
-          card.hidden = false;
           titleNode.textContent = node.dataset.label || "Recovered cluster";
           const matchedTopic = node.dataset.topic || "";
           const sampleText = node.dataset.samples || "";
@@ -2110,6 +2125,12 @@ class DemocritusBatchAgenticRunner:
       if (stage) {{
         stage.addEventListener("mouseleave", () => {{
           clearActive();
+          if (titleNode) {{
+            titleNode.textContent = "Move over the manifold";
+          }}
+          if (metaNode) {{
+            metaNode.textContent = "Recovered local labels will appear here.";
+          }}
         }});
       }}
     }})();
