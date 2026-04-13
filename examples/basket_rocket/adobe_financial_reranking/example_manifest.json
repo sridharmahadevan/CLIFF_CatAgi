@@ -1,0 +1,37 @@
+{
+  "bundle_version": 1,
+  "company": "adobe",
+  "company_changed_count": 281,
+  "company_row_count": 3545,
+  "files": [
+    "README.md",
+    "extractor_snapshot.json",
+    "panel_reranking_summary.json",
+    "company_summary.json",
+    "top_changed_examples.json",
+    "example_manifest.json"
+  ],
+  "financial_horizon": "next_year",
+  "financial_targets": [
+    "+revenue_yoy",
+    "+operating_margin",
+    "+free_cash_flow_margin",
+    "+return_on_assets",
+    "-debt_to_assets"
+  ],
+  "images_dir": "images",
+  "included_images": [
+    "timeline.png"
+  ],
+  "included_visualizations": [
+    "company_reranking.html",
+    "aggregate_plans.html",
+    "psr_drilldown.html"
+  ],
+  "panel_changed_count": 11197,
+  "panel_row_count": 56498,
+  "reward_mode": "financial",
+  "route": "basket_rocket_sec",
+  "source_kind": "legacy_fullpanel_snapshot",
+  "visualizations_dir": "visualizations"
+}

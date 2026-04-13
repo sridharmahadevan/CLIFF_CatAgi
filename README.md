@@ -133,6 +133,24 @@ bundles, and large report assets from the original run. Use
 `--document-ranks` when you want a curated public subset rather than the full
 retrieval set from the saved run.
 
+Export a compact public BASKET/ROCKET example bundle from legacy company artifacts:
+
+```bash
+python3 -m functorflow_v3.basket_rocket_example_export \
+  --company adobe \
+  --extractor-dir ../BASKET/outputs/tenk_rawpdf_fullpanel_monitored \
+  --reranking-dir ../BASKET/outputs/rocket_fullpanel_financial_real \
+  --company-viz-dir ../BASKET/outputs/rocket_company_viz_financial_real \
+  --psr-company-dir ../BASKET/outputs/psr_rocket_variant_comparison_20260322/companies \
+  --output-dir examples/basket_rocket/adobe_financial_reranking \
+  --force
+```
+
+This keeps the GitHub-facing artifact small by exporting a company-level
+snapshot: sanitized extractor metadata, reranking summaries, representative
+changed statements, and a few HTML visualizers while excluding the raw PDFs,
+full JSONL panels, and bulky intermediate outputs.
+
 ## Install Matrix
 
 Use the same base Python environment for every setup:

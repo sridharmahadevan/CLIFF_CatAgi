@@ -1,0 +1,26 @@
+{
+  "action_vocab_size": 17,
+  "avg_actions_per_plan": 2.4939466883783497,
+  "extractor_mode": "heuristic",
+  "macro_skill_count": 128,
+  "n_company_years": 599,
+  "n_extractions": 56498,
+  "n_statement_files": 599,
+  "n_statement_rows": 402037,
+  "n_steps": 140903,
+  "paths": {
+    "action_vocab": "action_vocab.csv",
+    "dedupe_index": "dedupe_index.csv",
+    "macro_skills": "macro_skills.csv",
+    "plan_blocks": "plan_blocks.jsonl",
+    "skill_basis": "skill_basis.csv",
+    "trace_index": "trace_index.csv",
+    "trace_step_states": "trace_step_states.jsonl",
+    "workflow_extractions": "workflow_extractions.jsonl",
+    "year_plan_graphs": "year_plan_graphs.jsonl"
+  },
+  "source_mode": "raw_pdf",
+  "statement_globs": [
+    "**/runs_*_financial_filings/year_*/runs/*/input.pdf"
+  ]
+}

@@ -1,0 +1,56 @@
+<html><head><meta charset='utf-8'>
+<title>ADOBE drilldown</title>
+<style>body{font-family:Helvetica,Arial,sans-serif;margin:24px;line-height:1.35;} table{border-collapse:collapse;margin:16px 0;width:100%;} th,td{border:1px solid #d1d5db;padding:6px 8px;font-size:13px;} th{background:#f3f4f6;} code{background:#f3f4f6;padding:1px 4px;border-radius:3px;} .small{color:#4b5563;font-size:12px;} h1,h2,h3{margin-top:24px;} </style>
+</head><body>
+<h1>ADOBE</h1>
+<p class='small'>Per-company comparison across ROCKET baseline, section-aware reranking, section-aware+KET reranking, plus company-specific PSR tests.</p>
+<h2>ROCKET score summary</h2>
+<table><tr><th>Variant</th><th>Ranking score</th><th>Effect label</th></tr>
+<tr><td>ROCKET baseline</td><td>-0.766</td><td>inconclusive</td></tr>
+<tr><td>ROCKET section-aware</td><td>0.145</td><td>inconclusive</td></tr>
+<tr><td>ROCKET section-aware + KET</td><td>-0.080</td><td>inconclusive</td></tr>
+</table>
+<h2>Year-by-year structure trace</h2>
+<img src='../images/timeline.png' alt='adobe timeline plot' style='max-width:100%;border:1px solid #e5e7eb'/>
+<h2>Year table</h2>
+<table><tr><th>Year</th><th>Success</th><th>Baseline incomparability</th><th>Section-aware incomparability</th><th>KET incomparability</th><th>Baseline nodes</th><th>Section-aware nodes</th><th>KET nodes</th></tr>
+<tr><td>2008</td><td>0.120</td><td>0.714</td><td>0.679</td><td>0.750</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+<tr><td>2009</td><td>0.210</td><td>0.643</td><td>0.643</td><td>0.643</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+<tr><td>2010</td><td>0.176</td><td>0.571</td><td>0.571</td><td>0.571</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+<tr><td>2011</td><td>0.075</td><td>0.786</td><td>0.786</td><td>0.786</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+<tr><td>2012</td><td>-0.203</td><td>0.607</td><td>0.429</td><td>0.571</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+<tr><td>2013</td><td>-0.138</td><td>0.929</td><td>0.929</td><td>0.893</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+<tr><td>2014</td><td>0.051</td><td>0.607</td><td>0.607</td><td>0.679</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+<tr><td>2015</td><td>0.230</td><td>0.679</td><td>0.750</td><td>0.679</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+<tr><td>2016</td><td>0.304</td><td>0.571</td><td>0.714</td><td>0.571</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+<tr><td>2017</td><td>0.339</td><td>0.571</td><td>0.571</td><td>0.571</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+<tr><td>2018</td><td>0.325</td><td>0.714</td><td>0.714</td><td>0.964</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+<tr><td>2019</td><td>0.363</td><td>0.536</td><td>0.571</td><td>0.679</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+<tr><td>2020</td><td>0.390</td><td>0.679</td><td>0.679</td><td>0.750</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+<tr><td>2021</td><td>0.338</td><td>0.714</td><td>0.786</td><td>0.679</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+<tr><td>2022</td><td>0.317</td><td>0.679</td><td>0.750</td><td>0.607</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+<tr><td>2023</td><td>0.317</td><td>0.821</td><td>0.821</td><td>0.750</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+<tr><td>2024</td><td>0.311</td><td>0.750</td><td>0.750</td><td>0.750</td><td>8.000</td><td>8.000</td><td>8.000</td></tr>
+</table>
+<h2>Company-specific PSR tests</h2>
+<p><code>expand -&gt; optimize =&gt; free_cash_flow_up</code> means: if the local workflow for this company-year contains <code>expand</code> followed by <code>optimize</code>, how strongly does that pattern predict the downstream observation <code>free_cash_flow_up</code>?</p>
+<p>In standard PSR language, a test is a sequence of action-observation pairs. These pages use a compressed notation: the action subsequence is written explicitly on the left, and the queried terminal observation is written on the right.</p>
+<p>So <code>optimize -&gt; source -&gt; expand =&gt; leverage_down</code> is a length-3 compressed test feature: action skeleton <code>optimize, source, expand</code> plus queried terminal observation <code>leverage_down</code>.</p>
+<p>It is not one fully specified standard PSR test, because the intermediate observations are not chosen explicitly. Relative to standard PSR notation, it stands for a marginalization over a family such as <code>[(optimize, o1), (source, o2), (expand, leverage_down)]</code> across admissible intermediate observations <code>o1, o2</code>. The mnemonic <code>[(optimize, *), (source, *), (expand, leverage_down)]</code> is just shorthand for that collapse, not a literal observation symbol.</p>
+<p>Here <code>p(true)</code> and <code>p(false)</code> compare the PSR score on years where the observation did and did not happen.</p>
+<h3>PSR baseline</h3>
+<table><tr><th>Context</th><th>Test</th><th>Eval years</th><th>p(true)</th><th>p(false)</th><th>Gap</th><th>Brier</th></tr>
+<tr><td>Operations</td><td><code>manufacture -&gt; optimize =&gt; revenue_up</code></td><td>5</td><td>0.292</td><td>0.407</td><td>-0.115</td><td>0.300</td></tr>
+<tr><td>Operations</td><td><code>manufacture -&gt; optimize =&gt; margin_up</code></td><td>5</td><td>0.217</td><td>0.333</td><td>-0.115</td><td>0.211</td></tr>
+</table>
+<h3>PSR max length 3</h3>
+<table><tr><th>Context</th><th>Test</th><th>Eval years</th><th>p(true)</th><th>p(false)</th><th>Gap</th><th>Brier</th></tr>
+<tr><td>Operations</td><td><code>manufacture =&gt; free_cash_flow_up</code></td><td>6</td><td>0.297</td><td>0.372</td><td>-0.075</td><td>0.257</td></tr>
+<tr><td>Operations</td><td><code>manufacture =&gt; leverage_down</code></td><td>6</td><td>0.211</td><td>0.286</td><td>-0.075</td><td>0.172</td></tr>
+</table>
+<h3>PSR section-aware</h3>
+<table><tr><th>Context</th><th>Test</th><th>Eval years</th><th>p(true)</th><th>p(false)</th><th>Gap</th><th>Brier</th></tr>
+<tr><td>Operations</td><td><code>digitize -&gt; manufacture =&gt; revenue_up</code></td><td>3</td><td>0.231</td><td>0.349</td><td>-0.118</td><td>0.278</td></tr>
+<tr><td>Operations</td><td><code>digitize -&gt; manufacture =&gt; free_cash_flow_up</code></td><td>3</td><td>0.210</td><td>0.327</td><td>-0.118</td><td>0.280</td></tr>
+</table>
+</body></html>

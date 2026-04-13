@@ -1,0 +1,213 @@
+{
+  "aggregate_detail_html": "rocket_aggregate_plans___adobe.html",
+  "aggregate_plan": {
+    "plan_count": 3545,
+    "plan_key": "selected_plan",
+    "statement_count": 3545,
+    "top_actions": [
+      {
+        "action": "realize_revenue",
+        "count": 3543
+      },
+      {
+        "action": "optimize",
+        "count": 2246
+      },
+      {
+        "action": "digitize",
+        "count": 1181
+      },
+      {
+        "action": "expand",
+        "count": 562
+      },
+      {
+        "action": "price",
+        "count": 207
+      },
+      {
+        "action": "innovate",
+        "count": 125
+      },
+      {
+        "action": "forecast",
+        "count": 87
+      },
+      {
+        "action": "market",
+        "count": 86
+      }
+    ],
+    "top_edges": [
+      {
+        "count": 2093,
+        "dst": "realize_revenue",
+        "src": "optimize"
+      },
+      {
+        "count": 765,
+        "dst": "realize_revenue",
+        "src": "digitize"
+      },
+      {
+        "count": 494,
+        "dst": "realize_revenue",
+        "src": "expand"
+      },
+      {
+        "count": 333,
+        "dst": "expand",
+        "src": "digitize"
+      },
+      {
+        "count": 122,
+        "dst": "optimize",
+        "src": "price"
+      },
+      {
+        "count": 119,
+        "dst": "optimize",
+        "src": "digitize"
+      },
+      {
+        "count": 105,
+        "dst": "expand",
+        "src": "optimize"
+      },
+      {
+        "count": 99,
+        "dst": "realize_revenue",
+        "src": "price"
+      },
+      {
+        "count": 87,
+        "dst": "forecast",
+        "src": "realize_revenue"
+      },
+      {
+        "count": 86,
+        "dst": "realize_revenue",
+        "src": "market"
+      }
+    ],
+    "top_sequences": [
+      {
+        "count": 1775,
+        "sequence": "optimize -> realize_revenue"
+      },
+      {
+        "count": 743,
+        "sequence": "digitize -> realize_revenue"
+      },
+      {
+        "count": 290,
+        "sequence": "digitize -> expand -> realize_revenue"
+      },
+      {
+        "count": 86,
+        "sequence": "price -> optimize -> realize_revenue"
+      },
+      {
+        "count": 69,
+        "sequence": "optimize -> realize_revenue -> forecast"
+      }
+    ],
+    "year_count": 24,
+    "year_span": [
+      2002,
+      2026
+    ]
+  },
+  "changed_rate": 0.07926657263751763,
+  "company": "adobe",
+  "evidence_html": "",
+  "evidence_summary": "",
+  "financial_summary": {
+    "coverage_years": 17,
+    "latest_year": 2025,
+    "outcome_metrics": [],
+    "outcome_year": 0,
+    "snapshot_metrics": [
+      {
+        "label": "Revenue",
+        "value": "$23.8B"
+      },
+      {
+        "label": "Op margin",
+        "value": "+36.6%"
+      },
+      {
+        "label": "FCF margin",
+        "value": "+41.4%"
+      }
+    ],
+    "ticker": "ADBE"
+  },
+  "html": "rocket_reranking_visualizer___adobe.html",
+  "inserted_mix": "optimize=172, expand=141, realize_revenue=72, market=30",
+  "mean_score_gain": 0.027964679652971412,
+  "n_changed": 281,
+  "n_rows": 3545,
+  "source_mix": "macro_merge=104, local_insert=76, macro_completion=66, sector_merge=21",
+  "summary": "rocket_reranking_visualizer___adobe_summary.json",
+  "summary_metrics": {
+    "changed_by_company": {
+      "adobe": 281
+    },
+    "changed_by_year": {
+      "2002": 4,
+      "2004": 8,
+      "2005": 14,
+      "2006": 6,
+      "2008": 29,
+      "2009": 13,
+      "2010": 23,
+      "2011": 31,
+      "2012": 11,
+      "2013": 28,
+      "2014": 5,
+      "2015": 6,
+      "2016": 10,
+      "2017": 10,
+      "2018": 14,
+      "2019": 19,
+      "2020": 4,
+      "2021": 4,
+      "2022": 15,
+      "2023": 2,
+      "2024": 13,
+      "2025": 6,
+      "2026": 6
+    },
+    "changed_rate": 0.07926657263751763,
+    "inserted_actions": {
+      "digitize": 6,
+      "distribute": 26,
+      "expand": 141,
+      "invest": 8,
+      "market": 30,
+      "optimize": 172,
+      "realize_revenue": 72
+    },
+    "max_score_gain": 0.10864005889587636,
+    "mean_score_gain": 0.027964679652971412,
+    "n_changed": 281,
+    "n_rows": 3545,
+    "n_unique_selected_plans": 41,
+    "selected_labels": {
+      "add_optimize": 43,
+      "add_realize_revenue": 33,
+      "local_partial_order": 14,
+      "panel_macro": 66,
+      "panel_partial_macro_merge": 104,
+      "sector_partial_order": 21
+    },
+    "selected_sources": {
+      "local_insert": 76,
+      "local_merge": 14,
+      "macro_completion": 66,
+      "macro_merge": 104,
+      "sector_merge": 21
+    }
+  }
+}

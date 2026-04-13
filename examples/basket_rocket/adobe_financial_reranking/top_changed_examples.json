@@ -1,0 +1,194 @@
+[
+  {
+    "base_actions": [
+      "innovate",
+      "digitize",
+      "optimize"
+    ],
+    "base_edges": [
+      [
+        "innovate",
+        "digitize"
+      ],
+      [
+        "digitize",
+        "optimize"
+      ]
+    ],
+    "company": "adobe",
+    "score_gain": 0.10864005889587636,
+    "selected_actions": [
+      "innovate",
+      "digitize",
+      "optimize",
+      "expand",
+      "realize_revenue"
+    ],
+    "selected_edges": [
+      [
+        "innovate",
+        "digitize"
+      ],
+      [
+        "digitize",
+        "optimize"
+      ],
+      [
+        "optimize",
+        "expand"
+      ],
+      [
+        "optimize",
+        "realize_revenue"
+      ],
+      [
+        "expand",
+        "realize_revenue"
+      ]
+    ],
+    "statement_id": "adobe:y2008:p0014",
+    "year": 2008
+  },
+  {
+    "base_actions": [
+      "acquire",
+      "optimize"
+    ],
+    "base_edges": [
+      [
+        "acquire",
+        "optimize"
+      ]
+    ],
+    "company": "adobe",
+    "score_gain": 0.10174259698424237,
+    "selected_actions": [
+      "acquire",
+      "optimize",
+      "realize_revenue"
+    ],
+    "selected_edges": [
+      [
+        "acquire",
+        "optimize"
+      ],
+      [
+        "optimize",
+        "realize_revenue"
+      ]
+    ],
+    "statement_id": "adobe:y2011:p0209",
+    "year": 2011
+  },
+  {
+    "base_actions": [
+      "innovate",
+      "digitize"
+    ],
+    "base_edges": [
+      [
+        "innovate",
+        "digitize"
+      ]
+    ],
+    "company": "adobe",
+    "score_gain": 0.09925175087922578,
+    "selected_actions": [
+      "innovate",
+      "digitize",
+      "optimize",
+      "expand",
+      "realize_revenue"
+    ],
+    "selected_edges": [
+      [
+        "innovate",
+        "digitize"
+      ],
+      [
+        "digitize",
+        "optimize"
+      ],
+      [
+        "digitize",
+        "expand"
+      ],
+      [
+        "digitize",
+        "realize_revenue"
+      ],
+      [
+        "optimize",
+        "realize_revenue"
+      ],
+      [
+        "expand",
+        "realize_revenue"
+      ]
+    ],
+    "statement_id": "adobe:y2010:p0007",
+    "year": 2010
+  },
+  {
+    "base_actions": [
+      "acquire",
+      "optimize"
+    ],
+    "base_edges": [
+      [
+        "acquire",
+        "optimize"
+      ]
+    ],
+    "company": "adobe",
+    "score_gain": 0.09818203542496506,
+    "selected_actions": [
+      "acquire",
+      "optimize",
+      "realize_revenue"
+    ],
+    "selected_edges": [
+      [
+        "acquire",
+        "optimize"
+      ],
+      [
+        "optimize",
+        "realize_revenue"
+      ]
+    ],
+    "statement_id": "adobe:y2010:p0143",
+    "year": 2010
+  },
+  {
+    "base_actions": [
+      "acquire",
+      "optimize"
+    ],
+    "base_edges": [
+      [
+        "acquire",
+        "optimize"
+      ]
+    ],
+    "company": "adobe",
+    "score_gain": 0.09818203542496506,
+    "selected_actions": [
+      "acquire",
+      "optimize",
+      "realize_revenue"
+    ],
+    "selected_edges": [
+      [
+        "acquire",
+        "optimize"
+      ],
+      [
+        "optimize",
+        "realize_revenue"
+      ]
+    ],
+    "statement_id": "adobe:y2010:p0153",
+    "year": 2010
+  }
+]

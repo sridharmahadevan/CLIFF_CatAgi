@@ -1,0 +1,54 @@
+{
+  "changed_by_company_top10": {
+    "3m": 637,
+    "american_express": 506,
+    "amgen": 474,
+    "chevron": 691,
+    "coca_cola": 483,
+    "disney": 496,
+    "goldman_sachs": 925,
+    "jpmorgan": 1407,
+    "merck": 681,
+    "pfizer": 436
+  },
+  "changed_mean_score_gain": 0.019072381795675167,
+  "changed_rate": 0.1981840065135049,
+  "financial_horizon": "next_year",
+  "financial_targets": [
+    "+revenue_yoy",
+    "+operating_margin",
+    "+free_cash_flow_margin",
+    "+return_on_assets",
+    "-debt_to_assets"
+  ],
+  "inputs": {
+    "extractions": "workflow_extractions.jsonl",
+    "macro_skills": "macro_skills.csv",
+    "panel": "rocket_company_outcomes.csv"
+  },
+  "mean_score_gain": 0.0037798410380221396,
+  "n_changed": 11197,
+  "n_rows": 56498,
+  "reward_mode": "financial",
+  "selected_labels": {
+    "add_expand": 6,
+    "add_market": 2,
+    "add_optimize": 359,
+    "add_realize_revenue": 1126,
+    "base": 45301,
+    "local_partial_order": 761,
+    "panel_macro": 3402,
+    "panel_partial_macro": 6,
+    "panel_partial_macro_merge": 5063,
+    "sector_partial_order": 472
+  },
+  "selected_sources": {
+    "basket": 45301,
+    "local_insert": 1493,
+    "local_merge": 761,
+    "macro_completion": 3402,
+    "macro_merge": 5063,
+    "macro_partial": 6,
+    "sector_merge": 472
+  }
+}
