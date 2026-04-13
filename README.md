@@ -115,6 +115,24 @@ Run CLIFF:
 python3 -m functorflow_v3.cliff --outdir /tmp/cliff-session
 ```
 
+### Saved Runs And Session Restore
+
+CLIFF now treats the `--outdir` tree as a reusable run workspace, not just a
+temporary dump folder.
+
+- each submitted query gets its own run folder under the chosen `--outdir`
+- CLIFF writes a `cliff_run_record.json` alongside the route artifacts for that
+  run
+- when you open CLIFF again, the launcher rescans the current run root, the
+  default archive root at `~/Downloads/CLIFF_runs_archive`, and any extra paths
+  listed in `CLIFF_RUN_ARCHIVE_ROOTS`
+- saved runs show up in the archived-runs panel, where you can reopen the old
+  artifact or queue the same query again as a rerun
+
+In practice, this means you can stop and restart CLIFF without losing the runs
+you already completed, and you can use older runs as checkpoints for later
+comparison or follow-up work.
+
 Export a compact public Democritus example bundle from a saved run:
 
 ```bash

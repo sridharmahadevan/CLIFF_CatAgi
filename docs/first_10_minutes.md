@@ -48,6 +48,11 @@ If you launch the full CLIFF GUI, you will now also see:
 - a latency guide that distinguishes lightweight routes from deep-research
   routes
 
+One practical detail is easy to miss: the `--outdir` folder is also where CLIFF
+stores per-query run folders and run records. When you come back in a later
+session, CLIFF rescans those saved runs, restores them into the launcher, and
+lets you reopen or rerun earlier work from the archived-runs list.
+
 ## 3. How To Think About The Repo
 
 Do not start by reading everything in `functorflow_v3/`.
@@ -164,6 +169,7 @@ Success is:
 - you can see how the repo is trying to teach, not just compute
 - you can tell the difference between lightweight routes and deep-research
   routes
+- you can reopen a saved run or rerun it after restarting the session
 
 If that is working, the overall design is already visible.
 
