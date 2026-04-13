@@ -24,8 +24,12 @@
     "timeline.png"
   ],
   "included_visualizations": [
+    "README.md",
+    "company_reranking.md",
     "company_reranking.html",
+    "aggregate_plans.md",
     "aggregate_plans.html",
+    "psr_drilldown.md",
     "psr_drilldown.html"
   ],
   "panel_changed_count": 11197,

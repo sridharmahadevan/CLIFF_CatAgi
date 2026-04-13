@@ -6,6 +6,7 @@ import argparse
 import json
 import re
 import shutil
+from html import unescape
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,39 @@ def _copy_sanitized_text(source: Path, dest: Path, *, replacements: dict[str, st
     for old, new in (replacements or {}).items():
         text = text.replace(old, new)
     dest.write_text(text, encoding="utf-8")
+
+
+def _strip_html(text: str) -> str:
+    stripped = re.sub(r"<[^>]+>", " ", text)
+    return _normalize_space(unescape(stripped))
+
+
+def _extract_html_table_rows(html_text: str, heading: str) -> list[list[str]]:
+    pattern = rf"<h[23][^>]*>\s*{re.escape(heading)}\s*</h[23]>\s*<table>(.*?)</table>"
+    match = re.search(pattern, html_text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return []
+    rows: list[list[str]] = []
+    for row_match in re.finditer(r"<tr>(.*?)</tr>", match.group(1), flags=re.IGNORECASE | re.DOTALL):
+        cells = re.findall(r"<t[hd]>(.*?)</t[hd]>", row_match.group(1), flags=re.IGNORECASE | re.DOTALL)
+        cleaned = [_strip_html(cell) for cell in cells]
+        if cleaned:
+            rows.append(cleaned)
+    return rows
+
+
+def _render_markdown_table(rows: list[list[str]]) -> list[str]:
+    if len(rows) < 2:
+        return []
+    header = rows[0]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join("---" for _ in header) + " |",
+    ]
+    for row in rows[1:]:
+        padded = row + [""] * (len(header) - len(row))
+        lines.append("| " + " | ".join(padded[: len(header)]) + " |")
+    return lines
 
 
 def _read_company_index_row(index_summary_path: Path, company: str) -> dict[str, Any]:
@@ -176,11 +210,15 @@ def _build_readme(
         "- `panel_reranking_summary.json`: sanitized full-panel financial reranking summary",
         "- `company_summary.json`: company-level reranking and aggregate-plan snapshot",
         "- `top_changed_examples.json`: representative changed statements for this company",
-        "- `visualizations/company_reranking.html`: company reranking visualizer",
-        "- `visualizations/aggregate_plans.html`: aggregate plan drilldown for the company",
+        "- `visualizations/README.md`: GitHub-friendly index for the saved visualizations",
+        "- `visualizations/company_reranking.md`: GitHub-renderable company reranking summary",
+        "- `visualizations/aggregate_plans.md`: GitHub-renderable aggregate-plan summary",
+        "- `visualizations/company_reranking.html`: original company reranking visualizer",
+        "- `visualizations/aggregate_plans.html`: original aggregate-plan drilldown",
     ]
     if has_psr:
-        lines.append("- `visualizations/psr_drilldown.html`: company PSR comparison page")
+        lines.append("- `visualizations/psr_drilldown.md`: GitHub-renderable PSR summary")
+        lines.append("- `visualizations/psr_drilldown.html`: original company PSR comparison page")
     if has_timeline:
         lines.append("- `images/timeline.png`: company timeline graphic referenced by the PSR drilldown")
 
@@ -226,6 +264,142 @@ def _build_readme(
     else:
         lines.append("- No company-specific changed statements were available in the exported top-example list.")
 
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_company_reranking_markdown(
+    *,
+    company_snapshot: dict[str, Any],
+    top_examples: list[dict[str, Any]],
+) -> str:
+    aggregate_plan = dict(company_snapshot.get("aggregate_plan") or {})
+    financial_summary = dict(company_snapshot.get("financial_summary") or {})
+    summary_metrics = dict(company_snapshot.get("summary_metrics") or {})
+    lines = [
+        "# ROCKET Reranking Visualizer",
+        "",
+        f"- Company: {str(company_snapshot.get('company') or '').upper()}",
+        f"- Ticker: {financial_summary.get('ticker') or 'n/a'}",
+        f"- Statement rows: {company_snapshot.get('n_rows') or 0}",
+        f"- Changed statements: {company_snapshot.get('n_changed') or 0}",
+        f"- Changed rate: {company_snapshot.get('changed_rate')}",
+        f"- Mean score gain: {company_snapshot.get('mean_score_gain')}",
+        f"- Source mix: {company_snapshot.get('source_mix') or 'n/a'}",
+        f"- Inserted mix: {company_snapshot.get('inserted_mix') or 'n/a'}",
+        "",
+        "## Financial Snapshot",
+        "",
+    ]
+    for metric in list(financial_summary.get("snapshot_metrics") or []):
+        lines.append(f"- {metric.get('label')}: {metric.get('value')}")
+    if not list(financial_summary.get("snapshot_metrics") or []):
+        lines.append("- No filing-year snapshot metrics were available.")
+    lines.extend(["", "## Top Actions", ""])
+    for row in list(aggregate_plan.get("top_actions") or [])[:8]:
+        lines.append(f"- {row.get('action')}: {row.get('count')}")
+    lines.extend(["", "## Top Edges", ""])
+    for row in list(aggregate_plan.get("top_edges") or [])[:8]:
+        lines.append(f"- {row.get('src')} -> {row.get('dst')}: {row.get('count')}")
+    lines.extend(["", "## Changed Statement Examples", ""])
+    for example in top_examples:
+        lines.append(
+            f"- `{example.get('statement_id')}` ({example.get('year')}): "
+            f"{' -> '.join(example.get('base_actions') or [])} => "
+            f"{' -> '.join(example.get('selected_actions') or [])} "
+            f"(gain={example.get('score_gain')})"
+        )
+    if not top_examples:
+        lines.append("- No representative changed statements were exported.")
+    lines.extend(["", "## Year Distribution", ""])
+    for year, count in list((summary_metrics.get("changed_by_year") or {}).items())[:24]:
+        lines.append(f"- {year}: {count}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_aggregate_plans_markdown(*, company_snapshot: dict[str, Any]) -> str:
+    aggregate_plan = dict(company_snapshot.get("aggregate_plan") or {})
+    lines = [
+        "# ROCKET Aggregate Plans",
+        "",
+        f"- Company: {str(company_snapshot.get('company') or '').upper()}",
+        f"- Plan count: {aggregate_plan.get('plan_count') or 0}",
+        f"- Statement count: {aggregate_plan.get('statement_count') or 0}",
+        f"- Year count: {aggregate_plan.get('year_count') or 0}",
+        f"- Year span: {aggregate_plan.get('year_span') or []}",
+        "",
+        "## Top Action Counts",
+        "",
+    ]
+    for row in list(aggregate_plan.get("top_actions") or [])[:10]:
+        lines.append(f"- {row.get('action')}: {row.get('count')}")
+    lines.extend(["", "## Top Edge Counts", ""])
+    for row in list(aggregate_plan.get("top_edges") or [])[:10]:
+        lines.append(f"- {row.get('src')} -> {row.get('dst')}: {row.get('count')}")
+    lines.extend(["", "## Top Sequences", ""])
+    for row in list(aggregate_plan.get("top_sequences") or [])[:10]:
+        lines.append(f"- {row.get('sequence')}: {row.get('count')}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_psr_markdown(*, company: str, psr_html: str, timeline_included: bool) -> str:
+    score_rows = _extract_html_table_rows(psr_html, "ROCKET score summary")
+    year_rows = _extract_html_table_rows(psr_html, "Year table")
+    section_names = (
+        "PSR baseline",
+        "PSR max length 3",
+        "PSR section-aware",
+    )
+    lines = [
+        "# PSR Drilldown",
+        "",
+        f"- Company: {company.upper()}",
+        "- This Markdown companion is included so GitHub can render the PSR snapshot directly.",
+    ]
+    if timeline_included:
+        lines.extend(["", "## Timeline", "", "![Timeline](../images/timeline.png)"])
+    if score_rows:
+        lines.extend(["", "## ROCKET Score Summary", ""])
+        lines.extend(_render_markdown_table(score_rows))
+    if year_rows:
+        lines.extend(["", "## Year Table", ""])
+        lines.extend(_render_markdown_table(year_rows))
+    for section_name in section_names:
+        rows = _extract_html_table_rows(psr_html, section_name)
+        if rows:
+            lines.extend(["", f"## {section_name}", ""])
+            lines.extend(_render_markdown_table(rows))
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_visualizations_readme(*, has_psr: bool) -> str:
+    lines = [
+        "# Visualization Views",
+        "",
+        "GitHub renders the Markdown companions in this folder more reliably than raw HTML blob pages.",
+        "The original `.html` files are still included for local opening in a browser.",
+        "",
+        "## Recommended GitHub Views",
+        "",
+        "- [Company reranking](company_reranking.md)",
+        "- [Aggregate plans](aggregate_plans.md)",
+    ]
+    if has_psr:
+        lines.append("- [PSR drilldown](psr_drilldown.md)")
+    lines.extend(
+        [
+            "",
+            "## Original HTML Files",
+            "",
+            "- `company_reranking.html`",
+            "- `aggregate_plans.html`",
+        ]
+    )
+    if has_psr:
+        lines.append("- `psr_drilldown.html`")
     lines.append("")
     return "\n".join(lines)
 
@@ -303,13 +477,26 @@ def export_basket_rocket_example(
         visualizations_dir / "aggregate_plans.html",
         replacements={"href=\"index.html\"": 'href="company_reranking.html"'},
     )
+    (visualizations_dir / "company_reranking.md").write_text(
+        _build_company_reranking_markdown(
+            company_snapshot=company_snapshot,
+            top_examples=top_examples,
+        ),
+        encoding="utf-8",
+    )
+    (visualizations_dir / "aggregate_plans.md").write_text(
+        _build_aggregate_plans_markdown(company_snapshot=company_snapshot),
+        encoding="utf-8",
+    )
 
     psr_html_included = False
     timeline_included = False
+    psr_markdown = ""
     if psr_company_dir:
         psr_html_path = psr_company_dir / f"{company_key}.html"
         timeline_path = psr_company_dir / f"{company_key}_timeline.png"
         if psr_html_path.exists():
+            psr_raw_html = _sanitize_string(psr_html_path.read_text(encoding="utf-8"))
             _copy_sanitized_text(
                 psr_html_path,
                 visualizations_dir / "psr_drilldown.html",
@@ -318,9 +505,21 @@ def export_basket_rocket_example(
                 },
             )
             psr_html_included = True
+            psr_markdown = _build_psr_markdown(
+                company=company_key,
+                psr_html=psr_raw_html.replace(f"{company_key}_timeline.png", "../images/timeline.png"),
+                timeline_included=timeline_path.exists(),
+            )
         if timeline_path.exists():
             shutil.copy2(timeline_path, images_dir / "timeline.png")
             timeline_included = True
+        if psr_html_included:
+            (visualizations_dir / "psr_drilldown.md").write_text(psr_markdown, encoding="utf-8")
+
+    (visualizations_dir / "README.md").write_text(
+        _build_visualizations_readme(has_psr=psr_html_included),
+        encoding="utf-8",
+    )
 
     readme_text = _build_readme(
         company=company,
@@ -356,10 +555,13 @@ def export_basket_rocket_example(
         "visualizations_dir": "visualizations",
         "images_dir": "images",
         "included_visualizations": [
+            "README.md",
+            "company_reranking.md",
             "company_reranking.html",
+            "aggregate_plans.md",
             "aggregate_plans.html",
         ]
-        + (["psr_drilldown.html"] if psr_html_included else []),
+        + (["psr_drilldown.md", "psr_drilldown.html"] if psr_html_included else []),
         "included_images": ["timeline.png"] if timeline_included else [],
     }
     _write_json(output_dir / "example_manifest.json", manifest)

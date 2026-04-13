@@ -164,7 +164,9 @@ class BasketRocketExampleExportTests(unittest.TestCase):
             self.assertEqual(manifest["route"], "basket_rocket_sec")
             self.assertEqual(manifest["company"], "adobe")
             self.assertEqual(manifest["company_changed_count"], 281)
+            self.assertIn("company_reranking.md", manifest["included_visualizations"])
             self.assertIn("psr_drilldown.html", manifest["included_visualizations"])
+            self.assertIn("psr_drilldown.md", manifest["included_visualizations"])
             self.assertIn("timeline.png", manifest["included_images"])
 
             readme_text = (output_dir / "README.md").read_text(encoding="utf-8")
@@ -182,11 +184,19 @@ class BasketRocketExampleExportTests(unittest.TestCase):
             self.assertEqual(top_examples[0]["company"], "adobe")
 
             company_html = (output_dir / "visualizations" / "company_reranking.html").read_text(encoding="utf-8")
+            company_md = (output_dir / "visualizations" / "company_reranking.md").read_text(encoding="utf-8")
             aggregate_html = (output_dir / "visualizations" / "aggregate_plans.html").read_text(encoding="utf-8")
+            aggregate_md = (output_dir / "visualizations" / "aggregate_plans.md").read_text(encoding="utf-8")
             psr_html = (output_dir / "visualizations" / "psr_drilldown.html").read_text(encoding="utf-8")
+            psr_md = (output_dir / "visualizations" / "psr_drilldown.md").read_text(encoding="utf-8")
+            viz_readme = (output_dir / "visualizations" / "README.md").read_text(encoding="utf-8")
             self.assertNotIn(str(root), company_html)
+            self.assertIn("# ROCKET Reranking Visualizer", company_md)
             self.assertIn('href="company_reranking.html"', aggregate_html)
+            self.assertIn("# ROCKET Aggregate Plans", aggregate_md)
             self.assertIn("../images/timeline.png", psr_html)
+            self.assertIn("![Timeline](../images/timeline.png)", psr_md)
+            self.assertIn("[PSR drilldown](psr_drilldown.md)", viz_readme)
             self.assertTrue((output_dir / "images" / "timeline.png").exists())
 
 

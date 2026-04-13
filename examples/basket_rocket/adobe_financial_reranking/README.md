@@ -22,9 +22,13 @@ and large intermediate state were intentionally excluded.
 - `panel_reranking_summary.json`: sanitized full-panel financial reranking summary
 - `company_summary.json`: company-level reranking and aggregate-plan snapshot
 - `top_changed_examples.json`: representative changed statements for this company
-- `visualizations/company_reranking.html`: company reranking visualizer
-- `visualizations/aggregate_plans.html`: aggregate plan drilldown for the company
-- `visualizations/psr_drilldown.html`: company PSR comparison page
+- `visualizations/README.md`: GitHub-friendly index for the saved visualizations
+- `visualizations/company_reranking.md`: GitHub-renderable company reranking summary
+- `visualizations/aggregate_plans.md`: GitHub-renderable aggregate-plan summary
+- `visualizations/company_reranking.html`: original company reranking visualizer
+- `visualizations/aggregate_plans.html`: original aggregate-plan drilldown
+- `visualizations/psr_drilldown.md`: GitHub-renderable PSR summary
+- `visualizations/psr_drilldown.html`: original company PSR comparison page
 - `images/timeline.png`: company timeline graphic referenced by the PSR drilldown
 
 ## Panel Context
