@@ -142,14 +142,17 @@ python3 -m functorflow_v3.basket_rocket_example_export \
   --reranking-dir ../BASKET/outputs/rocket_fullpanel_financial_real \
   --company-viz-dir ../BASKET/outputs/rocket_company_viz_financial_real \
   --psr-company-dir ../BASKET/outputs/psr_rocket_variant_comparison_20260322/companies \
+  --diffusion-dir ../brand_democritus_block_denoise_complete/outputs/adobe/temporal_denoiser/infer \
+  --radar-dir ../brand_democritus_block_denoise_complete/outputs/adobe/survival_radar \
   --output-dir examples/basket_rocket/adobe_financial_reranking \
   --force
 ```
 
 This keeps the GitHub-facing artifact small by exporting a company-level
 snapshot: sanitized extractor metadata, reranking summaries, representative
-changed statements, and a few HTML visualizers while excluding the raw PDFs,
-full JSONL panels, and bulky intermediate outputs.
+changed statements, GitHub-renderable visualization summaries, and selected
+diffusion/radar dashboards while excluding the raw PDFs, full JSONL panels,
+and bulky intermediate outputs.
 
 ## Install Matrix
 

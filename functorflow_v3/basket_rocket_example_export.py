@@ -171,6 +171,12 @@ def _filter_company_examples(
     return list(_sanitize_payload(matches))
 
 
+def _read_text(path: Path | None) -> str:
+    if path is None or not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
 def _build_readme(
     *,
     company: str,
@@ -180,6 +186,8 @@ def _build_readme(
     top_examples: list[dict[str, Any]],
     has_psr: bool,
     has_timeline: bool,
+    has_diffusion: bool,
+    has_radar: bool,
 ) -> str:
     aggregate_plan = dict(company_snapshot.get("aggregate_plan") or {})
     financial_summary = dict(company_snapshot.get("financial_summary") or {})
@@ -219,6 +227,12 @@ def _build_readme(
     if has_psr:
         lines.append("- `visualizations/psr_drilldown.md`: GitHub-renderable PSR summary")
         lines.append("- `visualizations/psr_drilldown.html`: original company PSR comparison page")
+    if has_diffusion:
+        lines.append("- `visualizations/diffusion_trajectory.md`: GitHub-renderable denoising trajectory summary")
+        lines.append("- `images/diffusion_dashboard.png`: temporal diffusion / denoising dashboard")
+    if has_radar:
+        lines.append("- `visualizations/radar_plot.md`: GitHub-renderable structural-risk radar summary")
+        lines.append("- `images/radar_dashboard.png`: structural-risk radar dashboard")
     if has_timeline:
         lines.append("- `images/timeline.png`: company timeline graphic referenced by the PSR drilldown")
 
@@ -375,7 +389,7 @@ def _build_psr_markdown(*, company: str, psr_html: str, timeline_included: bool)
     return "\n".join(lines)
 
 
-def _build_visualizations_readme(*, has_psr: bool) -> str:
+def _build_visualizations_readme(*, has_psr: bool, has_diffusion: bool, has_radar: bool) -> str:
     lines = [
         "# Visualization Views",
         "",
@@ -387,6 +401,10 @@ def _build_visualizations_readme(*, has_psr: bool) -> str:
         "- [Company reranking](company_reranking.md)",
         "- [Aggregate plans](aggregate_plans.md)",
     ]
+    if has_diffusion:
+        lines.append("- [Diffusion trajectory](diffusion_trajectory.md)")
+    if has_radar:
+        lines.append("- [Structural risk radar](radar_plot.md)")
     if has_psr:
         lines.append("- [PSR drilldown](psr_drilldown.md)")
     lines.extend(
@@ -404,6 +422,45 @@ def _build_visualizations_readme(*, has_psr: bool) -> str:
     return "\n".join(lines)
 
 
+def _build_diffusion_markdown(
+    *,
+    company: str,
+    summary_payload: dict[str, Any],
+    notes_text: str,
+) -> str:
+    lines = [
+        "# Diffusion Trajectory",
+        "",
+        f"- Company: {company.upper()}",
+        f"- Denoised blocks: {summary_payload.get('denoised_blocks') or 'n/a'}",
+        "",
+        "![Diffusion dashboard](../images/diffusion_dashboard.png)",
+    ]
+    if notes_text.strip():
+        lines.extend(["", "## Notes", "", _sanitize_string(notes_text)])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _build_radar_markdown(
+    *,
+    company: str,
+    summary_text: str,
+    notes_text: str,
+) -> str:
+    lines = [
+        "# Structural Risk Radar",
+        "",
+        f"- Company: {company.upper()}",
+        "",
+        "![Radar dashboard](../images/radar_dashboard.png)",
+    ]
+    if summary_text.strip():
+        lines.extend(["", "## Summary", "", _sanitize_string(summary_text)])
+    if notes_text.strip():
+        lines.extend(["", "## Notes", "", _sanitize_string(notes_text)])
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def export_basket_rocket_example(
     *,
     company: str,
@@ -413,6 +470,8 @@ def export_basket_rocket_example(
     output_dir: Path,
     force: bool = False,
     psr_company_dir: Path | None = None,
+    diffusion_dir: Path | None = None,
+    radar_dir: Path | None = None,
     top_examples_limit: int = 5,
 ) -> dict[str, Any]:
     """Export a compact public bundle from legacy BASKET/ROCKET company artifacts."""
@@ -423,6 +482,8 @@ def export_basket_rocket_example(
     company_viz_dir = company_viz_dir.resolve()
     output_dir = output_dir.resolve()
     psr_company_dir = psr_company_dir.resolve() if psr_company_dir else None
+    diffusion_dir = diffusion_dir.resolve() if diffusion_dir else None
+    radar_dir = radar_dir.resolve() if radar_dir else None
 
     extractor_summary_path = extractor_dir / "summary.json"
     extractor_manifest_path = extractor_dir / "plan_block_manifest.json"
@@ -491,6 +552,8 @@ def export_basket_rocket_example(
 
     psr_html_included = False
     timeline_included = False
+    diffusion_included = False
+    radar_included = False
     psr_markdown = ""
     if psr_company_dir:
         psr_html_path = psr_company_dir / f"{company_key}.html"
@@ -516,8 +579,45 @@ def export_basket_rocket_example(
         if psr_html_included:
             (visualizations_dir / "psr_drilldown.md").write_text(psr_markdown, encoding="utf-8")
 
+    if diffusion_dir:
+        diffusion_image_path = diffusion_dir / "temporal_company_diffusion_dashboard.png"
+        diffusion_summary_path = diffusion_dir / "summary.json"
+        diffusion_notes_path = diffusion_dir / "temporal_company_diffusion_viz_notes.md"
+        if diffusion_image_path.exists():
+            shutil.copy2(diffusion_image_path, images_dir / "diffusion_dashboard.png")
+            diffusion_included = True
+            diffusion_summary = dict(_load_json(diffusion_summary_path)) if diffusion_summary_path.exists() else {}
+            (visualizations_dir / "diffusion_trajectory.md").write_text(
+                _build_diffusion_markdown(
+                    company=company_key,
+                    summary_payload=diffusion_summary,
+                    notes_text=_read_text(diffusion_notes_path),
+                ),
+                encoding="utf-8",
+            )
+
+    if radar_dir:
+        radar_image_path = radar_dir / "company_survival_radar_dashboard.png"
+        radar_summary_path = radar_dir / "company_survival_summary.md"
+        radar_notes_path = radar_dir / "company_survival_radar_notes.md"
+        if radar_image_path.exists():
+            shutil.copy2(radar_image_path, images_dir / "radar_dashboard.png")
+            radar_included = True
+            (visualizations_dir / "radar_plot.md").write_text(
+                _build_radar_markdown(
+                    company=company_key,
+                    summary_text=_read_text(radar_summary_path),
+                    notes_text=_read_text(radar_notes_path),
+                ),
+                encoding="utf-8",
+            )
+
     (visualizations_dir / "README.md").write_text(
-        _build_visualizations_readme(has_psr=psr_html_included),
+        _build_visualizations_readme(
+            has_psr=psr_html_included,
+            has_diffusion=diffusion_included,
+            has_radar=radar_included,
+        ),
         encoding="utf-8",
     )
 
@@ -529,6 +629,8 @@ def export_basket_rocket_example(
         top_examples=top_examples,
         has_psr=psr_html_included,
         has_timeline=timeline_included,
+        has_diffusion=diffusion_included,
+        has_radar=radar_included,
     )
     (output_dir / "README.md").write_text(readme_text, encoding="utf-8")
 
@@ -561,8 +663,12 @@ def export_basket_rocket_example(
             "aggregate_plans.md",
             "aggregate_plans.html",
         ]
+        + (["diffusion_trajectory.md"] if diffusion_included else [])
+        + (["radar_plot.md"] if radar_included else [])
         + (["psr_drilldown.md", "psr_drilldown.html"] if psr_html_included else []),
-        "included_images": ["timeline.png"] if timeline_included else [],
+        "included_images": (["timeline.png"] if timeline_included else [])
+        + (["diffusion_dashboard.png"] if diffusion_included else [])
+        + (["radar_dashboard.png"] if radar_included else []),
     }
     _write_json(output_dir / "example_manifest.json", manifest)
     return manifest
@@ -579,6 +685,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--psr-company-dir",
         default="",
         help="Optional directory containing per-company PSR drilldowns and timeline images.",
+    )
+    parser.add_argument(
+        "--diffusion-dir",
+        default="",
+        help="Optional directory containing temporal denoiser inference visualizations.",
+    )
+    parser.add_argument(
+        "--radar-dir",
+        default="",
+        help="Optional directory containing structural-risk radar visualizations.",
     )
     parser.add_argument(
         "--top-examples-limit",
@@ -601,6 +717,8 @@ def main(argv: list[str] | None = None) -> None:
         output_dir=Path(args.output_dir),
         force=bool(args.force),
         psr_company_dir=Path(args.psr_company_dir) if str(args.psr_company_dir).strip() else None,
+        diffusion_dir=Path(args.diffusion_dir) if str(args.diffusion_dir).strip() else None,
+        radar_dir=Path(args.radar_dir) if str(args.radar_dir).strip() else None,
         top_examples_limit=int(args.top_examples_limit),
     )
     print(json.dumps(manifest, indent=2, sort_keys=True))

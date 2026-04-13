@@ -7,6 +7,8 @@ The original `.html` files are still included for local opening in a browser.
 
 - [Company reranking](company_reranking.md)
 - [Aggregate plans](aggregate_plans.md)
+- [Diffusion trajectory](diffusion_trajectory.md)
+- [Structural risk radar](radar_plot.md)
 - [PSR drilldown](psr_drilldown.md)
 
 ## Original HTML Files

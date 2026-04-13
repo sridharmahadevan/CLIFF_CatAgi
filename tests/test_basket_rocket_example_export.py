@@ -21,7 +21,9 @@ class BasketRocketExampleExportTests(unittest.TestCase):
             reranking_dir = root / "reranking"
             company_viz_dir = root / "viz"
             psr_company_dir = root / "psr"
-            for path in (extractor_dir, reranking_dir, company_viz_dir, psr_company_dir):
+            diffusion_dir = root / "diffusion"
+            radar_dir = root / "radar"
+            for path in (extractor_dir, reranking_dir, company_viz_dir, psr_company_dir, diffusion_dir, radar_dir):
                 path.mkdir(parents=True)
 
             (extractor_dir / "summary.json").write_text(
@@ -149,6 +151,24 @@ class BasketRocketExampleExportTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (psr_company_dir / "adobe_timeline.png").write_bytes(b"fake-png")
+            (diffusion_dir / "summary.json").write_text(
+                json.dumps({"denoised_blocks": 23, "checkpoint": str(root / "private" / "model.pt")}),
+                encoding="utf-8",
+            )
+            (diffusion_dir / "temporal_company_diffusion_viz_notes.md").write_text(
+                "# Notes\n\n- 2007 had the largest denoiser shift.\n",
+                encoding="utf-8",
+            )
+            (diffusion_dir / "temporal_company_diffusion_dashboard.png").write_bytes(b"fake-png")
+            (radar_dir / "company_survival_summary.md").write_text(
+                "# Radar Summary\n\n- Peak year: 2003\n",
+                encoding="utf-8",
+            )
+            (radar_dir / "company_survival_radar_notes.md").write_text(
+                "# Radar Notes\n\n- 2016 was the lowest-indication year.\n",
+                encoding="utf-8",
+            )
+            (radar_dir / "company_survival_radar_dashboard.png").write_bytes(b"fake-png")
 
             output_dir = root / "examples" / "basket_rocket" / "adobe_financial_reranking"
             manifest = export_basket_rocket_example(
@@ -159,15 +179,21 @@ class BasketRocketExampleExportTests(unittest.TestCase):
                 output_dir=output_dir,
                 force=True,
                 psr_company_dir=psr_company_dir,
+                diffusion_dir=diffusion_dir,
+                radar_dir=radar_dir,
             )
 
             self.assertEqual(manifest["route"], "basket_rocket_sec")
             self.assertEqual(manifest["company"], "adobe")
             self.assertEqual(manifest["company_changed_count"], 281)
             self.assertIn("company_reranking.md", manifest["included_visualizations"])
+            self.assertIn("diffusion_trajectory.md", manifest["included_visualizations"])
+            self.assertIn("radar_plot.md", manifest["included_visualizations"])
             self.assertIn("psr_drilldown.html", manifest["included_visualizations"])
             self.assertIn("psr_drilldown.md", manifest["included_visualizations"])
             self.assertIn("timeline.png", manifest["included_images"])
+            self.assertIn("diffusion_dashboard.png", manifest["included_images"])
+            self.assertIn("radar_dashboard.png", manifest["included_images"])
 
             readme_text = (output_dir / "README.md").read_text(encoding="utf-8")
             self.assertIn("BASKET/ROCKET Example Bundle", readme_text)
@@ -187,6 +213,8 @@ class BasketRocketExampleExportTests(unittest.TestCase):
             company_md = (output_dir / "visualizations" / "company_reranking.md").read_text(encoding="utf-8")
             aggregate_html = (output_dir / "visualizations" / "aggregate_plans.html").read_text(encoding="utf-8")
             aggregate_md = (output_dir / "visualizations" / "aggregate_plans.md").read_text(encoding="utf-8")
+            diffusion_md = (output_dir / "visualizations" / "diffusion_trajectory.md").read_text(encoding="utf-8")
+            radar_md = (output_dir / "visualizations" / "radar_plot.md").read_text(encoding="utf-8")
             psr_html = (output_dir / "visualizations" / "psr_drilldown.html").read_text(encoding="utf-8")
             psr_md = (output_dir / "visualizations" / "psr_drilldown.md").read_text(encoding="utf-8")
             viz_readme = (output_dir / "visualizations" / "README.md").read_text(encoding="utf-8")
@@ -194,10 +222,16 @@ class BasketRocketExampleExportTests(unittest.TestCase):
             self.assertIn("# ROCKET Reranking Visualizer", company_md)
             self.assertIn('href="company_reranking.html"', aggregate_html)
             self.assertIn("# ROCKET Aggregate Plans", aggregate_md)
+            self.assertIn("![Diffusion dashboard](../images/diffusion_dashboard.png)", diffusion_md)
+            self.assertIn("![Radar dashboard](../images/radar_dashboard.png)", radar_md)
             self.assertIn("../images/timeline.png", psr_html)
             self.assertIn("![Timeline](../images/timeline.png)", psr_md)
             self.assertIn("[PSR drilldown](psr_drilldown.md)", viz_readme)
+            self.assertIn("[Diffusion trajectory](diffusion_trajectory.md)", viz_readme)
+            self.assertIn("[Structural risk radar](radar_plot.md)", viz_readme)
             self.assertTrue((output_dir / "images" / "timeline.png").exists())
+            self.assertTrue((output_dir / "images" / "diffusion_dashboard.png").exists())
+            self.assertTrue((output_dir / "images" / "radar_dashboard.png").exists())
 
 
 if __name__ == "__main__":

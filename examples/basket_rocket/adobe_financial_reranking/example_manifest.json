@@ -21,7 +21,9 @@
   ],
   "images_dir": "images",
   "included_images": [
-    "timeline.png"
+    "timeline.png",
+    "diffusion_dashboard.png",
+    "radar_dashboard.png"
   ],
   "included_visualizations": [
     "README.md",
@@ -29,6 +31,8 @@
     "company_reranking.html",
     "aggregate_plans.md",
     "aggregate_plans.html",
+    "diffusion_trajectory.md",
+    "radar_plot.md",
     "psr_drilldown.md",
     "psr_drilldown.html"
   ],

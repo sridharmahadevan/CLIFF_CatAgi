@@ -29,6 +29,10 @@ and large intermediate state were intentionally excluded.
 - `visualizations/aggregate_plans.html`: original aggregate-plan drilldown
 - `visualizations/psr_drilldown.md`: GitHub-renderable PSR summary
 - `visualizations/psr_drilldown.html`: original company PSR comparison page
+- `visualizations/diffusion_trajectory.md`: GitHub-renderable denoising trajectory summary
+- `images/diffusion_dashboard.png`: temporal diffusion / denoising dashboard
+- `visualizations/radar_plot.md`: GitHub-renderable structural-risk radar summary
+- `images/radar_dashboard.png`: structural-risk radar dashboard
 - `images/timeline.png`: company timeline graphic referenced by the PSR drilldown
 
 ## Panel Context
