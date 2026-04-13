@@ -1,0 +1,30 @@
+{
+  "base_query": "Analyze 10 recent studies of declining fish population due to ocean temperature warming and synthesize their joint support",
+  "clarification_request": null,
+  "direct_document_directories": [],
+  "direct_document_paths": [],
+  "direct_document_urls": [],
+  "keyword_tokens": [
+    "declining",
+    "fish",
+    "population",
+    "due",
+    "ocean",
+    "temperature",
+    "warming"
+  ],
+  "normalized_query": "declining fish population due ocean temperature warming",
+  "query": "Analyze 10 recent studies of declining fish population due to ocean temperature warming and synthesize their joint support",
+  "rejected_topics": [],
+  "requested_forms": [],
+  "retrieval_query": "declining fish population due ocean temperature warming",
+  "retrieval_refinement": "",
+  "sec_cohort_mode": "ranked",
+  "sec_company_targets": [
+    [
+      "declining fish population due ocean temperature warming"
+    ]
+  ],
+  "selected_topics": [],
+  "target_documents": 10
+}

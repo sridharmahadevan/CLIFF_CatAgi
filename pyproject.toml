@@ -53,6 +53,7 @@ docs = []
 
 [project.scripts]
 cliff = "functorflow_v3.cliff:main"
+cliff-export-democritus-example = "functorflow_v3.democritus_example_export:main"
 
 [tool.setuptools]
 packages = ["functorflow_v3"]

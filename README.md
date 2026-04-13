@@ -115,6 +115,24 @@ Run CLIFF:
 python3 -m functorflow_v3.cliff --outdir /tmp/cliff-session
 ```
 
+Export a compact public Democritus example bundle from a saved run:
+
+```bash
+python3 -m functorflow_v3.democritus_example_export \
+  --run-dir /path/to/democritus \
+  --output-dir examples/democritus/my_saved_run \
+  --document-ranks 2,3,4,5,6 \
+  --copy-manifold-images 3 \
+  --force
+```
+
+This keeps the GitHub-facing artifact small by exporting query metadata,
+selected-document summaries, stage timing summaries, and a few representative
+images while excluding the heavyweight PDFs, sweep outputs, PKL state, SQLite
+bundles, and large report assets from the original run. Use
+`--document-ranks` when you want a curated public subset rather than the full
+retrieval set from the saved run.
+
 ## Install Matrix
 
 Use the same base Python environment for every setup:

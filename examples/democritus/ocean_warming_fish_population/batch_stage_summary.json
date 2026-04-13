@@ -1,0 +1,122 @@
+[
+  {
+    "agent_name": "causal_statement_agent",
+    "avg_seconds": 235.435,
+    "completed_records": 5,
+    "document_count": 5,
+    "error_records": 0,
+    "max_seconds": 251.048,
+    "ok_records": 5,
+    "total_seconds": 1177.176
+  },
+  {
+    "agent_name": "causal_question_agent",
+    "avg_seconds": 108.261,
+    "completed_records": 5,
+    "document_count": 5,
+    "error_records": 0,
+    "max_seconds": 112.92,
+    "ok_records": 5,
+    "total_seconds": 541.306
+  },
+  {
+    "agent_name": "topic_graph_agent",
+    "avg_seconds": 51.901,
+    "completed_records": 5,
+    "document_count": 5,
+    "error_records": 0,
+    "max_seconds": 62.362,
+    "ok_records": 5,
+    "total_seconds": 259.505
+  },
+  {
+    "agent_name": "credibility_bundle_agent",
+    "avg_seconds": 13.963,
+    "completed_records": 5,
+    "document_count": 5,
+    "error_records": 0,
+    "max_seconds": 14.32,
+    "ok_records": 5,
+    "total_seconds": 69.815
+  },
+  {
+    "agent_name": "manifold_builder_agent",
+    "avg_seconds": 13.093,
+    "completed_records": 5,
+    "document_count": 5,
+    "error_records": 0,
+    "max_seconds": 15.29,
+    "ok_records": 5,
+    "total_seconds": 65.464
+  },
+  {
+    "agent_name": "root_topic_discovery_agent",
+    "avg_seconds": 11.916,
+    "completed_records": 5,
+    "document_count": 5,
+    "error_records": 0,
+    "max_seconds": 23.432,
+    "ok_records": 5,
+    "total_seconds": 59.581
+  },
+  {
+    "agent_name": "lcm_scoring_agent",
+    "avg_seconds": 3.613,
+    "completed_records": 5,
+    "document_count": 5,
+    "error_records": 0,
+    "max_seconds": 4.058,
+    "ok_records": 5,
+    "total_seconds": 18.067
+  },
+  {
+    "agent_name": "lcm_sweep_agent",
+    "avg_seconds": 0.974,
+    "completed_records": 5,
+    "document_count": 5,
+    "error_records": 0,
+    "max_seconds": 1.452,
+    "ok_records": 5,
+    "total_seconds": 4.868
+  },
+  {
+    "agent_name": "manifold_visualization_agent",
+    "avg_seconds": 0.386,
+    "completed_records": 5,
+    "document_count": 5,
+    "error_records": 0,
+    "max_seconds": 0.472,
+    "ok_records": 5,
+    "total_seconds": 1.931
+  },
+  {
+    "agent_name": "triple_extraction_agent",
+    "avg_seconds": 0.347,
+    "completed_records": 5,
+    "document_count": 5,
+    "error_records": 0,
+    "max_seconds": 0.471,
+    "ok_records": 5,
+    "total_seconds": 1.735
+  },
+  {
+    "agent_name": "topos_slice_agent",
+    "avg_seconds": 0.144,
+    "completed_records": 5,
+    "document_count": 5,
+    "error_records": 0,
+    "max_seconds": 0.568,
+    "ok_records": 5,
+    "total_seconds": 0.722
+  },
+  {
+    "agent_name": "document_intake_agent",
+    "avg_seconds": 0.003,
+    "completed_records": 5,
+    "document_count": 5,
+    "error_records": 0,
+    "max_seconds": 0.005,
+    "ok_records": 5,
+    "total_seconds": 0.014
+  }
+]

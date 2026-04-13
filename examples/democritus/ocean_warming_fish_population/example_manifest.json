@@ -1,0 +1,28 @@
+{
+  "bundle_version": 1,
+  "document_ranks": [
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "documents_dir": "documents",
+  "execution_mode": "deep",
+  "files": [
+    "README.md",
+    "query_plan.json",
+    "selected_documents.json",
+    "batch_stage_summary.json",
+    "example_manifest.json"
+  ],
+  "images_dir": "images",
+  "included_image_count": 3,
+  "query": "Analyze 10 recent studies of declining fish population due to ocean temperature warming and synthesize their joint support",
+  "retrieval_backend": "scholarly",
+  "retrieval_query": "declining fish population due ocean temperature warming",
+  "route": "democritus",
+  "selected_document_count": 5,
+  "source_selected_document_count": 11,
+  "target_documents": 10
+}

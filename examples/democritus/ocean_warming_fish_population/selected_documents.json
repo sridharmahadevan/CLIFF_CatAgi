@@ -1,0 +1,130 @@
+[
+  {
+    "abstract": "Rapid warming in the Gulf of Maine (GoM) is contributing to widespread shifts in the abundance, distribution, and quality of marine prey communities. These shifts cascade up the food web and will ultimately affect the fitness and viability of seabirds, the impacts of which are expected to be especially pronounced at the southern edge of their ranges. Using integrated population models, we analyzed 26\u2009years (1998-2023) of demographic data for Atlantic Puffins (Fratercula arctica; ATPU) and Razorbills (Alca torda; RAZO) nesting at the southern edge of their breeding range in the GoM. Additionally, we examined the environmental and demographic drivers of demographic rates and how these relationships may have changed over time. We found that key demographic rates in both species are linked to warming-related stressors. In ATPU, adult survival declined with increasing summer length, and productivity was negatively associated with winter sea surface temperature anomalies. RAZO first-year survival was positively associated with chick wing chord growth, which itself declined over time with a parallel increase in the proportion of lower-quality prey in the diet. Summer length had a strong negative effect on productivity in this species. Finally, we found no evidence indicating that these climate-demography relationships were changing over time, suggesting current stationarity in these species' responses to ocean warming. Our findings suggest that specific warming-related factors, such as summer length and winter sea surface temperature anomalies have negatively impacted ATPU and RAZO demographic rates. Given the apparent stationarity of the identified climate-demography relationships over the study period, these relationships may be expected to persist under continued warming in the GoM. For cold-adapted species like ATPU and RAZO that are already living close to their thermal limits in the GoM, these insights are especially urgent.",
+    "download_url": "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_pdf/f0/cf/GCB-32-e70769.PMC12954657.pdf",
+    "evidence": [
+      "title_anchor_pair",
+      "title:ocean",
+      "title:warming",
+      "text:temperature",
+      "ocean",
+      "warming",
+      "temperature",
+      "generic_text:population"
+    ],
+    "identifier": "PMC12954657",
+    "manifold_image_path": "images/01_signals-from-the-southern-edge-demographic-effects-of-ocean-warm_manifold_2d.png",
+    "rank": 1,
+    "retrieval_backend": "europe_pmc",
+    "run_name": "0002_0002_signals_from_the_southern_edge_demographic_effects_of_ocean_warming_on_two__5b9e3dd4c6aa",
+    "score": 10.65,
+    "summary_path": "documents/01_signals-from-the-southern-edge-demographic-effects-of-ocean-warm.md",
+    "title": "Signals From the Southern Edge: Demographic Effects of Ocean Warming on Two Cold-Adapted Seabird Species in the Gulf of Maine.",
+    "top_tier1_claims": [
+      "Ocean warming in the Gulf of Maine causes a shift from high-energy cold-water fish to lower-quality warm-water prey species.",
+      "Ocean warming in the Gulf of Maine causes a shift from high-energy cold-water prey species to lower-quality warm-water prey species, leading to nutritional stress for Atlantic P...",
+      "Ocean warming in the Gulf of Maine causes a regime shift from cold-water to warm-water prey species."
+    ],
+    "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC12954657/",
+    "year": "2026"
+  },
+  {
+    "abstract": "Although the role of marine macrofauna in the ocean carbon cycle is increasingly understood, the cumulative impacts of fisheries and climate change on this pathway remain overlooked. Here, using a marine ecosystem model, we estimate that each degree of warming reduces macrofauna biomass and carbon export by 4.2% and 2.46%, respectively. Under a high emission scenario (SSP 5-8.5), this translates to a 13.5%\u2009\u00b1\u20096.6% decline in export by 2100, relative to the 1990s. Fishing further amplifies this reduction by up to 56.7%\u2009\u00b1\u200916.3%, creating a sequestration deficit of 14.6\u2009\u00b1\u200910.3 GtC by 2100. On average, a 1% biomass loss from fishing results in a 0.8% decline in carbon export. However, sequestration durability (~600 years) remains unaffected. While measures restoring commercial macrofaunal biomass could yield carbon benefits comparable to mangrove restoration, multiple uncertainties limit their inclusion in the Nature-based Climate Solution portfolio, highlighting the need for further research.",
+    "download_url": "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_pdf/f9/76/41467_2025_Article_64576.PMC12559412.pdf",
+    "evidence": [
+      "anchor_pair",
+      "text:ocean",
+      "text:warming",
+      "ocean",
+      "warming"
+    ],
+    "identifier": "PMC12559412",
+    "manifold_image_path": "images/02_the-combined-impact-of-fisheries-and-climate-change-on-future_manifold_2d.png",
+    "rank": 2,
+    "retrieval_backend": "europe_pmc",
+    "run_name": "0003_0003_the_combined_impact_of_fisheries_and_climate_change_on_future_carbon_seques_c1a0ac32538e",
+    "score": 2.45,
+    "summary_path": "documents/02_the-combined-impact-of-fisheries-and-climate-change-on-future.md",
+    "title": "The combined impact of fisheries and climate change on future carbon sequestration by oceanic macrofauna.",
+    "top_tier1_claims": [
+      "Rising ocean temperature reduces marine macrofauna biomass by altering metabolic rates and size structure.",
+      "This reduction in macrofauna biomass leads to decreased carbon export in ocean ecosystems.",
+      "Commercial fishing causes the removal of larger macrofauna, which reduces macrofauna biomass and carcass production."
+    ],
+    "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC12559412/",
+    "year": "2025"
+  },
+  {
+    "abstract": "Climate change is accelerating at unprecedented rates, with disproportionate impacts on marine ecosystems. We examined the distributional responses of chum salmon (Oncorhynchus keta), a keystone species, to the recent climatic changes in the North Pacific from 1998 to 2022. We applied a multi-model ensemble approach to examine the spatial and temporal distribution patterns of suitable habitats throughout their seasonal migratory grounds and relate them to recent declines of Japanese chum salmon stocks. Our modelling identified temporal shifts in the locations of feeding and overwintering grounds, driven by increasing ocean temperatures, deteriorating forage conditions, and strengthening wind and marine heatwave intensity. During their feeding migration, the suitable chum habitat in the Bering Sea was reduced but increased in the Arctic. Overwintering habitat patterns further captured an overall decline in the trailing edges of their distribution, accompanied by habitat shifts towards the central North Pacific. Periods of marine heatwaves further coincided with sizable habitat losses. Such habitat displacements potentially affect the Japanese chum salmon stocks, shown by substantial habitat reductions in the Okhotsk and central Bering seas. These findings highlight the exacerbating exposure and vulnerability of the chum salmon populations to recent climatic and productivity changes throughout their marine life history, with concomitant repercussions on their production dynamics and provision of ecosystem services. Thus, requiring climate-adaptive measures such as the readjustment of fishing seasons and quotas according to the changing salmon stocks and habitat conditions, and the improvement of current hatcheries practices to manage and conserve salmon resources.",
+    "download_url": "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_pdf/df/b4/41598_2025_Article_26397.PMC12675643.pdf",
+    "evidence": [
+      "text_phrase:ocean temperature",
+      "text:ocean",
+      "ocean"
+    ],
+    "identifier": "PMC12675643",
+    "manifold_image_path": "images/03_climate-driven-shifts-in-marine-habitat-explain-recent-declines_manifold_2d.png",
+    "rank": 3,
+    "retrieval_backend": "europe_pmc",
+    "run_name": "0004_0004_climate-driven_shifts_in_marine_habitat_explain_recent_declines_of_japanese_0d476b069065",
+    "score": 0.92625,
+    "summary_path": "documents/03_climate-driven-shifts-in-marine-habitat-explain-recent-declines.md",
+    "title": "Climate-driven shifts in marine habitat explain recent declines of Japanese Chum salmon.",
+    "top_tier1_claims": [
+      "Overfishing reduces the population size of Japanese chum salmon, which decreases their resilience to climate-driven habitat shifts.",
+      "Overfishing affects the ability of salmon stocks to recover from declines caused by altered feeding and overwintering habitats due to rising ocean temperatures and marine heatwa...",
+      "Overfishing reduces the abundance of returning Japanese chum salmon by depleting mature spawning individuals, which weakens the natural population's reproductive capacity."
+    ],
+    "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC12675643/",
+    "year": "2025"
+  },
+  {
+    "abstract": "Climate change is playing a major role in the current global biodiversity crisis. However, despite climate change being most pronounced in the Arctic, its impacts on biodiversity in this region remains largely unknown. Here, we combined three decades of abundance data from various animal groups (from zooplankton to megafauna) and regions in the European Arctic and Greenland to assess recent changes in biodiversity within Arctic coastal communities. Our results support the \"borealization\" hypothesis in all regions and provide evidence that marine ecosystems in the North Atlantic Arctic are shifting toward a boreal (i.e. cold temperate) state. Arctic endemic species are generally declining in abundance, while boreal species are increasing. These changes in abundance are associated with an average increase in biodiversity (e.g. species richness), although there are important variations among animal groups. This increase might be transient and the long-term implications of the ongoing changes in Arctic coastal biodiversity on ecosystem functioning and services remain uncertain.",
+    "download_url": "https://ftp.ncbi.nlm.nih.gov/pub/pmc/oa_pdf/2c/2a/pgag004.PMC12888812.pdf",
+    "evidence": [
+      "text:declining",
+      "declining"
+    ],
+    "identifier": "PMC12888812",
+    "manifold_image_path": null,
+    "rank": 4,
+    "retrieval_backend": "europe_pmc",
+    "run_name": "0005_0005_biodiversity_changes_in_arctic_coastal_ecosystems_under_borealization_3d8666e201e7",
+    "score": 0.27625,
+    "summary_path": "documents/04_biodiversity-changes-in-arctic-coastal-ecosystems-under-borealiz.md",
+    "title": "Biodiversity changes in Arctic coastal ecosystems under borealization.",
+    "top_tier1_claims": [
+      "Climate warming causes the northward expansion of boreal species in Arctic coastal ecosystems studied by the University Centre in Svalbard.",
+      "The expansion of boreal species causes shifts in species composition that alter Arctic coastal biodiversity.",
+      "Climate warming increases the northward expansion of boreal species into Arctic coastal ecosystems by creating favorable temperature conditions."
+    ],
+    "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC12888812/",
+    "year": "2026"
+  },
+  {
+    "abstract": "<jats:title>Abstract</jats:title><jats:p>Climate change is associated with altered oceanographic conditions that tend to shift the geographical distributions of fish. To assess the impact of climate change on fisheries, one must go beyond projections of catch potential and understand how fishers respond to moving target species. Many previous studies have explicitly or implicitly assumed that fishers follow fish that are displaced by climate warming. Here, we evaluate this assumption by analyzing a long-term, large-scale yet high-resolution dataset combined with a detailed oceanographic model. Our study case is the Atlantic cod (<jats:italic>Gadhus morhua</jats:italic>) fishery in Norway, one of the largest whitefish fisheries in the world, with little technological or judicial constraints on the potential spatial response of fishers. An oceanographic model is used to predict the areas that have been suitable for Atlantic cod spawning over the two last decades. We compare whether these areas overlap with actually observed fishing locations. While the areas that are suitable for spawning clearly predict how much fish are caught per trip, the suitability of an area does not predict how many vessels fish in a given area at a given point in time. In contrast, the number of vessels in the previous week and the previous year explain the current number of vessels in that area. Hence, future projections of climate change effects should account for the rich and nuanced behavioral responses of humans to project climate change effects on fisheries.</jats:p>",
+    "download_url": "https://www.nature.com/articles/s44183-024-00063-9.pdf",
+    "evidence": [
+      "title_anchor_pair",
+      "title:fish",
+      "title:warming",
+      "fish",
+      "warming"
+    ],
+    "identifier": "10.1038/s44183-024-00063-9",
+    "manifold_image_path": null,
+    "rank": 5,
+    "retrieval_backend": "crossref",
+    "run_name": "0006_0006_do_fishers_follow_fish_displaced_by_climate_warming_f1c83a1390d8",
+    "score": 9.703999999999999,
+    "summary_path": "documents/05_do-fishers-follow-fish-displaced-by-climate-warming.md",
+    "title": "Do fishers follow fish displaced by climate warming?",
+    "top_tier1_claims": [
+      "Climate warming causes altered ocean temperature and salinity, which leads to shifted Atlantic cod spawning suitability areas.",
+      "Climate warming causes shifts in cod spawning habitats, which increases catch potential in newly suitable areas.",
+      "Climate warming causes shifts in cod spawning suitability areas, which increases catch per trip in these newly suitable locations."
+    ],
+    "url": "https://doi.org/10.1038/s44183-024-00063-9",
+    "year": "2024"
+  }
+]
