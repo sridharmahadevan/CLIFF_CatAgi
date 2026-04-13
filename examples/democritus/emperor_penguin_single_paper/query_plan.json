@@ -1,0 +1,27 @@
+{
+  "direct_document_directories": [],
+  "direct_document_paths": [
+    "WaPo_EmperorPenguin.pdf"
+  ],
+  "direct_document_urls": [],
+  "keyword_tokens": [
+    "pdf",
+    "users",
+    "sridharmahadevan",
+    "desktop",
+    "wapo",
+    "emperorpenguin",
+    "pdf"
+  ],
+  "normalized_query": "pdf users sridharmahadevan desktop wapo emperorpenguin pdf",
+  "query": "Analyze the PDF article at WaPo_EmperorPenguin.pdf",
+  "requested_forms": [],
+  "retrieval_query": "pdf users sridharmahadevan desktop wapo emperorpenguin pdf",
+  "sec_cohort_mode": "ranked",
+  "sec_company_targets": [
+    [
+      "pdf users sridharmahadevan desktop wapo emperorpenguin pdf"
+    ]
+  ],
+  "target_documents": 1
+}

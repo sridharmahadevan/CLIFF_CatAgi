@@ -1,0 +1,92 @@
+[
+  {
+    "agent_name": "causal_statement_agent",
+    "avg_seconds": 327.766,
+    "completed_records": 1,
+    "document_count": 1,
+    "error_records": 0,
+    "max_seconds": 327.766,
+    "ok_records": 1,
+    "total_seconds": 327.766
+  },
+  {
+    "agent_name": "causal_question_agent",
+    "avg_seconds": 171.118,
+    "completed_records": 1,
+    "document_count": 1,
+    "error_records": 0,
+    "max_seconds": 171.118,
+    "ok_records": 1,
+    "total_seconds": 171.118
+  },
+  {
+    "agent_name": "topic_graph_agent",
+    "avg_seconds": 56.713,
+    "completed_records": 1,
+    "document_count": 1,
+    "error_records": 0,
+    "max_seconds": 56.713,
+    "ok_records": 1,
+    "total_seconds": 56.713
+  },
+  {
+    "agent_name": "root_topic_discovery_agent",
+    "avg_seconds": 23.699,
+    "completed_records": 1,
+    "document_count": 1,
+    "error_records": 0,
+    "max_seconds": 23.699,
+    "ok_records": 1,
+    "total_seconds": 23.699
+  },
+  {
+    "agent_name": "manifold_builder_agent",
+    "avg_seconds": 19.905,
+    "completed_records": 1,
+    "document_count": 1,
+    "error_records": 0,
+    "max_seconds": 19.905,
+    "ok_records": 1,
+    "total_seconds": 19.905
+  },
+  {
+    "agent_name": "manifold_visualization_agent",
+    "avg_seconds": 1.113,
+    "completed_records": 1,
+    "document_count": 1,
+    "error_records": 0,
+    "max_seconds": 1.113,
+    "ok_records": 1,
+    "total_seconds": 1.113
+  },
+  {
+    "agent_name": "topos_slice_agent",
+    "avg_seconds": 0.887,
+    "completed_records": 1,
+    "document_count": 1,
+    "error_records": 0,
+    "max_seconds": 0.887,
+    "ok_records": 1,
+    "total_seconds": 0.887
+  },
+  {
+    "agent_name": "triple_extraction_agent",
+    "avg_seconds": 0.247,
+    "completed_records": 1,
+    "document_count": 1,
+    "error_records": 0,
+    "max_seconds": 0.247,
+    "ok_records": 1,
+    "total_seconds": 0.247
+  },
+  {
+    "agent_name": "document_intake_agent",
+    "avg_seconds": 0.001,
+    "completed_records": 1,
+    "document_count": 1,
+    "error_records": 0,
+    "max_seconds": 0.001,
+    "ok_records": 1,
+    "total_seconds": 0.001
+  }
+]

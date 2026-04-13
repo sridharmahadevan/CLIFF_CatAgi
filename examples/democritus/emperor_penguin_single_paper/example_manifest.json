@@ -1,0 +1,22 @@
+{
+  "bundle_version": 1,
+  "document_ranks": [],
+  "documents_dir": "documents",
+  "execution_mode": "quick",
+  "files": [
+    "README.md",
+    "query_plan.json",
+    "selected_documents.json",
+    "batch_stage_summary.json",
+    "example_manifest.json"
+  ],
+  "images_dir": "images",
+  "included_image_count": 1,
+  "query": "Analyze the PDF article at WaPo_EmperorPenguin.pdf",
+  "retrieval_backend": "direct_file",
+  "retrieval_query": "pdf users sridharmahadevan desktop wapo emperorpenguin pdf",
+  "route": "democritus",
+  "selected_document_count": 1,
+  "source_selected_document_count": 1,
+  "target_documents": 1
+}

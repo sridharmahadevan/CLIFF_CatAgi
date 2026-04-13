@@ -1,0 +1,33 @@
+[
+  {
+    "abstract": "",
+    "download_url": "",
+    "evidence": [
+      "direct_file"
+    ],
+    "identifier": "WaPo_EmperorPenguin.pdf",
+    "manifold_image_path": "images/01_wapo-emperorpenguin_manifold_2d.png",
+    "rank": 1,
+    "retrieval_backend": "direct_file",
+    "root_topics": [
+      "Population decline in emperor penguins and fur seals",
+      "Sea ice loss and breeding failure",
+      "Sea ice loss and ecosystem disruption",
+      "Antarctic fur seal population decline",
+      "Antarctic sea ice and global cooling",
+      "Emperor penguin and fur seal vulnerability"
+    ],
+    "run_name": "0001_0001_wapo_emperorpenguin_e7ddb6675702",
+    "score": 1000.0,
+    "summary_path": "documents/01_wapo-emperorpenguin.md",
+    "title": "WaPo EmperorPenguin",
+    "top_tier1_claims": [
+      "Rising ocean temperatures lead to krill moving to deeper waters, which reduces the availability of food for Antarctic fur seals.",
+      "Loss of coastal sea ice reduces the availability of stable breeding platforms for emperor penguins, which leads to breeding failure.",
+      "Rising ocean temperatures cause krill to move to deeper waters, which reduces the availability of food for Antarctic fur seals."
+    ],
+    "triple_count": 358,
+    "url": "",
+    "year": ""
+  }
+]
