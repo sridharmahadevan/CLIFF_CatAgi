@@ -2531,15 +2531,43 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
             self.assertEqual(payload["query_focus_terms"], ["minimum", "wage"])
             self.assertIn("drift_metrics", payload)
             self.assertEqual(payload["drift_metrics"]["suspicious_topic_count"], 0)
+            self.assertIn("decision_state", payload)
+            self.assertGreater(payload["decision_state"]["checkpoint_value"], 0.55)
+            self.assertEqual(payload["decision_state"]["recommended_action"], "continue")
+            self.assertEqual(payload["recommended_next_action"], "continue")
             checkpoint_html = result.checkpoint_dashboard_path.read_text(encoding="utf-8")
             alpha_pdf_uri = (outdir / "acquired_pdfs" / "alpha_minimum_wage.pdf").resolve().as_uri()
             self.assertIn('class="doc-title"', checkpoint_html)
             self.assertIn("Inspect PDF", checkpoint_html)
             self.assertIn(alpha_pdf_uri, checkpoint_html)
             self.assertIn("Atlas Drift Signal", checkpoint_html)
+            self.assertIn("Decision State", checkpoint_html)
             summary = json.loads((outdir / "query_run_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["execution_mode"], "interactive")
             self.assertEqual(summary["checkpoint_manifest_path"], str(result.checkpoint_manifest_path))
+
+    def test_checkpoint_decision_state_recommends_narrow_retrieval_when_topics_are_diffuse(self) -> None:
+        decision_state = democritus_query_agentic_module.compute_checkpoint_decision_state(
+            drift_metrics={
+                "total_topic_count": 4,
+                "aligned_topic_ratio": 0.65,
+                "suspicious_topic_count": 1,
+                "synthesis_readiness_proxy": 0.55,
+            },
+            top_topics=(
+                {"topic": "air conditioning adoption", "document_count": 1, "aliases": ["air conditioning adoption"]},
+                {"topic": "household retrofit incentives", "document_count": 1, "aliases": ["household retrofit incentives"]},
+                {"topic": "climate adaptation", "document_count": 2, "aliases": ["climate adaptation"]},
+            ),
+            documents_payload=(
+                {"topics": ["air conditioning adoption"]},
+                {"topics": ["household retrofit incentives"]},
+                {"topics": ["climate adaptation"]},
+            ),
+        )
+
+        self.assertLess(decision_state["checkpoint_value"], 0.55)
+        self.assertEqual(decision_state["recommended_action"], "narrow_retrieval")
 
     def test_topic_alignment_diagnostics_flags_weakly_aligned_topics(self) -> None:
         diagnostics, payload = democritus_query_agentic_module._topic_alignment_diagnostics(

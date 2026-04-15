@@ -246,10 +246,152 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             self.assertIn("started_at_local", snapshot)
             self.assertIn("timing", snapshot)
             self.assertIn("slowest_stages", snapshot)
+            self.assertIn("decision_state", snapshot)
             self.assertTrue(snapshot["timing"]["eta_ready"])
             self.assertGreater(snapshot["timing"]["remaining_work_seconds_estimate"], 0.0)
             self.assertGreater(snapshot["timing"]["eta_seconds"], 0.0)
             self.assertEqual(snapshot["slowest_stages"][0]["agent_name"], "causal_question_agent")
+
+    def test_telemetry_snapshot_computes_decision_state_from_corpus_progress_and_token_mix(self) -> None:
+        class FakeRunner:
+            def _execute_agent(self, agent_name: str, frontier_index: int):
+                raise NotImplementedError
+
+        class FakeBatchRunner(DemocritusBatchAgenticRunner):
+            def _discover_documents(self):
+                return (
+                    DemocritusBatchDocument(
+                        index=1,
+                        pdf_path=Path("/tmp/alpha.pdf"),
+                        run_name="run_alpha",
+                        outdir=Path("/tmp/run_alpha"),
+                        runner=FakeRunner(),
+                        plan=((SimpleNamespace(name="causal_statement_agent"),),),
+                    ),
+                    DemocritusBatchDocument(
+                        index=2,
+                        pdf_path=Path("/tmp/beta.pdf"),
+                        run_name="run_beta",
+                        outdir=Path("/tmp/run_beta"),
+                        runner=FakeRunner(),
+                        plan=((SimpleNamespace(name="causal_statement_agent"),),),
+                    ),
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "runs"
+            runner = FakeBatchRunner(
+                DemocritusBatchConfig(
+                    pdf_dir=Path(tmpdir),
+                    outdir=outdir,
+                    max_workers=2,
+                    dry_run=False,
+                )
+            )
+            corpus_dir = outdir / "corpus_synthesis"
+            corpus_dir.mkdir(parents=True, exist_ok=True)
+            summary_path = corpus_dir / "democritus_corpus_synthesis.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "n_documents": 1,
+                        "support_summary": {
+                            "strong_support_count": 1,
+                            "provisional_support_count": 1,
+                            "diagnostic_support_count": 0,
+                            "disagreement_count": 0,
+                        },
+                        "topic_partition_summary": {
+                            "partition_count": 2,
+                            "multi_document_partition_count": 1,
+                        },
+                        "homotopy_summary": {
+                            "cross_document_class_count": 0,
+                            "coherent_count": 0,
+                            "coherent_cross_document_count": 0,
+                        },
+                        "strongly_supported": [],
+                        "weakly_supported": [],
+                        "diagnostic_supported": [],
+                        "disagreements": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            runner.llm_usage_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"agent_name": "causal_statement_agent", "total_tokens": 1200, "prompt_tokens": 800, "completion_tokens": 400}),
+                        json.dumps({"agent_name": "causal_question_agent", "total_tokens": 300, "prompt_tokens": 200, "completion_tokens": 100}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            first_snapshot = runner._build_telemetry_snapshot(
+                batch_started_at=100.0,
+                pending_frontiers={"run_alpha": 0, "run_beta": 0},
+                active_agent_counts={},
+                active_futures={},
+                ready_queue=deque(),
+                completed_records=[],
+                status="running",
+            )
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "n_documents": 2,
+                        "support_summary": {
+                            "strong_support_count": 1,
+                            "provisional_support_count": 2,
+                            "diagnostic_support_count": 1,
+                            "disagreement_count": 0,
+                        },
+                        "topic_partition_summary": {
+                            "partition_count": 2,
+                            "multi_document_partition_count": 1,
+                        },
+                        "homotopy_summary": {
+                            "cross_document_class_count": 1,
+                            "coherent_count": 1,
+                            "coherent_cross_document_count": 1,
+                        },
+                        "strongly_supported": [],
+                        "weakly_supported": [],
+                        "diagnostic_supported": [],
+                        "disagreements": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            runner.llm_usage_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"agent_name": "causal_statement_agent", "total_tokens": 2400, "prompt_tokens": 1600, "completion_tokens": 800}),
+                        json.dumps({"agent_name": "causal_question_agent", "total_tokens": 600, "prompt_tokens": 400, "completion_tokens": 200}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            second_snapshot = runner._build_telemetry_snapshot(
+                batch_started_at=100.0,
+                pending_frontiers={"run_alpha": 0, "run_beta": 0},
+                active_agent_counts={},
+                active_futures={},
+                ready_queue=deque(),
+                completed_records=[],
+                status="running",
+            )
+
+            self.assertEqual(first_snapshot["decision_state"]["recommended_action"], "continue")
+            self.assertGreater(
+                second_snapshot["decision_state"]["information_state"],
+                first_snapshot["decision_state"]["information_state"],
+            )
+            self.assertIsNotNone(second_snapshot["decision_state"]["marginal_efficiency"])
+            self.assertEqual(second_snapshot["decision_state"]["recommended_action"], "continue")
+            self.assertGreater(second_snapshot["decision_state"]["statement_token_share"], 0.7)
 
     def test_batch_runner_builds_csql_bundle_from_triple_outputs(self) -> None:
         class FakeRunner:

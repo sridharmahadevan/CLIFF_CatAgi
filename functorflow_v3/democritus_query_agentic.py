@@ -29,6 +29,7 @@ from .democritus_batch_agentic import (
     DemocritusBatchRunResult,
 )
 from .dashboard_query_launcher import DashboardQueryLauncher, DashboardQueryLauncherConfig
+from .democritus_decision_metrics import compute_checkpoint_decision_state
 from .evidence_convergence import (
     EvidenceConvergenceAdapter,
     EvidenceConvergencePolicy,
@@ -1220,6 +1221,7 @@ def _render_democritus_topic_checkpoint_html(payload: dict[str, object]) -> str:
     suspicious_topics = list(payload.get("suspicious_topics") or [])
     query_focus_terms = list(payload.get("query_focus_terms") or [])
     retrieval_components = list(payload.get("retrieval_components") or [])
+    decision_state = dict(payload.get("decision_state") or {})
     topic_chips = "".join(
         (
             f'<span class="chip" title="{escape("Aliases: " + " | ".join(str(alias) for alias in list(item.get("aliases") or [])[:4]))}">'
@@ -1287,6 +1289,20 @@ def _render_democritus_topic_checkpoint_html(payload: dict[str, object]) -> str:
         )
         for item in documents
     ) or '<div class="empty">Root topics have not been materialized yet.</div>'
+    decision_markup = (
+        '<section class="panel">'
+        '<p class="eyebrow">Decision State</p>'
+        '<div class="chip-row" style="margin-top:12px;">'
+        f'<span class="chip focus">checkpoint value {escape(str(decision_state.get("checkpoint_value", 0.0)))}</span>'
+        f'<span class="chip focus">{escape(str(decision_state.get("recommended_action_label") or "continue"))}</span>'
+        f'<span class="chip">concentration {escape(str(decision_state.get("selected_topic_concentration", 0.0)))}</span>'
+        f'<span class="chip">recurring density {escape(str(decision_state.get("recurring_topic_density", 0.0)))}</span>'
+        f'<span class="chip drift">drift penalty {escape(str(decision_state.get("drift_penalty", 0.0)))}</span>'
+        "</div>"
+        "</section>"
+        if decision_state
+        else ""
+    )
     return f"""<!doctype html>
 <html lang="en">
   <head>
@@ -1364,6 +1380,7 @@ def _render_democritus_topic_checkpoint_html(payload: dict[str, object]) -> str:
         <div class="chip-row" style="margin-top:14px;">{focus_term_chips}</div>
         <div class="chip-row" style="margin-top:12px;">{suspicious_chips}</div>
       </section>
+      {decision_markup}
       <section class="panel">
         <p class="eyebrow">Retrieved Local Components</p>
         <p class="trace">These cards summarize the dominant local retrieval components before Democritus expands them into root-topic cards. If a broad query gets trapped in one basin, it should become visible here immediately.</p>
@@ -1448,6 +1465,17 @@ def _build_democritus_topic_checkpoint(
     drift_metrics = dict(drift_payload.get("drift_metrics") or {})
     suspicious_count = int(drift_metrics.get("suspicious_topic_count") or 0)
     retrieval_components = _summarize_retrieval_components(selected_documents, query=focus_query)
+    decision_state = compute_checkpoint_decision_state(
+        drift_metrics=drift_metrics,
+        top_topics=top_topics,
+        documents_payload=documents_payload,
+    )
+    recommended_action = str(decision_state.get("recommended_action") or "continue")
+    action_copy = {
+        "continue": "The atlas looks coherent enough to justify deepening into extraction and synthesis.",
+        "narrow_retrieval": "The atlas is still too diffuse; retrieval should be narrowed before spending more extraction budget.",
+        "stop": "The atlas is not yet aligned enough to deepen reliably; refine the request or corpus before continuing.",
+    }.get(recommended_action, "Review the atlas before deciding whether to continue deeper.")
     payload = {
         "query": query,
         "base_query": base_query,
@@ -1464,6 +1492,7 @@ def _build_democritus_topic_checkpoint(
         "suspicious_topics": suspicious_topics,
         "retrieval_components": retrieval_components,
         "drift_metrics": drift_metrics,
+        "decision_state": decision_state,
         "documents": documents_payload,
         "summary_text": (
             "Democritus has finished the atlas pass and built an anti-drift topic surface around "
@@ -1473,9 +1502,9 @@ def _build_democritus_topic_checkpoint(
                 if suspicious_count
                 else "No obvious off-scope atlas topics were detected from query alignment. "
             )
-            + "Use the atlas to tighten retrieval before continuing into causal question generation, statement extraction, and cross-document synthesis."
+            + action_copy
         ),
-        "recommended_next_action": "review_atlas_drift",
+        "recommended_next_action": recommended_action,
     }
     _write_json(manifest_path, payload)
     dashboard_path.parent.mkdir(parents=True, exist_ok=True)

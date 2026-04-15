@@ -23,6 +23,7 @@ from .democritus_corpus_synthesis import (
     DemocritusCorpusSynthesisResult,
     build_democritus_corpus_synthesis,
 )
+from .democritus_decision_metrics import compute_batch_decision_state
 from .llm_usage import summarize_llm_usage
 from .repo_layout import resolve_democritus_seed_pdf_root
 
@@ -499,6 +500,7 @@ class DemocritusBatchAgenticRunner:
         self._triple_count_cache: dict[str, tuple[int, int, int]] = {}
         self._peak_active_agents = 0
         self._peak_effective_parallelism = 1.0
+        self._previous_decision_state: dict[str, object] | None = None
         self._bootstrap_dashboard()
 
     def _document_by_run_name(self, run_name: str) -> DemocritusBatchDocument:
@@ -1052,6 +1054,9 @@ class DemocritusBatchAgenticRunner:
             "maturity": maturity,
             "dashboard_path": str(self.corpus_synthesis_dashboard_path) if self.corpus_synthesis_dashboard_path.exists() else "",
             "summary_path": str(self.corpus_synthesis_summary_path),
+            "support_summary": dict(payload.get("support_summary") or {}),
+            "topic_partition_summary": dict(payload.get("topic_partition_summary") or {}),
+            "homotopy_summary": dict(payload.get("homotopy_summary") or {}),
             "strongly_supported": list(payload.get("strongly_supported") or []),
             "weakly_supported": list(payload.get("weakly_supported") or []),
             "diagnostic_supported": list(payload.get("diagnostic_supported") or []),
@@ -1242,6 +1247,14 @@ class DemocritusBatchAgenticRunner:
 
         corpus_synthesis = self._corpus_synthesis_snapshot(total_documents=len(documents))
         llm_usage = summarize_llm_usage(self.llm_usage_path)
+        decision_state = compute_batch_decision_state(
+            corpus_synthesis=corpus_synthesis,
+            llm_usage=llm_usage,
+            total_documents=len(documents),
+            status=status,
+            previous_state=self._previous_decision_state,
+        )
+        self._previous_decision_state = dict(decision_state)
         active_stage_labels = [
             _humanize_agent_name(agent_name)
             for agent_name, count in sorted(active_agent_counts.items(), key=lambda item: (-item[1], item[0]))
@@ -1310,6 +1323,7 @@ class DemocritusBatchAgenticRunner:
             "documents": documents_payload,
             "corpus_synthesis": corpus_synthesis,
             "llm_usage": llm_usage,
+            "decision_state": decision_state,
         }
 
     def _render_dashboard_html(self, snapshot: dict[str, object]) -> str:
@@ -1322,6 +1336,7 @@ class DemocritusBatchAgenticRunner:
         timing = snapshot["timing"]
         slowest_stages = snapshot["slowest_stages"]
         llm_usage = dict(snapshot.get("llm_usage") or {})
+        decision_state = dict(snapshot.get("decision_state") or {})
 
         def esc(value: object) -> str:
             return html.escape(str(value))
@@ -1482,6 +1497,23 @@ class DemocritusBatchAgenticRunner:
             )
             + "</tbody></table>"
         )
+        decision_table = render_kv_table(
+            [
+                ("Recommended Action", decision_state.get("recommended_action_label", "continue")),
+                ("Information State", decision_state.get("information_state", 0.0)),
+                (
+                    "Marginal Efficiency",
+                    decision_state.get("marginal_efficiency", "warming up")
+                    if decision_state.get("marginal_efficiency") is not None
+                    else "warming up",
+                ),
+                ("Partition Glue", decision_state.get("partition_glue_score", 0.0)),
+                ("Homotopy Coherence", decision_state.get("homotopy_coherence_score", 0.0)),
+                ("Drift Penalty", decision_state.get("drift_penalty", 0.0)),
+                ("Statement Token Share", decision_state.get("statement_token_share", 0.0)),
+                ("Question Token Share", decision_state.get("question_token_share", 0.0)),
+            ]
+        )
 
         return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1558,6 +1590,10 @@ class DemocritusBatchAgenticRunner:
     <div class="card">
       <h2>LLM Usage</h2>
       {llm_usage_table}
+    </div>
+    <div class="card">
+      <h2>Decision State</h2>
+      {decision_table}
     </div>
   </div>
   <div class="card">

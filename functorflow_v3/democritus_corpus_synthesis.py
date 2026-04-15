@@ -249,6 +249,11 @@ def build_democritus_corpus_synthesis(
         "within_document_class_count": sum(1 for item in homotopy_classes if item.document_support <= 1),
         "cross_document_class_count": sum(1 for item in homotopy_classes if item.document_support > 1),
         "coherent_count": sum(1 for item in homotopy_classes if item.coherence_state == "coherent"),
+        "coherent_cross_document_count": sum(
+            1
+            for item in homotopy_classes
+            if item.document_support > 1 and item.coherence_state == "coherent"
+        ),
         "partially_glued_count": sum(1 for item in homotopy_classes if item.coherence_state == "partially_glued"),
         "disconnected_count": sum(1 for item in homotopy_classes if item.coherence_state == "disconnected"),
     }
@@ -269,6 +274,12 @@ def build_democritus_corpus_synthesis(
         "query": query,
         "csql_sqlite_path": str(csql_sqlite_path),
         "n_documents": total_documents,
+        "support_summary": {
+            "strong_support_count": len(strong_claims),
+            "provisional_support_count": len(weak_claims),
+            "diagnostic_support_count": len(diagnostic_claims),
+            "disagreement_count": len(disagreements),
+        },
         "topic_partition_summary": topic_partition_summary,
         "topic_partitions": [item.as_dict() for item in topic_partitions[:8]],
         "strongly_supported": [item.as_dict() for item in strong_claims[:12]],
