@@ -2404,6 +2404,36 @@ class DashboardQueryLauncher:
         except Exception:
             return {}
 
+    def _route_llm_usage(self, run_state: dict[str, object]) -> dict[str, object]:
+        route_name = str(run_state.get("route_name") or "").strip()
+        telemetry: dict[str, object] = {}
+        if route_name == "democritus":
+            telemetry = self._democritus_telemetry(run_state)
+        elif route_name == "company_similarity":
+            telemetry = self._company_similarity_telemetry(run_state)
+        llm_usage = dict(telemetry.get("llm_usage") or {})
+        return llm_usage
+
+    @staticmethod
+    def _llm_usage_summary(llm_usage: dict[str, object]) -> dict[str, object]:
+        request_count = int(llm_usage.get("request_count") or 0)
+        total_tokens = int(llm_usage.get("total_tokens") or 0)
+        requests_with_usage = int(llm_usage.get("requests_with_usage") or 0)
+        if request_count <= 0 and total_tokens <= 0:
+            return {}
+        tracked_requests = requests_with_usage or request_count
+        label = f"{total_tokens:,} tokens across {tracked_requests:,} LLM request"
+        if tracked_requests != 1:
+            label += "s"
+        if request_count > tracked_requests:
+            label += f" ({request_count - tracked_requests} pending usage rows)"
+        return {
+            "request_count": request_count,
+            "requests_with_usage": requests_with_usage,
+            "total_tokens": total_tokens,
+            "label": label,
+        }
+
     def _run_eta_summary(self, run_state: dict[str, object]) -> dict[str, object]:
         route_name = str(run_state.get("route_name") or "").strip()
         status = str(run_state.get("status") or "").strip().lower()
@@ -2476,6 +2506,11 @@ class DashboardQueryLauncher:
             run_state["current_stage"] = eta_summary.get("current_stage")
             run_state["current_stage_label"] = eta_summary.get("current_stage_label")
             run_state["peak_parallelism"] = eta_summary.get("peak_parallelism")
+        llm_usage_summary = self._llm_usage_summary(self._route_llm_usage(run_state))
+        if llm_usage_summary:
+            run_state["llm_usage_label"] = llm_usage_summary.get("label")
+            run_state["llm_total_tokens"] = llm_usage_summary.get("total_tokens")
+            run_state["llm_request_count"] = llm_usage_summary.get("request_count")
         research_profile = self._route_research_profile(run_state.get("route_name"))
         run_state["research_profile_class"] = research_profile.get("class_name")
         run_state["research_profile_label"] = research_profile.get("label")
@@ -3451,6 +3486,7 @@ class DashboardQueryLauncher:
         title = html.escape(self.config.title)
         query = html.escape(str(run_state.get("query") or ""))
         note = html.escape(str(run_state.get("note") or "CLIFF is gathering live partial outputs from this run."))
+        llm_usage_label = html.escape(str(run_state.get("llm_usage_label") or ""))
         iframe_src = self._launcher_href_for_run_file(run_id, artifact_path)
         return f"""<!doctype html>
 <html lang="en">
@@ -3515,6 +3551,7 @@ class DashboardQueryLauncher:
         <p class="eyebrow">Inspecting Run</p>
         <h1>{query}</h1>
         <p>{note}</p>
+        {'<p><strong>LLM usage:</strong> ' + llm_usage_label + '</p>' if llm_usage_label else ''}
       </section>
       <section class="artifact-shell">
         <iframe id="artifact-frame" src="{html.escape(iframe_src)}" title="Live CLIFF artifact"></iframe>
@@ -3857,6 +3894,9 @@ class DashboardQueryLauncher:
                 var researchNote = run.research_profile_note
                   ? '<div class="run-meta"><strong>Latency class:</strong> ' + escapeHtml(run.research_profile_note) + '</div>'
                   : '';
+                var llmUsage = run.llm_usage_label
+                  ? '<div class="run-meta"><strong>LLM usage:</strong> ' + escapeHtml(run.llm_usage_label) + '</div>'
+                  : '';
                 var unconscious = (run.eta_label || run.parallelism_label || run.current_stage_label)
                   ? '<div class="run-meta"><strong>Unconscious report:</strong> '
                     + (run.eta_label ? escapeHtml(run.eta_label) : 'ETA warming up')
@@ -3877,6 +3917,7 @@ class DashboardQueryLauncher:
                   + rerunAction
                   + openAction
                   + researchNote
+                  + llmUsage
                   + unconscious
                   + outdir
                   + artifact
@@ -4582,6 +4623,11 @@ class DashboardQueryLauncher:
                 if run.get("research_profile_note")
                 else ""
             )
+            llm_usage_markup = (
+                f'<div class="run-meta"><strong>LLM usage:</strong> {esc(run.get("llm_usage_label"))}</div>'
+                if run.get("llm_usage_label")
+                else ""
+            )
             cards.append(
                 f'<article class="{card_class}">'
                 '<div class="run-topline">'
@@ -4602,6 +4648,7 @@ class DashboardQueryLauncher:
                 f"{rerun_action_markup}"
                 f"{open_action_markup}"
                 f"{research_note_markup}"
+                f"{llm_usage_markup}"
                 f"{unconscious_markup}"
                 f"{outdir_markup}"
                 f"{artifact_markup}"

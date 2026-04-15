@@ -73,6 +73,7 @@ class DemocritusAgenticConfig:
     write_deep_dive: bool = False
     deep_dive_max_bullets: int = 8
     intra_document_shards: int = 1
+    llm_usage_log_path: Path | None = None
 
     def resolved(self) -> "DemocritusAgenticConfig":
         return DemocritusAgenticConfig(
@@ -110,6 +111,7 @@ class DemocritusAgenticConfig:
             write_deep_dive=self.write_deep_dive,
             deep_dive_max_bullets=self.deep_dive_max_bullets,
             intra_document_shards=max(1, int(self.intra_document_shards)),
+            llm_usage_log_path=self.llm_usage_log_path.resolve() if self.llm_usage_log_path else None,
         )
 
 
@@ -392,15 +394,21 @@ class DemocritusAgenticRunner:
         return "\n".join(lines[-max_lines:])
 
     def _stage_env(self) -> dict[str, str]:
-        env = {"PYTHONPATH": str(self.repo_root)}
         base = dict(os.environ)
+        pythonpath_parts = [str(self.repo_root), str(_workspace_root())]
         if base.get("PYTHONPATH"):
-            env["PYTHONPATH"] = f"{self.repo_root}{os.pathsep}{base['PYTHONPATH']}"
+            pythonpath_parts.append(base["PYTHONPATH"])
+        env = {"PYTHONPATH": os.pathsep.join(pythonpath_parts)}
         env["PYTHONUNBUFFERED"] = "1"
         env["MPLBACKEND"] = base.get("MPLBACKEND", "Agg")
         mpl_config_dir = self.outdir / ".matplotlib"
         mpl_config_dir.mkdir(parents=True, exist_ok=True)
         env["MPLCONFIGDIR"] = base.get("MPLCONFIGDIR", str(mpl_config_dir))
+        if self.config.llm_usage_log_path:
+            env["CLIFF_LLM_USAGE_PATH"] = str(self.config.llm_usage_log_path)
+            env["CLIFF_LLM_USAGE_ROUTE"] = "democritus"
+            env["CLIFF_LLM_USAGE_RUN"] = self.config.domain_name
+            env["CLIFF_LLM_USAGE_OUTDIR"] = str(self.outdir)
         return {**base, **env}
 
     def _run_subprocess_agent(
@@ -414,6 +422,7 @@ class DemocritusAgenticRunner:
         log_path = self.logs_dir / f"{agent_name}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         env = self._stage_env()
+        env["CLIFF_LLM_USAGE_AGENT"] = agent_name
         with log_path.open("w", encoding="utf-8") as log_file:
             log_file.write("[CMD] " + " ".join(cmd) + "\n\n")
             log_file.write(f"[CWD] {cwd}\n")
@@ -487,7 +496,16 @@ class DemocritusAgenticRunner:
         sys.path.insert(0, str(workspace_root))
         try:
             democ = import_module("FunctorFlow.democritus")
-            llm_client = democ._default_llm_client()
+            llm_client = democ.OpenAICompatibleDemocritusClient(
+                democ.DemocritusLLMConfig.from_env(),
+                usage_log_path=self.config.llm_usage_log_path,
+                usage_metadata={
+                    "route": "democritus",
+                    "run_name": self.config.domain_name,
+                    "agent_name": "root_topic_discovery_agent",
+                    "outdir": str(self.outdir),
+                },
+            )
             discovery_config = democ.DemocritusTopicDiscoveryConfig(guidance_mode="plain")
             _, topics = democ.discover_topics_from_pdf(
                 self.config.input_pdf,
@@ -503,7 +521,16 @@ class DemocritusAgenticRunner:
         sys.path.insert(0, str(workspace_root))
         try:
             democ = import_module("FunctorFlow.democritus")
-            llm_client = democ._default_llm_client()
+            llm_client = democ.OpenAICompatibleDemocritusClient(
+                democ.DemocritusLLMConfig.from_env(),
+                usage_log_path=self.config.llm_usage_log_path,
+                usage_metadata={
+                    "route": "democritus",
+                    "run_name": self.config.domain_name,
+                    "agent_name": "root_topic_discovery_agent",
+                    "outdir": str(self.outdir),
+                },
+            )
             discovery_config = democ.DemocritusTopicDiscoveryConfig(guidance_mode="summary_guided")
             if hasattr(democ, "discover_topics_from_pdf_with_metadata"):
                 _, topics, metadata = democ.discover_topics_from_pdf_with_metadata(

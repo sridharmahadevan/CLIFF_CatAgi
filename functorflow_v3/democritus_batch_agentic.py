@@ -23,6 +23,7 @@ from .democritus_corpus_synthesis import (
     DemocritusCorpusSynthesisResult,
     build_democritus_corpus_synthesis,
 )
+from .llm_usage import summarize_llm_usage
 from .repo_layout import resolve_democritus_seed_pdf_root
 
 _GUI_REFRESH_SECONDS = 15
@@ -478,19 +479,20 @@ class DemocritusBatchAgenticRunner:
         self._pending_admissions: deque[DemocritusBatchDocument] = deque()
         self._next_document_index = 1
         self._admission_closed = not self.config.allow_incremental_admission
+        self.summary_path = self.config.outdir / "batch_agent_run_summary.json"
+        self.telemetry_path = self.config.outdir / "telemetry.json"
+        self.dashboard_path = self.config.outdir / "dashboard.html"
+        self.gui_path = self.config.outdir / "democritus_gui.html"
+        self.llm_usage_path = self.config.outdir / "llm_usage.jsonl"
+        self.csql_summary_path = self.config.outdir / "csql" / "democritus_csql_summary.json"
+        self.csql_sqlite_path = self.config.outdir / "csql" / "democritus_csql.sqlite"
+        self.corpus_synthesis_summary_path = self.config.outdir / "corpus_synthesis" / "democritus_corpus_synthesis.json"
+        self.corpus_synthesis_dashboard_path = self.config.outdir / "corpus_synthesis" / "democritus_corpus_synthesis.html"
         if self.config.discover_existing_documents:
             for document in self._discover_documents():
                 self._admit_document(document, enqueue=True)
         if self.config.discover_existing_documents and not self.config.allow_incremental_admission:
             self._admission_closed = True
-        self.summary_path = self.config.outdir / "batch_agent_run_summary.json"
-        self.telemetry_path = self.config.outdir / "telemetry.json"
-        self.dashboard_path = self.config.outdir / "dashboard.html"
-        self.gui_path = self.config.outdir / "democritus_gui.html"
-        self.csql_summary_path = self.config.outdir / "csql" / "democritus_csql_summary.json"
-        self.csql_sqlite_path = self.config.outdir / "csql" / "democritus_csql.sqlite"
-        self.corpus_synthesis_summary_path = self.config.outdir / "corpus_synthesis" / "democritus_corpus_synthesis.json"
-        self.corpus_synthesis_dashboard_path = self.config.outdir / "corpus_synthesis" / "democritus_corpus_synthesis.html"
         self._last_incremental_synthesis_docs = 0
         self._last_incremental_synthesis_triples = 0
         self._latest_incremental_corpus_synthesis: DemocritusCorpusSynthesisResult | None = None
@@ -578,6 +580,7 @@ class DemocritusBatchAgenticRunner:
                 write_deep_dive=self.config.write_deep_dive,
                 deep_dive_max_bullets=self.config.deep_dive_max_bullets,
                 intra_document_shards=self.config.intra_document_shards,
+                llm_usage_log_path=self.llm_usage_path,
             )
         )
 
@@ -1238,6 +1241,7 @@ class DemocritusBatchAgenticRunner:
         slowest_stages = slowest_stages[:5]
 
         corpus_synthesis = self._corpus_synthesis_snapshot(total_documents=len(documents))
+        llm_usage = summarize_llm_usage(self.llm_usage_path)
         active_stage_labels = [
             _humanize_agent_name(agent_name)
             for agent_name, count in sorted(active_agent_counts.items(), key=lambda item: (-item[1], item[0]))
@@ -1305,6 +1309,7 @@ class DemocritusBatchAgenticRunner:
             "slowest_stages": slowest_stages,
             "documents": documents_payload,
             "corpus_synthesis": corpus_synthesis,
+            "llm_usage": llm_usage,
         }
 
     def _render_dashboard_html(self, snapshot: dict[str, object]) -> str:
@@ -1316,6 +1321,7 @@ class DemocritusBatchAgenticRunner:
         queued_counts = snapshot["queued_agent_counts"]
         timing = snapshot["timing"]
         slowest_stages = snapshot["slowest_stages"]
+        llm_usage = dict(snapshot.get("llm_usage") or {})
 
         def esc(value: object) -> str:
             return html.escape(str(value))
@@ -1440,6 +1446,42 @@ class DemocritusBatchAgenticRunner:
                 ("Completed Work", timing["total_completed_work_human"]),
             ]
         )
+        llm_usage_table = render_kv_table(
+            [
+                ("Usage Log", llm_usage.get("path", self.llm_usage_path)),
+                ("Requests", llm_usage.get("request_count", 0)),
+                ("Requests With Usage", llm_usage.get("requests_with_usage", 0)),
+                ("Requests Missing Usage", llm_usage.get("requests_missing_usage", 0)),
+                ("Prompt Tokens", llm_usage.get("prompt_tokens", 0)),
+                ("Completion Tokens", llm_usage.get("completion_tokens", 0)),
+                ("Total Tokens", llm_usage.get("total_tokens", 0)),
+                ("Avg Tokens / Usage Request", llm_usage.get("avg_total_tokens_per_request", 0.0)),
+            ]
+        )
+        llm_usage_rows = []
+        for row in list(llm_usage.get("by_agent") or []):
+            llm_usage_rows.append(
+                "<tr>"
+                f"<td>{esc(row.get('agent_name', 'unknown'))}</td>"
+                f"<td>{esc(row.get('requests', 0))}</td>"
+                f"<td>{esc(row.get('requests_with_usage', 0))}</td>"
+                f"<td>{esc(row.get('prompt_tokens', 0))}</td>"
+                f"<td>{esc(row.get('completion_tokens', 0))}</td>"
+                f"<td>{esc(row.get('total_tokens', 0))}</td>"
+                "</tr>"
+            )
+        llm_usage_agents_table = (
+            "<table><thead><tr>"
+            "<th>Agent</th><th>Requests</th><th>Usage Rows</th><th>Prompt Tokens</th>"
+            "<th>Completion Tokens</th><th>Total Tokens</th>"
+            "</tr></thead><tbody>"
+            + (
+                "".join(llm_usage_rows)
+                if llm_usage_rows
+                else "<tr><td colspan='6'>No LLM usage records captured yet.</td></tr>"
+            )
+            + "</tbody></table>"
+        )
 
         return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1513,6 +1555,10 @@ class DemocritusBatchAgenticRunner:
       <h2>Timing Forecast</h2>
       {timing_table}
     </div>
+    <div class="card">
+      <h2>LLM Usage</h2>
+      {llm_usage_table}
+    </div>
   </div>
   <div class="card">
     <h2>Agent Metrics</h2>
@@ -1521,6 +1567,10 @@ class DemocritusBatchAgenticRunner:
   <div class="card" style="margin-top: 24px;">
     <h2>Slowest Stages</h2>
     {slowest_stages_table}
+  </div>
+  <div class="card" style="margin-top: 24px;">
+    <h2>LLM Usage By Agent</h2>
+    {llm_usage_agents_table}
   </div>
   <div class="card" style="margin-top: 24px;">
     <h2>Documents</h2>

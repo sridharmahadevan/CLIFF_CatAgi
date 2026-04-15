@@ -1251,6 +1251,54 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         self.assertIn("parallelism 4.7 (peak 6.0)", markup)
         self.assertIn("stage Triple Extraction Agent", markup)
 
+    def test_state_payload_promotes_democritus_llm_usage_summary(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Find me 10 studies of red wine",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            democritus_telemetry = root / "democritus" / "democritus_runs" / "telemetry.json"
+            democritus_telemetry.parent.mkdir(parents=True, exist_ok=True)
+            democritus_telemetry.write_text(
+                json.dumps(
+                    {
+                        "llm_usage": {
+                            "request_count": 18,
+                            "requests_with_usage": 18,
+                            "total_tokens": 12345,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            run_id = launcher.submit_query("Find me 10 studies of red wine")
+            launcher.wait_for_next_submission(timeout=0.01)
+            launcher.update_session_run(
+                run_id,
+                status="running",
+                route_name="democritus",
+                note="Running.",
+                outdir=root,
+                artifact_path=root / "democritus" / "democritus_runs" / "democritus_gui.html",
+            )
+
+            state = launcher._state_payload()
+            markup = launcher._render_session_runs_markup(state["runs"])
+
+        self.assertEqual(state["runs"][0]["llm_usage_label"], "12,345 tokens across 18 LLM requests")
+        self.assertIn("LLM usage:", markup)
+        self.assertIn("12,345 tokens across 18 LLM requests", markup)
+
     def test_state_payload_promotes_company_similarity_peak_parallelism_and_stage(self) -> None:
         launcher = DashboardQueryLauncher(
             DashboardQueryLauncherConfig(
