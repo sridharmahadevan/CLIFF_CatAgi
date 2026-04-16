@@ -14,6 +14,7 @@ from .cliff import (
     _decision_supports_conscious_redispatch,
     route_cliff_query,
 )
+from .llm_usage import scoped_llm_token_budget_env
 from .query_router_agentic import (
     _artifact_path_for_result,
     _build_router_from_args_with_outdir,
@@ -43,8 +44,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--cycle-stage", choices=("first_pass", "synthesis_pass"), default="first_pass")
     parser.add_argument("--execution-mode", choices=("quick", "interactive", "deep"), default="quick")
+    parser.add_argument("--llm-token-budget", type=int, default=None)
     parser.add_argument("--cliff-defer-final-synthesis", action="store_true")
     parser.add_argument("--route", choices=("auto", "democritus", "basket_rocket_sec", "culinary_tour", "product_feedback", "company_similarity", "course_demo"), default="auto")
+    parser.add_argument("--router-excluded-routes", action="append", default=[])
     parser.add_argument("--democritus-input-pdf", default="")
     parser.add_argument("--democritus-input-pdf-dir", default="")
     parser.add_argument("--democritus-manifest", default="")
@@ -104,55 +107,63 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+    llm_token_budget = getattr(args, "llm_token_budget", None)
     outdir = Path(args.outdir).resolve()
     outdir.mkdir(parents=True, exist_ok=True)
-    decision = route_cliff_query(args.query, route_override=args.route)
+    decision = route_cliff_query(
+        args.query,
+        route_override=args.route,
+        excluded_routes=tuple(getattr(args, "router_excluded_routes", ()) or ()),
+    )
     result_path = _worker_result_path(outdir)
     try:
-        if args.cycle_stage == "synthesis_pass":
-            artifact_path = _build_cliff_synthesis_from_first_pass(
-                query=args.query,
-                decision=decision,
-                run_outdir=outdir,
-            )
-            payload = {
-                "status": "complete",
-                "system_name": "CLIFF",
-                "query": args.query,
-                "route_decision": asdict(decision),
-                "route_outdir": str((outdir / decision.route_name).resolve()),
-                "summary_path": str(outdir / "ff2_query_router_summary.json"),
-                "artifact_path": str(artifact_path) if artifact_path else None,
-            }
-        else:
-            result = _build_router_from_args_with_outdir(args, query=args.query, outdir=outdir).run()
-            artifact_path = _artifact_path_for_result(result)
-            needs_clarification = _result_needs_clarification(result)
-            clarification_request = getattr(getattr(result, "democritus_result", None), "query_plan", None)
-            clarification_request = getattr(clarification_request, "clarification_request", None)
-            should_complete_interactive_checkpoint = _should_complete_interactive_checkpoint(
-                execution_mode=args.execution_mode,
-                route_name=result.route_decision.route_name,
-            )
-            payload = {
-                "status": (
-                    "complete"
-                    if needs_clarification or should_complete_interactive_checkpoint
-                    else (
-                        "phase1_complete"
-                        if args.cliff_defer_final_synthesis and _decision_supports_conscious_redispatch(result.route_decision)
-                        else "complete"
-                    )
-                ),
-                "system_name": "CLIFF",
-                "query": args.query,
-                "route_decision": asdict(result.route_decision),
-                "route_outdir": str(result.route_outdir),
-                "summary_path": str(result.summary_path),
-                "artifact_path": str(artifact_path) if artifact_path else None,
-                "needs_clarification": needs_clarification,
-                "clarification_term": getattr(clarification_request, "ambiguous_term", None),
-            }
+        with scoped_llm_token_budget_env(llm_token_budget):
+            if args.cycle_stage == "synthesis_pass":
+                artifact_path = _build_cliff_synthesis_from_first_pass(
+                    query=args.query,
+                    decision=decision,
+                    run_outdir=outdir,
+                )
+                payload = {
+                    "status": "complete",
+                    "system_name": "CLIFF",
+                    "query": args.query,
+                    "route_decision": asdict(decision),
+                    "route_outdir": str((outdir / decision.route_name).resolve()),
+                    "summary_path": str(outdir / "ff2_query_router_summary.json"),
+                    "artifact_path": str(artifact_path) if artifact_path else None,
+                }
+            else:
+                result = _build_router_from_args_with_outdir(args, query=args.query, outdir=outdir).run()
+                artifact_path = _artifact_path_for_result(result)
+                needs_clarification = _result_needs_clarification(result)
+                clarification_request = getattr(getattr(result, "democritus_result", None), "query_plan", None)
+                clarification_request = getattr(clarification_request, "clarification_request", None)
+                should_complete_interactive_checkpoint = _should_complete_interactive_checkpoint(
+                    execution_mode=args.execution_mode,
+                    route_name=result.route_decision.route_name,
+                )
+                payload = {
+                    "status": (
+                        "complete"
+                        if needs_clarification or should_complete_interactive_checkpoint
+                        else (
+                            "phase1_complete"
+                            if args.cliff_defer_final_synthesis and _decision_supports_conscious_redispatch(result.route_decision)
+                            else "complete"
+                        )
+                    ),
+                    "system_name": "CLIFF",
+                    "query": args.query,
+                    "route_decision": asdict(result.route_decision),
+                    "route_outdir": str(result.route_outdir),
+                    "summary_path": str(result.summary_path),
+                    "artifact_path": str(artifact_path) if artifact_path else None,
+                    "needs_clarification": needs_clarification,
+                    "clarification_term": getattr(clarification_request, "ambiguous_term", None),
+                }
+        if llm_token_budget is not None and int(llm_token_budget) > 0:
+            payload["llm_token_budget"] = int(llm_token_budget)
         result_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         print(json.dumps(payload, indent=2), flush=True)
     except Exception as exc:
@@ -178,6 +189,8 @@ def main() -> None:
             "error": message,
             "error_artifact_path": str(error_path),
         }
+        if llm_token_budget is not None and int(llm_token_budget) > 0:
+            payload["llm_token_budget"] = int(llm_token_budget)
         result_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         print(json.dumps(payload, indent=2), file=sys.stderr, flush=True)
         raise SystemExit(1) from None

@@ -162,6 +162,24 @@ class QueryRouterAgenticTests(unittest.TestCase):
 
         self.assertEqual(decision.route_name, "democritus")
 
+    def test_route_ff2_query_respects_wrong_route_feedback_for_product_question(self) -> None:
+        decision = module.route_ff2_query(
+            "How comfortable is the Lovesac sectional sofa?",
+            excluded_routes=("product_feedback",),
+        )
+
+        self.assertEqual(decision.route_name, "democritus")
+        self.assertIn("User feedback excluded route(s): product_feedback.", decision.rationale)
+
+    def test_route_ff2_query_respects_wrong_route_feedback_for_course_demo_request(self) -> None:
+        decision = module.route_ff2_query(
+            "Explain the Geometric Transformer on the Sudoku problem",
+            excluded_routes=("course_demo",),
+        )
+
+        self.assertEqual(decision.route_name, "democritus")
+        self.assertIn("User feedback excluded route(s): course_demo.", decision.rationale)
+
     def test_resolve_query_for_main_uses_dashboard_launcher_when_query_missing(self) -> None:
         class FakeLauncher:
             def __init__(self, config):

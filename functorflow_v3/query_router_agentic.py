@@ -191,6 +191,7 @@ class FF2QueryRouterConfig:
     outdir: Path
     execution_mode: str = "quick"
     route_override: str = "auto"
+    router_excluded_routes: tuple[str, ...] = ()
     democritus_input_pdf_path: Path | None = None
     democritus_input_pdf_dir: Path | None = None
     democritus_manifest_path: Path | None = None
@@ -258,6 +259,11 @@ class FF2QueryRouterConfig:
                 else ("interactive" if normalized_mode == "interactive" else "quick")
             ),
             route_override=self.route_override,
+            router_excluded_routes=tuple(
+                str(route).strip().lower()
+                for route in tuple(self.router_excluded_routes)
+                if str(route).strip()
+            ),
             democritus_input_pdf_path=self.democritus_input_pdf_path.resolve() if self.democritus_input_pdf_path else None,
             democritus_input_pdf_dir=self.democritus_input_pdf_dir.resolve() if self.democritus_input_pdf_dir else None,
             democritus_manifest_path=self.democritus_manifest_path.resolve() if self.democritus_manifest_path else None,
@@ -347,52 +353,121 @@ class FF2QueryRouterRunResult:
     course_demo_result: CourseDemoRunResult | None = None
 
 
-def route_ff2_query(query: str, *, route_override: str = "auto") -> FF2RouteDecision:
+def _normalized_route_exclusions(excluded_routes: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
+    if not excluded_routes:
+        return ()
+    routes = [
+        " ".join(str(route or "").split()).strip().lower()
+        for route in tuple(excluded_routes)
+        if " ".join(str(route or "").split()).strip()
+    ]
+    return tuple(dict.fromkeys(routes))
+
+
+def _route_feedback_rationale_suffix(excluded_routes: tuple[str, ...]) -> str:
+    if not excluded_routes:
+        return ""
+    excluded_text = ", ".join(excluded_routes)
+    return f" User feedback excluded route(s): {excluded_text}."
+
+
+def _apply_route_feedback_suffix(decision: FF2RouteDecision, excluded_routes: tuple[str, ...]) -> FF2RouteDecision:
+    suffix = _route_feedback_rationale_suffix(excluded_routes)
+    if not suffix:
+        return decision
+    return FF2RouteDecision(
+        route_name=decision.route_name,
+        module_name=decision.module_name,
+        rationale=decision.rationale + suffix,
+    )
+
+
+def route_ff2_query(
+    query: str,
+    *,
+    route_override: str = "auto",
+    excluded_routes: tuple[str, ...] | list[str] | None = None,
+) -> FF2RouteDecision:
     """Classify an FF2 query into one of the supported routed entry points."""
 
     normalized = " ".join(query.lower().split())
+    excluded_ordered = _normalized_route_exclusions(excluded_routes)
+    excluded = set(excluded_ordered)
     if route_override != "auto":
         return _decision_for_override(route_override)
     if looks_like_company_similarity_query(query):
-        return FF2RouteDecision(
+        decision = FF2RouteDecision(
             route_name="company_similarity",
             module_name="functorflow_v3.company_similarity_agentic",
             rationale="Query asks for cross-company similarity, so route to temporal diffusion construction and cross-company functor comparison.",
         )
+        if decision.route_name not in excluded:
+            return _apply_route_feedback_suffix(decision, excluded_ordered)
     if any(re.search(pattern, normalized) for pattern in _SEC_PATTERNS):
-        return FF2RouteDecision(
+        decision = FF2RouteDecision(
             route_name="basket_rocket_sec",
             module_name="functorflow_v3.basket_rocket_sec_agentic",
             rationale="Query mentions SEC or filing-specific language, so route to the SEC-backed BASKET/ROCKET ingress.",
         )
+        if decision.route_name not in excluded:
+            return _apply_route_feedback_suffix(decision, excluded_ordered)
     if _looks_like_culinary_tour_query(query):
-        return FF2RouteDecision(
+        decision = FF2RouteDecision(
             route_name="culinary_tour",
             module_name="functorflow_v3.culinary_tour_agentic",
             rationale="Query looks like a food, travel, or itinerary planning request, so route to the CLIFF culinary tour orchestrator.",
         )
+        if decision.route_name not in excluded:
+            return _apply_route_feedback_suffix(decision, excluded_ordered)
     if _looks_like_democritus_evidence_query(query):
-        return FF2RouteDecision(
+        decision = FF2RouteDecision(
             route_name="democritus",
             module_name="functorflow_v3.democritus_query_agentic",
             rationale="Query asks for evidence acquisition or cross-document study synthesis, so route to Democritus before considering textbook demos.",
         )
+        if decision.route_name not in excluded:
+            return _apply_route_feedback_suffix(decision, excluded_ordered)
     if looks_like_course_demo_query(query):
-        return FF2RouteDecision(
+        decision = FF2RouteDecision(
             route_name="course_demo",
             module_name="functorflow_v3.course_demo_agentic",
             rationale="Query matches a registered Category Theory for AGI course demo, so route to the course notebook launcher.",
         )
+        if decision.route_name not in excluded:
+            return _apply_route_feedback_suffix(decision, excluded_ordered)
     if any(re.search(pattern, normalized) for pattern in _PRODUCT_PATTERNS):
-        return FF2RouteDecision(
+        decision = FF2RouteDecision(
             route_name="product_feedback",
             module_name="functorflow_v3.product_feedback_query_agentic",
             rationale="Query looks like a consumer product/review question, so route to product-feedback retrieval and analysis.",
         )
-    return FF2RouteDecision(
+        if decision.route_name not in excluded:
+            return _apply_route_feedback_suffix(decision, excluded_ordered)
+    fallback = FF2RouteDecision(
         route_name="democritus",
         module_name="functorflow_v3.democritus_query_agentic",
         rationale="Default route to Democritus for study, paper, corpus, and open-ended evidence acquisition queries.",
+    )
+    if fallback.route_name not in excluded:
+        return _apply_route_feedback_suffix(fallback, excluded_ordered)
+    for route_name in ("course_demo", "product_feedback", "culinary_tour", "basket_rocket_sec", "company_similarity"):
+        if route_name in excluded:
+            continue
+        decision = _decision_for_override(route_name)
+        return FF2RouteDecision(
+            route_name=decision.route_name,
+            module_name=decision.module_name,
+            rationale=(
+                f"No non-excluded heuristic route remained after user feedback ruled out {', '.join(excluded_ordered)}; "
+                f"falling back to {decision.route_name} for a second pass."
+            ),
+        )
+    return FF2RouteDecision(
+        route_name=fallback.route_name,
+        module_name=fallback.module_name,
+        rationale=(
+            "All supported routes were excluded by user feedback, so CLIFF is falling back to Democritus as the broadest available route."
+        ),
     )
 
 
@@ -445,7 +520,11 @@ class FF2QueryRouter:
 
     def run(self) -> FF2QueryRouterRunResult:
         self.config.outdir.mkdir(parents=True, exist_ok=True)
-        decision = route_ff2_query(self.config.query, route_override=self.config.route_override)
+        decision = route_ff2_query(
+            self.config.query,
+            route_override=self.config.route_override,
+            excluded_routes=self.config.router_excluded_routes,
+        )
         if decision.route_name == "basket_rocket_sec":
             result = self._run_basket_rocket_sec(decision)
         elif decision.route_name == "company_similarity":
@@ -925,6 +1004,7 @@ def _build_router_from_args_with_outdir(
             outdir=Path(outdir),
             execution_mode=getattr(args, "execution_mode", "quick"),
             route_override=args.route,
+            router_excluded_routes=tuple(getattr(args, "router_excluded_routes", ()) or ()),
             democritus_input_pdf_path=(
                 Path(getattr(args, "democritus_input_pdf", ""))
                 if getattr(args, "democritus_input_pdf", "")
@@ -1020,7 +1100,11 @@ def _run_session_query(
     query: str,
 ) -> None:
     run_outdir = _session_query_outdir(Path(args.outdir), run_id=run_id, query=query)
-    decision = route_ff2_query(query, route_override=args.route)
+    decision = route_ff2_query(
+        query,
+        route_override=args.route,
+        excluded_routes=tuple(getattr(args, "router_excluded_routes", ()) or ()),
+    )
     launcher.update_session_run(
         run_id,
         status="routing",
@@ -1109,6 +1193,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--execution-mode", choices=("quick", "interactive", "deep"), default="quick")
     parser.add_argument("--route", choices=("auto", "democritus", "basket_rocket_sec", "culinary_tour", "product_feedback", "company_similarity", "course_demo"), default="auto")
+    parser.add_argument("--router-excluded-routes", action="append", default=[])
     parser.add_argument("--democritus-manifest", default="")
     parser.add_argument("--democritus-source-pdf-root", default="")
     parser.add_argument("--democritus-target-docs", type=int, default=None)
@@ -1256,7 +1341,12 @@ FF3QueryRouterRunResult = FF2QueryRouterRunResult
 FF3QueryRouter = FF2QueryRouter
 
 
-def route_ff3_query(query: str, *, route_override: str = "auto") -> FF3RouteDecision:
+def route_ff3_query(
+    query: str,
+    *,
+    route_override: str = "auto",
+    excluded_routes: tuple[str, ...] | list[str] | None = None,
+) -> FF3RouteDecision:
     """Forward-looking FF3 alias for the inherited query router."""
 
-    return route_ff2_query(query, route_override=route_override)
+    return route_ff2_query(query, route_override=route_override, excluded_routes=excluded_routes)

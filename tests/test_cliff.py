@@ -102,6 +102,14 @@ class CLIFFTests(unittest.TestCase):
 
         self.assertEqual(decision.route_name, "course_demo")
 
+    def test_route_cliff_query_respects_wrong_route_feedback(self) -> None:
+        decision = module.route_cliff_query(
+            "How comfortable is the Lovesac sectional sofa?",
+            excluded_routes=("product_feedback",),
+        )
+
+        self.assertEqual(decision.route_name, "democritus")
+
     def test_report_to_cliff_consciousness_selects_completed_report(self) -> None:
         decision = module.route_cliff_query("How comfortable is the Lovesac sectional sofa?")
 
@@ -117,7 +125,9 @@ class CLIFFTests(unittest.TestCase):
 
     def test_build_worker_command_includes_query_and_outdir(self) -> None:
         args = argparse.Namespace(
+            llm_token_budget=20000,
             route="auto",
+            router_excluded_routes=["product_feedback", "course_demo"],
             democritus_input_pdf="/tmp/uploaded_paper.pdf",
             democritus_input_pdf_dir="/tmp/uploaded_pdfs",
             democritus_manifest="",
@@ -177,6 +187,9 @@ class CLIFFTests(unittest.TestCase):
         self.assertIn("functorflow_v3.cliff_worker", command)
         self.assertIn("How easy is it to drive the Mazda Miata 3?", command)
         self.assertIn("/tmp/cliff-run-0001", command)
+        self.assertIn("--router-excluded-routes", command)
+        self.assertIn("product_feedback", command)
+        self.assertIn("course_demo", command)
         self.assertIn("--democritus-input-pdf", command)
         self.assertIn("/tmp/uploaded_paper.pdf", command)
         self.assertIn("--democritus-input-pdf-dir", command)
@@ -195,6 +208,8 @@ class CLIFFTests(unittest.TestCase):
         self.assertIn("--culinary-manifest", command)
         self.assertIn("/tmp/culinary_stop_manifest.jsonl", command)
         self.assertIn("--course-timeout-sec", command)
+        self.assertIn("--llm-token-budget", command)
+        self.assertIn("20000", command)
 
     def test_run_cliff_session_query_moves_back_to_conscious_layer(self) -> None:
         class FakeLauncher:
@@ -641,6 +656,7 @@ class CLIFFTests(unittest.TestCase):
 
     def test_launch_cliff_worker_sets_unbuffered_python(self) -> None:
         args = argparse.Namespace(
+            llm_token_budget=20000,
             route="auto",
             democritus_manifest="",
             democritus_source_pdf_root="",
@@ -694,6 +710,7 @@ class CLIFFTests(unittest.TestCase):
                     worker.stderr_handle.close()
 
         self.assertEqual(captured["kwargs"]["env"]["PYTHONUNBUFFERED"], "1")
+        self.assertEqual(captured["kwargs"]["env"]["CLIFF_LLM_TOKEN_BUDGET"], "20000")
 
     def test_cliff_worker_completes_interactive_democritus_checkpoint_without_phase2_status(self) -> None:
         checkpoint_path = Path("/tmp/democritus_topic_checkpoint.html")

@@ -36,6 +36,16 @@ _DEMOCRITUS_CURATION_SUMMARY = "user_curation_summary.json"
 _COMPANY_SIMILARITY_CHECKPOINT_HTML = "company_similarity_checkpoint.html"
 _COMPANY_SIMILARITY_CHECKPOINT_MANIFEST = "company_similarity_checkpoint.json"
 _COMPANY_SIMILARITY_CURATION_STATE = "company_similarity_year_window.json"
+_ROUTER_FEEDBACK_LOG = "router_feedback.jsonl"
+_ROUTER_FEEDBACK_SUMMARY = "router_feedback_summary.json"
+_SUPPORTED_ROUTE_NAMES = (
+    "democritus",
+    "basket_rocket_sec",
+    "culinary_tour",
+    "product_feedback",
+    "company_similarity",
+    "course_demo",
+)
 
 
 @dataclass(frozen=True)
@@ -118,6 +128,18 @@ class DashboardQueryLauncher:
         if normalized == "interactive":
             return "interactive"
         return "quick"
+
+    @staticmethod
+    def _normalize_llm_token_budget(value: object) -> int | None:
+        try:
+            budget_tokens = int(str(value or "").strip())
+        except (TypeError, ValueError):
+            return None
+        return budget_tokens if budget_tokens > 0 else None
+
+    def _run_llm_token_budget(self, run_state: dict[str, object]) -> int | None:
+        overrides = dict(run_state.get("submission_overrides") or {})
+        return self._normalize_llm_token_budget(overrides.get("llm_token_budget"))
 
     @staticmethod
     def _route_research_profile(route_name: object) -> dict[str, str]:
@@ -531,7 +553,14 @@ class DashboardQueryLauncher:
             "parent_run_id": "",
             "created_at": path.stat().st_mtime,
             "updated_at": path.stat().st_mtime,
-            "submission_overrides": {"route": route_name} if route_name else {},
+            "submission_overrides": {
+                key: value
+                for key, value in (
+                    ("route", route_name or None),
+                    ("llm_token_budget", self._normalize_llm_token_budget(payload.get("llm_token_budget"))),
+                )
+                if value is not None
+            },
             "archived": True,
             "archive_source_path": str(path.resolve()),
             }
@@ -623,6 +652,9 @@ class DashboardQueryLauncher:
         route_name = " ".join(str(run_state.get("route_name") or "").split()).strip()
         if route_name and "route" not in submission_overrides:
             submission_overrides["route"] = route_name
+        llm_token_budget = self._run_llm_token_budget(run_state)
+        if llm_token_budget is not None:
+            submission_overrides.setdefault("llm_token_budget", llm_token_budget)
         return self.submit_query(
             query,
             execution_mode=self._normalize_execution_mode(run_state.get("execution_mode")),
@@ -630,6 +662,149 @@ class DashboardQueryLauncher:
             submission_overrides=submission_overrides or None,
             queued_note=f"Queued by re-running archived run {run_id}.",
         )
+
+    def _router_feedback_root_for_run(self, run_state: dict[str, object]) -> Path | None:
+        archive_source = str(run_state.get("archive_source_path") or "").strip()
+        if archive_source:
+            try:
+                return Path(archive_source).expanduser().resolve().parent
+            except Exception:
+                return None
+        outdir_value = str(run_state.get("outdir") or "").strip()
+        if not outdir_value:
+            return None
+        try:
+            return Path(outdir_value).expanduser().resolve()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _normalized_excluded_routes(values: object) -> tuple[str, ...]:
+        routes: list[str] = []
+        for value in list(values or []):
+            normalized = " ".join(str(value or "").split()).strip().lower()
+            if normalized in _SUPPORTED_ROUTE_NAMES:
+                routes.append(normalized)
+        return tuple(dict.fromkeys(routes))
+
+    def _record_router_feedback(
+        self,
+        run_state: dict[str, object],
+        *,
+        feedback_kind: str,
+        feedback_status: str,
+        rejected_route: str,
+        excluded_routes: tuple[str, ...],
+        queued_followup_run_id: str | None = None,
+    ) -> None:
+        feedback_root = self._router_feedback_root_for_run(run_state)
+        if feedback_root is None:
+            return
+        log_path = feedback_root / _ROUTER_FEEDBACK_LOG
+        summary_path = feedback_root / _ROUTER_FEEDBACK_SUMMARY
+        event = {
+            "timestamp": time.time(),
+            "run_id": str(run_state.get("run_id") or ""),
+            "parent_run_id": str(run_state.get("parent_run_id") or ""),
+            "query": str(run_state.get("query") or ""),
+            "route_name": str(run_state.get("route_name") or ""),
+            "execution_mode": str(run_state.get("execution_mode") or ""),
+            "feedback_kind": str(feedback_kind),
+            "feedback_status": str(feedback_status),
+            "rejected_route": str(rejected_route),
+            "excluded_routes": list(excluded_routes),
+            "queued_followup_run_id": str(queued_followup_run_id or ""),
+            "artifact_path": str(run_state.get("artifact_path") or ""),
+            "outdir": str(run_state.get("outdir") or ""),
+            "archived": bool(run_state.get("archived")),
+        }
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event) + "\n")
+
+        existing_summary = self._read_json_dict(summary_path) if summary_path.exists() else {}
+        feedback_counts = Counter(
+            {
+                str(key): int(value)
+                for key, value in dict(existing_summary.get("feedback_counts") or {}).items()
+                if str(key).strip()
+            }
+        )
+        status_counts = Counter(
+            {
+                str(key): int(value)
+                for key, value in dict(existing_summary.get("feedback_status_counts") or {}).items()
+                if str(key).strip()
+            }
+        )
+        rejected_route_counts = Counter(
+            {
+                str(key): int(value)
+                for key, value in dict(existing_summary.get("rejected_route_counts") or {}).items()
+                if str(key).strip()
+            }
+        )
+        feedback_counts[str(feedback_kind)] += 1
+        status_counts[str(feedback_status)] += 1
+        if rejected_route:
+            rejected_route_counts[str(rejected_route)] += 1
+        summary = {
+            "event_count": int(existing_summary.get("event_count") or 0) + 1,
+            "feedback_counts": dict(feedback_counts),
+            "feedback_status_counts": dict(status_counts),
+            "rejected_route_counts": dict(rejected_route_counts),
+            "latest_event": event,
+            "latest_excluded_routes": list(excluded_routes),
+        }
+        self._write_json_file(summary_path, summary)
+
+    def request_run_wrong_route(self, run_id: str) -> str | None:
+        with self._lock:
+            run_state = self._session_runs_by_id.get(run_id)
+            if run_state is None:
+                self._refresh_archived_runs()
+                run_state = self._archived_runs_by_id.get(run_id)
+            run_state = dict(run_state or {})
+        query = " ".join(str(run_state.get("query") or "").split()).strip()
+        route_name = " ".join(str(run_state.get("route_name") or "").split()).strip().lower()
+        if (
+            not query
+            or not route_name
+            or route_name not in _SUPPORTED_ROUTE_NAMES
+            or str(run_state.get("status") or "").strip().lower() != "complete"
+        ):
+            self._record_router_feedback(
+                run_state,
+                feedback_kind="wrong_route",
+                feedback_status="ignored",
+                rejected_route=route_name,
+                excluded_routes=(),
+            )
+            return None
+        overrides = dict(run_state.get("submission_overrides") or {})
+        existing_excluded = self._normalized_excluded_routes(overrides.get("router_excluded_routes"))
+        excluded_routes = tuple(dict.fromkeys(existing_excluded + (route_name,)))
+        execution_mode = self._normalize_execution_mode(run_state.get("execution_mode"))
+        llm_token_budget = self._run_llm_token_budget(run_state)
+        submission_overrides = {"route": "auto", "router_excluded_routes": list(excluded_routes)}
+        if llm_token_budget is not None:
+            submission_overrides["llm_token_budget"] = llm_token_budget
+        new_run_id = self.submit_query(
+            query,
+            execution_mode=execution_mode,
+            parent_run_id=run_id,
+            submission_overrides=submission_overrides,
+            queued_note=f"Queued after marking the {route_name} route as wrong for {run_id}.",
+        )
+        self._record_router_feedback(
+            run_state,
+            feedback_kind="wrong_route",
+            feedback_status="queued" if new_run_id else "ignored",
+            rejected_route=route_name,
+            excluded_routes=excluded_routes,
+            queued_followup_run_id=new_run_id,
+        )
+        return new_run_id
 
     def request_session_run_deepen(
         self,
@@ -657,9 +832,12 @@ class DashboardQueryLauncher:
             if route_name not in {"democritus", "company_similarity"}:
                 return None
             query = " ".join(str(query_override or run_state.get("query") or "").split()).strip()
+            llm_token_budget = self._run_llm_token_budget(dict(run_state))
         if not query:
             return None
         submission_overrides: dict[str, object] = {"route": route_name}
+        if llm_token_budget is not None:
+            submission_overrides["llm_token_budget"] = llm_token_budget
         if democritus_manifest_path is not None:
             submission_overrides["democritus_manifest"] = str(democritus_manifest_path.resolve())
         if democritus_target_docs is not None:
@@ -711,12 +889,15 @@ class DashboardQueryLauncher:
             if route_name != "democritus":
                 return None
             query = " ".join(str(query_override or run_state.get("query") or "").split()).strip()
+            llm_token_budget = self._run_llm_token_budget(dict(run_state))
         if not query:
             return None
         submission_overrides: dict[str, object] = {
             "route": "democritus",
             "democritus_target_docs": max(1, int(democritus_target_docs)),
         }
+        if llm_token_budget is not None:
+            submission_overrides["llm_token_budget"] = llm_token_budget
         if democritus_atlas_baseline:
             submission_overrides["democritus_atlas_baseline"] = dict(democritus_atlas_baseline)
         if democritus_base_query:
@@ -2328,6 +2509,13 @@ class DashboardQueryLauncher:
                     new_run_id = launcher.request_archived_run_rerun(run_id)
                     self._send_json({"ok": bool(new_run_id), "run_id": run_id, "new_run_id": new_run_id})
                     return
+                if parsed.path == "/wrong-route":
+                    content_length = int(self.headers.get("Content-Length") or "0")
+                    payload = self.rfile.read(content_length).decode("utf-8", errors="replace")
+                    run_id = " ".join(parse_qs(payload).get("run_id", [""])[0].split()).strip()
+                    new_run_id = launcher.request_run_wrong_route(run_id)
+                    self._send_json({"ok": bool(new_run_id), "run_id": run_id, "new_run_id": new_run_id})
+                    return
                 if parsed.path != "/submit":
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
@@ -2344,7 +2532,19 @@ class DashboardQueryLauncher:
                         status=HTTPStatus.BAD_REQUEST,
                     )
                     return
-                launcher.submit_query(query, execution_mode=execution_mode)
+                llm_token_budget = launcher._normalize_llm_token_budget(
+                    parsed_payload.get("llm_token_budget", [""])[0]
+                )
+                submission_overrides = (
+                    {"llm_token_budget": llm_token_budget}
+                    if llm_token_budget is not None
+                    else None
+                )
+                launcher.submit_query(
+                    query,
+                    execution_mode=execution_mode,
+                    submission_overrides=submission_overrides,
+                )
                 self._send_html(launcher._render_launcher_page())
 
             def log_message(self, format: str, *args) -> None:  # noqa: A003
@@ -2434,6 +2634,23 @@ class DashboardQueryLauncher:
             "label": label,
         }
 
+    def _llm_budget_summary(self, run_state: dict[str, object], llm_usage: dict[str, object]) -> dict[str, object]:
+        budget_tokens = self._run_llm_token_budget(run_state)
+        if budget_tokens is None:
+            return {}
+        spent_tokens = int(llm_usage.get("total_tokens") or 0)
+        remaining_tokens = max(0, budget_tokens - spent_tokens)
+        label = f"{spent_tokens:,} of {budget_tokens:,} tokens used · {remaining_tokens:,} remaining"
+        if spent_tokens > budget_tokens:
+            label += f" ({spent_tokens - budget_tokens:,} over budget)"
+        return {
+            "budget_tokens": budget_tokens,
+            "spent_tokens": spent_tokens,
+            "remaining_tokens": remaining_tokens,
+            "exhausted": spent_tokens >= budget_tokens,
+            "label": label,
+        }
+
     def _run_eta_summary(self, run_state: dict[str, object]) -> dict[str, object]:
         route_name = str(run_state.get("route_name") or "").strip()
         status = str(run_state.get("status") or "").strip().lower()
@@ -2506,7 +2723,14 @@ class DashboardQueryLauncher:
             run_state["current_stage"] = eta_summary.get("current_stage")
             run_state["current_stage_label"] = eta_summary.get("current_stage_label")
             run_state["peak_parallelism"] = eta_summary.get("peak_parallelism")
-        llm_usage_summary = self._llm_usage_summary(self._route_llm_usage(run_state))
+        llm_usage = self._route_llm_usage(run_state)
+        llm_budget_summary = self._llm_budget_summary(run_state, llm_usage)
+        if llm_budget_summary:
+            run_state["llm_budget_label"] = llm_budget_summary.get("label")
+            run_state["llm_budget_tokens"] = llm_budget_summary.get("budget_tokens")
+            run_state["llm_spent_tokens"] = llm_budget_summary.get("spent_tokens")
+            run_state["llm_remaining_tokens"] = llm_budget_summary.get("remaining_tokens")
+        llm_usage_summary = self._llm_usage_summary(llm_usage)
         if llm_usage_summary:
             run_state["llm_usage_label"] = llm_usage_summary.get("label")
             run_state["llm_total_tokens"] = llm_usage_summary.get("total_tokens")
@@ -2581,7 +2805,7 @@ class DashboardQueryLauncher:
 """
 
     def _render_run_artifact_page(self, run_id: str) -> str:
-        run_state = self._lookup_run_state(run_id)
+        run_state = self._enriched_run_state(self._lookup_run_state(run_id))
         run_status = str(run_state.get("status") or "").strip()
         route_name = str(run_state.get("route_name") or "").strip()
         artifact_path_value = str(run_state.get("artifact_path") or "").strip()
@@ -3486,6 +3710,7 @@ class DashboardQueryLauncher:
         title = html.escape(self.config.title)
         query = html.escape(str(run_state.get("query") or ""))
         note = html.escape(str(run_state.get("note") or "CLIFF is gathering live partial outputs from this run."))
+        llm_budget_label = html.escape(str(run_state.get("llm_budget_label") or ""))
         llm_usage_label = html.escape(str(run_state.get("llm_usage_label") or ""))
         iframe_src = self._launcher_href_for_run_file(run_id, artifact_path)
         return f"""<!doctype html>
@@ -3551,6 +3776,7 @@ class DashboardQueryLauncher:
         <p class="eyebrow">Inspecting Run</p>
         <h1>{query}</h1>
         <p>{note}</p>
+        {'<p><strong>LLM budget:</strong> ' + llm_budget_label + '</p>' if llm_budget_label else ''}
         {'<p><strong>LLM usage:</strong> ' + llm_usage_label + '</p>' if llm_usage_label else ''}
       </section>
       <section class="artifact-shell">
@@ -3789,6 +4015,21 @@ class DashboardQueryLauncher:
               </p>
             </fieldset>
             """
+        llm_budget_markup = """
+            <fieldset class="execution-mode-fieldset">
+              <legend>LLM token budget</legend>
+              <label class="query-form-inline-label" for="llm_token_budget">Maximum total tokens for this run</label>
+              <input
+                id="llm_token_budget"
+                name="llm_token_budget"
+                type="number"
+                min="1"
+                step="1"
+                placeholder="Optional, e.g. 20000"
+              />
+              <p class="execution-mode-hint">If set, CLIFF will stop once this run exhausts the shared OpenAI token budget.</p>
+            </fieldset>
+        """
         form_or_status = f"""
           <form method="post" action="/submit" class="query-form">
             <label for="query">{query_label}</label>
@@ -3801,6 +4042,7 @@ class DashboardQueryLauncher:
               required
             ></textarea>
             {execution_mode_markup}
+            {llm_budget_markup}
             {error_html}
             <button type="submit">{submit_label}</button>
           </form>
@@ -3825,6 +4067,7 @@ class DashboardQueryLauncher:
                 required
               ></textarea>
               {execution_mode_markup}
+              {llm_budget_markup}
               {error_html}
               <button type="submit">{submit_label}</button>
             </form>
@@ -3883,6 +4126,9 @@ class DashboardQueryLauncher:
                 var rerunAction = archived
                   ? '<div class="run-actions"><button type="button" class="run-deepen-button" onclick="requestArchivedRerun(\\'' + escapeHtml(run.run_id || '') + '\\')">Re-run query</button></div>'
                   : '';
+                var wrongRouteAction = ((run.status || '') === 'complete' && (run.route_name || ''))
+                  ? '<div class="run-actions"><button type="button" class="run-deepen-button" onclick="requestWrongRoute(\\'' + escapeHtml(run.run_id || '') + '\\')">Wrong route</button></div>'
+                  : '';
                 var inspectLabel = ((run.status || '') === 'queued' || (run.status || '') === 'routing' || (run.status || '') === 'running' || (run.status || '') === 'stopping')
                   ? 'Inspect run'
                   : 'Open result';
@@ -3893,6 +4139,9 @@ class DashboardQueryLauncher:
                 var artifact = run.artifact_path ? '<div class="run-meta"><strong>Artifact:</strong> <code>' + escapeHtml(run.artifact_path) + '</code></div>' : '';
                 var researchNote = run.research_profile_note
                   ? '<div class="run-meta"><strong>Latency class:</strong> ' + escapeHtml(run.research_profile_note) + '</div>'
+                  : '';
+                var llmBudget = run.llm_budget_label
+                  ? '<div class="run-meta"><strong>LLM budget:</strong> ' + escapeHtml(run.llm_budget_label) + '</div>'
                   : '';
                 var llmUsage = run.llm_usage_label
                   ? '<div class="run-meta"><strong>LLM usage:</strong> ' + escapeHtml(run.llm_usage_label) + '</div>'
@@ -3915,8 +4164,10 @@ class DashboardQueryLauncher:
                   + stopAction
                   + deepenAction
                   + rerunAction
+                  + wrongRouteAction
                   + openAction
                   + researchNote
+                  + llmBudget
                   + llmUsage
                   + unconscious
                   + outdir
@@ -3967,6 +4218,29 @@ class DashboardQueryLauncher:
 
             function requestArchivedRerun(runId) {{
               fetch('/rerun-archived', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' }},
+                body: 'run_id=' + encodeURIComponent(runId || '')
+              }})
+                .then(function () {{
+                  return fetch('/state?ts=' + Date.now(), {{ cache: 'no-store' }});
+                }})
+                .then(function (response) {{ return response.json(); }})
+                .then(function (payload) {{
+                  var container = document.getElementById('session-runs');
+                  if (container) {{
+                    container.innerHTML = renderRuns(payload.runs || [], 'No queries have been submitted in this session yet.');
+                  }}
+                  var archived = document.getElementById('archived-runs');
+                  if (archived) {{
+                    archived.innerHTML = renderRuns(payload.archived_runs || [], 'No archived CLIFF runs were discovered under the configured archive roots yet.');
+                  }}
+                }})
+                .catch(function () {{}});
+            }}
+
+            function requestWrongRoute(runId) {{
+              fetch('/wrong-route', {{
                 method: 'POST',
                 headers: {{ 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' }},
                 body: 'run_id=' + encodeURIComponent(runId || '')
@@ -4136,6 +4410,16 @@ class DashboardQueryLauncher:
         min-height: 150px;
         box-shadow: inset 0 1px 2px rgba(40, 28, 11, 0.06);
       }}
+      .query-form input[type="number"] {{
+        width: min(280px, 100%);
+        padding: 12px 14px;
+        border-radius: 14px;
+        border: 1px solid #baa77e;
+        background: #fffdf9;
+        color: var(--ink);
+        font: inherit;
+        box-shadow: inset 0 1px 2px rgba(40, 28, 11, 0.06);
+      }}
       .query-form button {{
         width: fit-content;
         padding: 12px 20px;
@@ -4177,6 +4461,10 @@ class DashboardQueryLauncher:
         line-height: 1.6;
         color: var(--muted);
         font-size: 0.95rem;
+      }}
+      .query-form-inline-label {{
+        display: block;
+        margin-bottom: 8px;
       }}
       .demo-tour {{
         margin-top: 18px;
@@ -4595,6 +4883,11 @@ class DashboardQueryLauncher:
                 if archived
                 else ""
             )
+            wrong_route_action_markup = (
+                f'<div class="run-actions"><button type="button" class="run-deepen-button" onclick="requestWrongRoute(\'{esc(run.get("run_id") or "")}\')">Wrong route</button></div>'
+                if run.get("status") == "complete" and run.get("route_name")
+                else ""
+            )
             open_action_markup = (
                 f'<div class="run-actions"><a class="run-link" href="/run-artifact?run_id={esc(run.get("run_id") or "")}" target="_blank" rel="noopener noreferrer">{"Inspect run" if run.get("status") in {"queued", "routing", "running", "stopping"} else "Open result"}</a></div>'
                 if run.get("artifact_path")
@@ -4623,6 +4916,11 @@ class DashboardQueryLauncher:
                 if run.get("research_profile_note")
                 else ""
             )
+            llm_budget_markup = (
+                f'<div class="run-meta"><strong>LLM budget:</strong> {esc(run.get("llm_budget_label"))}</div>'
+                if run.get("llm_budget_label")
+                else ""
+            )
             llm_usage_markup = (
                 f'<div class="run-meta"><strong>LLM usage:</strong> {esc(run.get("llm_usage_label"))}</div>'
                 if run.get("llm_usage_label")
@@ -4646,8 +4944,10 @@ class DashboardQueryLauncher:
                 f"{stop_action_markup}"
                 f"{deepen_action_markup}"
                 f"{rerun_action_markup}"
+                f"{wrong_route_action_markup}"
                 f"{open_action_markup}"
                 f"{research_note_markup}"
+                f"{llm_budget_markup}"
                 f"{llm_usage_markup}"
                 f"{unconscious_markup}"
                 f"{outdir_markup}"

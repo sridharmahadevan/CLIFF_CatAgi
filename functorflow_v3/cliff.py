@@ -15,6 +15,7 @@ from .basket_rocket_corpus_synthesis import build_basket_rocket_corpus_synthesis
 from .consciousness import ConsciousFieldOfView, ConsciousWorkspaceState, ConsciousnessFunctor, UnconsciousProcess
 from .dashboard_query_launcher import DashboardQueryLauncher, DashboardQueryLauncherConfig
 from .democritus_corpus_synthesis import build_democritus_corpus_synthesis
+from .llm_usage import scoped_llm_token_budget_env
 from .product_feedback_corpus_synthesis import build_product_feedback_corpus_synthesis
 from .query_router_agentic import (
     FF3QueryRouter,
@@ -61,10 +62,15 @@ class _ActiveCLIFFWorker:
     stop_requested: bool = False
 
 
-def route_cliff_query(query: str, *, route_override: str = "auto") -> CLIFFRouteDecision:
+def route_cliff_query(
+    query: str,
+    *,
+    route_override: str = "auto",
+    excluded_routes: tuple[str, ...] | list[str] | None = None,
+) -> CLIFFRouteDecision:
     """Route an NLP query through CLIFF's unconscious orchestrator."""
 
-    return route_ff3_query(query, route_override=route_override)
+    return route_ff3_query(query, route_override=route_override, excluded_routes=excluded_routes)
 
 
 def report_to_cliff_consciousness(
@@ -125,6 +131,14 @@ def _should_pause_at_interactive_checkpoint(
         decision.route_name in {"democritus", "company_similarity"}
         and str(execution_mode).strip().lower() == "interactive"
     )
+
+
+def _normalize_llm_token_budget(value: object) -> int | None:
+    try:
+        budget_tokens = int(str(value or "").strip())
+    except (TypeError, ValueError):
+        return None
+    return budget_tokens if budget_tokens > 0 else None
 
 
 def _democritus_result_needs_clarification(democritus_result: object) -> bool:
@@ -264,6 +278,10 @@ def _build_worker_command(
         "--sec-company-limit",
         str(args.sec_company_limit),
     ]
+    for route_name in tuple(getattr(args, "router_excluded_routes", ()) or ()):
+        normalized_route = " ".join(str(route_name or "").split()).strip().lower()
+        if normalized_route:
+            command.extend(["--router-excluded-routes", normalized_route])
     if cycle_stage == "first_pass":
         command.append("--cliff-defer-final-synthesis")
     if getattr(args, "democritus_input_pdf", ""):
@@ -319,6 +337,9 @@ def _build_worker_command(
         command.extend(["--analysis-question", str(args.analysis_question)])
     if args.product_discovery_only:
         command.append("--product-discovery-only")
+    llm_token_budget = _normalize_llm_token_budget(getattr(args, "llm_token_budget", None))
+    if llm_token_budget is not None:
+        command.extend(["--llm-token-budget", str(llm_token_budget)])
     if getattr(args, "company_similarity_year_start", None) is not None:
         command.extend(["--company-similarity-year-start", str(args.company_similarity_year_start)])
     if getattr(args, "company_similarity_year_end", None) is not None:
@@ -357,6 +378,9 @@ def _launch_cliff_worker(
     stderr_handle = stderr_path.open("w", encoding="utf-8")
     env = dict(os.environ)
     env["PYTHONUNBUFFERED"] = "1"
+    llm_token_budget = _normalize_llm_token_budget(getattr(args, "llm_token_budget", None))
+    if llm_token_budget is not None:
+        env["CLIFF_LLM_TOKEN_BUDGET"] = str(llm_token_budget)
     process = subprocess.Popen(
         _build_worker_command(args, run_outdir=run_outdir, query=query, cycle_stage=cycle_stage),
         stdout=stdout_handle,
@@ -535,7 +559,11 @@ def _start_cliff_session_query(
     active_runs_lock: threading.Lock,
 ) -> None:
     run_outdir = _session_query_outdir(Path(args.outdir), run_id=run_id, query=query)
-    decision = route_cliff_query(query, route_override=args.route)
+    decision = route_cliff_query(
+        query,
+        route_override=args.route,
+        excluded_routes=tuple(getattr(args, "router_excluded_routes", ()) or ()),
+    )
     predicted_artifact_path = _predicted_artifact_path(run_outdir, decision)
     run_outdir.mkdir(parents=True, exist_ok=True)
     launcher.update_session_run(
@@ -619,7 +647,11 @@ def _run_cliff_session_query(
     query: str,
 ) -> None:
     run_outdir = _session_query_outdir(Path(args.outdir), run_id=run_id, query=query)
-    decision = route_cliff_query(query, route_override=args.route)
+    decision = route_cliff_query(
+        query,
+        route_override=args.route,
+        excluded_routes=tuple(getattr(args, "router_excluded_routes", ()) or ()),
+    )
     predicted_artifact_path = _predicted_artifact_path(run_outdir, decision)
     launcher.update_session_run(
         run_id,
@@ -631,48 +663,49 @@ def _run_cliff_session_query(
         outdir=run_outdir,
     )
     try:
-        launcher.update_session_run(
-            run_id,
-            status="running",
-            mind_layer="unconscious",
-            route_name=decision.route_name,
-            note=f"CLIFF is running the {decision.route_name} workflow in the background.",
-            artifact_path=predicted_artifact_path,
-            outdir=run_outdir,
-        )
-        should_redispatch = _decision_supports_conscious_redispatch(decision) and not _should_pause_at_interactive_checkpoint(
-            decision,
-            execution_mode=getattr(args, "execution_mode", "quick"),
-        )
-        if should_redispatch:
-            first_pass_args = argparse.Namespace(**vars(args), cliff_defer_final_synthesis=True)
-            result = _build_router_from_args_with_outdir(first_pass_args, query=query, outdir=run_outdir).run()
-            first_pass_artifact_path = _artifact_path_for_result(result)
-            if _democritus_result_needs_clarification(result.democritus_result):
-                should_redispatch = False
-                artifact_path = first_pass_artifact_path
+        with scoped_llm_token_budget_env(_normalize_llm_token_budget(getattr(args, "llm_token_budget", None))):
+            launcher.update_session_run(
+                run_id,
+                status="running",
+                mind_layer="unconscious",
+                route_name=decision.route_name,
+                note=f"CLIFF is running the {decision.route_name} workflow in the background.",
+                artifact_path=predicted_artifact_path,
+                outdir=run_outdir,
+            )
+            should_redispatch = _decision_supports_conscious_redispatch(decision) and not _should_pause_at_interactive_checkpoint(
+                decision,
+                execution_mode=getattr(args, "execution_mode", "quick"),
+            )
+            if should_redispatch:
+                first_pass_args = argparse.Namespace(**vars(args), cliff_defer_final_synthesis=True)
+                result = _build_router_from_args_with_outdir(first_pass_args, query=query, outdir=run_outdir).run()
+                first_pass_artifact_path = _artifact_path_for_result(result)
+                if _democritus_result_needs_clarification(result.democritus_result):
+                    should_redispatch = False
+                    artifact_path = first_pass_artifact_path
+                else:
+                    launcher.update_session_run(
+                        run_id,
+                        status="routing",
+                        mind_layer="conscious",
+                        route_name=decision.route_name,
+                        note=(
+                            "The unconscious orchestrator completed a first pass and reported its partial result into "
+                            "CLIFF's conscious layer. Consciousness is now initiating a second unconscious synthesis pass."
+                        ),
+                        artifact_path=first_pass_artifact_path,
+                        outdir=run_outdir,
+                    )
+                    synthesis_artifact_path = _build_cliff_synthesis_from_first_pass(
+                        query=query,
+                        decision=decision,
+                        run_outdir=run_outdir,
+                    )
+                    artifact_path = synthesis_artifact_path or first_pass_artifact_path
             else:
-                launcher.update_session_run(
-                    run_id,
-                    status="routing",
-                    mind_layer="conscious",
-                    route_name=decision.route_name,
-                    note=(
-                        "The unconscious orchestrator completed a first pass and reported its partial result into "
-                        "CLIFF's conscious layer. Consciousness is now initiating a second unconscious synthesis pass."
-                    ),
-                    artifact_path=first_pass_artifact_path,
-                    outdir=run_outdir,
-                )
-                synthesis_artifact_path = _build_cliff_synthesis_from_first_pass(
-                    query=query,
-                    decision=decision,
-                    run_outdir=run_outdir,
-                )
-                artifact_path = synthesis_artifact_path or first_pass_artifact_path
-        else:
-            result = _build_router_from_args_with_outdir(args, query=query, outdir=run_outdir).run()
-            artifact_path = _artifact_path_for_result(result)
+                result = _build_router_from_args_with_outdir(args, query=query, outdir=run_outdir).run()
+                artifact_path = _artifact_path_for_result(result)
         conscious_report = report_to_cliff_consciousness(query, decision, artifact_path=artifact_path)
         if result.democritus_result and _democritus_result_needs_clarification(result.democritus_result):
             clarification_request = getattr(getattr(result.democritus_result, "query_plan", None), "clarification_request", None)
@@ -770,7 +803,9 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--execution-mode", choices=("quick", "interactive", "deep"), default="quick")
+    parser.add_argument("--llm-token-budget", type=int, default=None)
     parser.add_argument("--route", choices=("auto", "democritus", "basket_rocket_sec", "culinary_tour", "product_feedback", "company_similarity", "course_demo"), default="auto")
+    parser.add_argument("--router-excluded-routes", action="append", default=[])
     parser.add_argument("--democritus-input-pdf", default="")
     parser.add_argument("--democritus-input-pdf-dir", default="")
     parser.add_argument("--democritus-manifest", default="")
@@ -887,7 +922,8 @@ def main() -> None:
         inline_query = " ".join(str(args.query or "").split()).strip()
         if inline_query:
             query = inline_query
-            result = _build_router_from_args(args, query=query).run()
+            with scoped_llm_token_budget_env(_normalize_llm_token_budget(args.llm_token_budget)):
+                result = _build_router_from_args(args, query=query).run()
         else:
             launcher_artifact_path = _router_launcher_artifact_path(Path(args.outdir))
             with DashboardQueryLauncher(

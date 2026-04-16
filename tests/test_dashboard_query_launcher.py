@@ -129,6 +129,44 @@ class DashboardQueryLauncherTests(unittest.TestCase):
             {"route": "democritus"},
         )
 
+    def test_request_session_run_deepen_preserves_llm_token_budget(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Find me 10 studies of minimum wage",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+                enable_execution_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        run_id = launcher.submit_query(
+            "Find me 10 studies of minimum wage",
+            execution_mode="interactive",
+            submission_overrides={"llm_token_budget": 20000},
+        )
+        launcher.wait_for_next_submission(timeout=0.01)
+        launcher.update_session_run(
+            run_id,
+            status="complete",
+            route_name="democritus",
+            note="Interactive checkpoint ready.",
+            artifact_path=Path("/tmp/checkpoint.html"),
+            outdir=Path("/tmp/ff2-run-0002"),
+        )
+
+        deep_run_id = launcher.request_session_run_deepen(run_id)
+
+        self.assertIsNotNone(deep_run_id)
+        self.assertEqual(
+            launcher.submission_overrides_for_run(str(deep_run_id)),
+            {"route": "democritus", "llm_token_budget": 20000},
+        )
+
     def test_request_session_run_deepen_stores_curated_manifest_overrides(self) -> None:
         launcher = DashboardQueryLauncher(
             DashboardQueryLauncherConfig(
@@ -306,6 +344,71 @@ class DashboardQueryLauncherTests(unittest.TestCase):
             launcher.submission_overrides_for_run(str(rerun_id)),
             {"route": "course_demo"},
         )
+
+    def test_request_archived_wrong_route_queues_followup_and_logs_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_root = Path(tmpdir) / "archive"
+            archived_run = archive_root / "cliff_session1-run-0009-20260411-093500-lovesac"
+            archived_run.mkdir(parents=True, exist_ok=True)
+            (archived_run / "cliff_run_record.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": archived_run.name,
+                        "query": "How comfortable is the Lovesac sectional sofa?",
+                        "status": "complete",
+                        "route_name": "product_feedback",
+                        "artifact_path": str((archived_run / "product_feedback" / "product_feedback_dashboard.html").resolve()),
+                        "outdir": str(archived_run.resolve()),
+                        "execution_mode": "quick",
+                        "submission_overrides": {"route": "product_feedback"},
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            launcher = DashboardQueryLauncher(
+                DashboardQueryLauncherConfig(
+                    title="CLIFF",
+                    subtitle="Test session",
+                    query_label="CLIFF query",
+                    query_placeholder="Ask CLIFF",
+                    submit_label="Ask CLIFF",
+                    waiting_message="Runs stay in the background.",
+                    session_mode=True,
+                    enable_execution_mode=True,
+                    archive_roots=(archive_root,),
+                )
+            )
+            self.addCleanup(launcher.close)
+
+            launcher._state_payload()
+            rerun_id = launcher.request_run_wrong_route(archived_run.name)
+            queued = launcher.wait_for_next_submission(timeout=0.01)
+            feedback_log = archived_run / "router_feedback.jsonl"
+            feedback_summary = archived_run / "router_feedback_summary.json"
+            feedback_log_exists = feedback_log.exists()
+            feedback_summary_exists = feedback_summary.exists()
+            feedback_events = [
+                json.loads(line)
+                for line in feedback_log.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+        self.assertIsNotNone(rerun_id)
+        self.assertEqual(queued, (rerun_id, "How comfortable is the Lovesac sectional sofa?", "quick"))
+        self.assertEqual(
+            launcher.submission_overrides_for_run(str(rerun_id)),
+            {"route": "auto", "router_excluded_routes": ["product_feedback"]},
+        )
+        self.assertTrue(feedback_log_exists)
+        self.assertTrue(feedback_summary_exists)
+        self.assertEqual(len(feedback_events), 1)
+        self.assertEqual(feedback_events[0]["feedback_kind"], "wrong_route")
+        self.assertEqual(feedback_events[0]["feedback_status"], "queued")
+        self.assertEqual(feedback_events[0]["rejected_route"], "product_feedback")
+        self.assertEqual(feedback_events[0]["excluded_routes"], ["product_feedback"])
+        self.assertEqual(feedback_events[0]["queued_followup_run_id"], rerun_id)
 
     def test_archived_failed_worker_result_recovers_local_artifact_from_copied_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1159,6 +1262,7 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         self.assertIn("run-card-complete", markup)
         self.assertIn("status-complete", markup)
         self.assertIn("Open result", markup)
+        self.assertIn("Wrong route", markup)
         self.assertIn("/run-artifact?run_id=run-0001", markup)
         self.assertIn("Longer analysis", markup)
         self.assertIn("Structured evidence and synthesis can take a few minutes.", markup)
@@ -1194,6 +1298,7 @@ class DashboardQueryLauncherTests(unittest.TestCase):
 
         self.assertIn("Inspect run", markup)
         self.assertNotIn("Open result", markup)
+        self.assertNotIn("Wrong route", markup)
         self.assertIn("Deep research", markup)
         self.assertIn("Even quick mode may take several minutes while CLIFF builds causal state.", markup)
 
@@ -1298,6 +1403,60 @@ class DashboardQueryLauncherTests(unittest.TestCase):
         self.assertEqual(state["runs"][0]["llm_usage_label"], "12,345 tokens across 18 LLM requests")
         self.assertIn("LLM usage:", markup)
         self.assertIn("12,345 tokens across 18 LLM requests", markup)
+
+    def test_state_payload_promotes_llm_budget_summary(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="Find me 10 studies of red wine",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            democritus_telemetry = root / "democritus" / "democritus_runs" / "telemetry.json"
+            democritus_telemetry.parent.mkdir(parents=True, exist_ok=True)
+            democritus_telemetry.write_text(
+                json.dumps(
+                    {
+                        "llm_usage": {
+                            "request_count": 18,
+                            "requests_with_usage": 18,
+                            "total_tokens": 12345,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            run_id = launcher.submit_query(
+                "Find me 10 studies of red wine",
+                submission_overrides={"llm_token_budget": 20000},
+            )
+            launcher.wait_for_next_submission(timeout=0.01)
+            launcher.update_session_run(
+                run_id,
+                status="running",
+                route_name="democritus",
+                note="Running.",
+                outdir=root,
+                artifact_path=root / "democritus" / "democritus_runs" / "democritus_gui.html",
+            )
+
+            state = launcher._state_payload()
+            markup = launcher._render_session_runs_markup(state["runs"])
+
+        self.assertEqual(
+            state["runs"][0]["llm_budget_label"],
+            "12,345 of 20,000 tokens used · 7,655 remaining",
+        )
+        self.assertIn("LLM budget:", markup)
+        self.assertIn("12,345 of 20,000 tokens used · 7,655 remaining", markup)
 
     def test_state_payload_promotes_company_similarity_peak_parallelism_and_stage(self) -> None:
         launcher = DashboardQueryLauncher(
