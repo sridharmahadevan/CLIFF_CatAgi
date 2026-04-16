@@ -84,6 +84,14 @@ class CLIFFTests(unittest.TestCase):
 
         self.assertEqual(decision.route_name, "democritus")
 
+    def test_route_cliff_query_routes_semaglutide_trial_synthesis_to_democritus(self) -> None:
+        decision = module.route_cliff_query(
+            "Analyze 5 recent primary randomized controlled trials of semaglutide for weight loss in adults with obesity "
+            "and synthesize their joint support."
+        )
+
+        self.assertEqual(decision.route_name, "democritus")
+
     def test_route_cliff_query_routes_sheaves_request_to_course_demo(self) -> None:
         decision = module.route_cliff_query("Explain sheaves via covers and gluing")
 

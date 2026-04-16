@@ -104,6 +104,41 @@ _CULINARY_PATTERNS = (
     r"\bfood\b",
 )
 
+_DEMOCRITUS_EVIDENCE_NOUN_PATTERNS = (
+    r"\bstudy\b",
+    r"\bstudies\b",
+    r"\btrial\b",
+    r"\btrials\b",
+    r"\bpaper\b",
+    r"\bpapers\b",
+    r"\bevidence\b",
+    r"\breview\b",
+    r"\breviews\b",
+    r"\bmeta-analysis\b",
+    r"\bmeta analysis\b",
+    r"\bsystematic review\b",
+    r"\bclinical study\b",
+    r"\bclinical studies\b",
+    r"\brandomized controlled trial\b",
+    r"\brandomised controlled trial\b",
+)
+
+_DEMOCRITUS_EVIDENCE_ACTION_PATTERNS = (
+    r"\banaly[sz]e\b",
+    r"\bsynthesi[sz]e\b",
+    r"\bjoint support\b",
+    r"\bjointly support\b",
+    r"\brecent\b",
+    r"\bprimary\b",
+    r"\brandomized\b",
+    r"\brandomised\b",
+    r"\bcontrolled\b",
+    r"\bfind me\b",
+    r"\bfind\b",
+    r"\bwhat do\b",
+    r"\bwhat does\b",
+)
+
 
 def _looks_like_culinary_tour_query(query: str) -> bool:
     normalized = " ".join(query.lower().split())
@@ -115,6 +150,29 @@ def _looks_like_culinary_tour_query(query: str) -> bool:
     has_destination = plan.destination != "Destination TBD"
     has_scheduling_constraint = bool(plan.time_window) or plan.budget_per_meal is not None
     return has_destination and has_scheduling_constraint
+
+
+def _looks_like_democritus_evidence_query(query: str) -> bool:
+    normalized = " ".join(query.lower().split())
+    if "textbook" in normalized or "category theory for agi" in normalized:
+        return False
+    has_evidence_noun = any(
+        re.search(pattern, normalized)
+        for pattern in _DEMOCRITUS_EVIDENCE_NOUN_PATTERNS
+    )
+    if not has_evidence_noun:
+        return False
+    if "joint support" in normalized or "jointly support" in normalized:
+        return True
+    if infer_requested_result_count(
+        query,
+        nouns=("study", "studies", "trial", "trials", "paper", "papers", "review", "reviews"),
+    ) is not None:
+        return True
+    return any(
+        re.search(pattern, normalized)
+        for pattern in _DEMOCRITUS_EVIDENCE_ACTION_PATTERNS
+    )
 
 @dataclass(frozen=True)
 class FF2RouteDecision:
@@ -312,6 +370,12 @@ def route_ff2_query(query: str, *, route_override: str = "auto") -> FF2RouteDeci
             route_name="culinary_tour",
             module_name="functorflow_v3.culinary_tour_agentic",
             rationale="Query looks like a food, travel, or itinerary planning request, so route to the CLIFF culinary tour orchestrator.",
+        )
+    if _looks_like_democritus_evidence_query(query):
+        return FF2RouteDecision(
+            route_name="democritus",
+            module_name="functorflow_v3.democritus_query_agentic",
+            rationale="Query asks for evidence acquisition or cross-document study synthesis, so route to Democritus before considering textbook demos.",
         )
     if looks_like_course_demo_query(query):
         return FF2RouteDecision(

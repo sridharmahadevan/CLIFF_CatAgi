@@ -139,6 +139,15 @@ class QueryRouterAgenticTests(unittest.TestCase):
         self.assertEqual(decision.route_name, "democritus")
         self.assertIn("Democritus", decision.rationale)
 
+    def test_route_ff2_query_keeps_semaglutide_trial_synthesis_on_democritus(self) -> None:
+        decision = module.route_ff2_query(
+            "Analyze 5 recent primary randomized controlled trials of semaglutide for weight loss in adults with obesity, "
+            "excluding reviews, meta-analyses, guidance statements, and real-world comparative studies, and synthesize their joint support."
+        )
+
+        self.assertEqual(decision.route_name, "democritus")
+        self.assertIn("evidence acquisition", decision.rationale.lower())
+
     def test_route_ff2_query_defaults_to_democritus_for_direct_document_url(self) -> None:
         decision = module.route_ff2_query("Analyze the document at https://example.org/news/story-about-water")
 
