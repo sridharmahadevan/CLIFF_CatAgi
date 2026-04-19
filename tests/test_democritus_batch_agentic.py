@@ -789,6 +789,7 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
                 DemocritusBatchConfig(
                     pdf_dir=Path(tmpdir),
                     outdir=Path(tmpdir) / "runs",
+                    request_query="Give me studies of the health benefits of red wine.",
                     max_workers=4,
                     dry_run=False,
                 )
@@ -824,10 +825,23 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             self.assertEqual(synthesis_payload["regime_gluing_summary"]["surface_count"], 2)
             self.assertEqual(synthesis_payload["regime_gluing_summary"]["obstructed_count"], 1)
             self.assertEqual(synthesis_payload["regime_gluing_summary"]["multi_regime_glued_count"], 1)
+            self.assertEqual(
+                synthesis_payload["regime_gluing_claims"][0]["canonical_subj"],
+                "moderate red wine consumption",
+            )
+            self.assertGreater(
+                synthesis_payload["regime_gluing_claims"][0]["query_alignment_score"],
+                synthesis_payload["regime_gluing_claims"][1]["query_alignment_score"],
+            )
+            self.assertEqual(
+                synthesis_payload["regime_gluing_claims"][0]["relevance_label"],
+                "moderate relevance",
+            )
             synthesis_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
             self.assertIn("Regime Gluing", synthesis_html)
             self.assertIn("multi regime glued", synthesis_html)
             self.assertIn("obstructed", synthesis_html)
+            self.assertIn("Query alignment:", synthesis_html)
 
     def test_corpus_synthesis_preserves_json_aggregates_and_splits_cross_document_homotopy_counts(self) -> None:
         class FakeRunner:

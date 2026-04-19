@@ -131,6 +131,11 @@ class RegimeGluingClaim:
     regimes: tuple[str, ...]
     canonical_relations: tuple[str, ...]
     gluing_state: str
+    matched_query_terms: tuple[str, ...] = ()
+    query_alignment_score: float = 0.0
+    relevance_label: str = "unscored"
+    corroboration_label: str = ""
+    relevance_weighted_score: float = 0.0
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -193,6 +198,45 @@ _TOPIC_PARTITION_TOKEN_STOPWORDS = _DISPLAY_TOKEN_STOPWORDS | {
     "recent",
 }
 
+_QUERY_TOKEN_STOPWORDS = _DISPLAY_TOKEN_STOPWORDS | {
+    "analyze",
+    "analysis",
+    "describe",
+    "document",
+    "documents",
+    "effect",
+    "effects",
+    "evidence",
+    "find",
+    "give",
+    "help",
+    "how",
+    "impact",
+    "impacts",
+    "joint",
+    "jointly",
+    "learn",
+    "me",
+    "paper",
+    "papers",
+    "recent",
+    "report",
+    "reports",
+    "show",
+    "studies",
+    "study",
+    "support",
+    "supported",
+    "supports",
+    "synthesise",
+    "synthesized",
+    "synthesize",
+    "synthesis",
+    "tell",
+    "understand",
+    "what",
+}
+
 
 def build_democritus_corpus_synthesis(
     *,
@@ -217,7 +261,7 @@ def build_democritus_corpus_synthesis(
             claims=claims,
             total_documents=total_documents,
         )
-        regime_gluing_claims = _load_regime_gluing_claims(connection)
+        regime_gluing_claims = _load_regime_gluing_claims(connection, query=query)
         contested_keys = {
             (item.subj, item.obj, item.domain)
             for item in disagreements
@@ -262,6 +306,10 @@ def build_democritus_corpus_synthesis(
         "obstructed_count": sum(1 for item in regime_gluing_claims if item.gluing_state == "obstructed"),
         "regime_sensitive_count": sum(1 for item in regime_gluing_claims if item.gluing_state == "regime_sensitive"),
         "multi_regime_glued_count": sum(1 for item in regime_gluing_claims if item.gluing_state == "multi_regime_glued"),
+        "query_aligned_count": sum(1 for item in regime_gluing_claims if item.query_alignment_score > 0.0),
+        "strongly_aligned_count": sum(1 for item in regime_gluing_claims if item.query_alignment_score >= 0.5),
+        "low_relevance_count": sum(1 for item in regime_gluing_claims if item.query_alignment_score <= 0.0),
+        "thin_support_count": sum(1 for item in regime_gluing_claims if item.max_regime_support <= 1),
     }
     topic_partition_summary = {
         "partition_count": len(topic_partitions),
@@ -307,6 +355,70 @@ def build_democritus_corpus_synthesis(
 def _scalar(connection: sqlite3.Connection, query: str) -> int:
     row = connection.execute(query).fetchone()
     return int(row[0] or 0) if row else 0
+
+
+def _tokenize_query_text(text: str) -> tuple[str, ...]:
+    normalized = " ".join(str(text or "").lower().split())
+    return tuple(
+        token
+        for token in re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", normalized)
+        if token not in _QUERY_TOKEN_STOPWORDS and len(token) > 1
+    )
+
+
+def _query_focus_terms(query: str) -> tuple[str, ...]:
+    tokens = _tokenize_query_text(query)
+    return tuple(dict.fromkeys(tokens[:8]))
+
+
+def _regime_gluing_alignment(
+    *,
+    query: str,
+    canonical_subj: str,
+    canonical_obj: str,
+    regimes: tuple[str, ...],
+    canonical_relations: tuple[str, ...],
+    total_document_support: int,
+    max_regime_support: int,
+    regime_count: int,
+) -> dict[str, object]:
+    focus_terms = _query_focus_terms(query)
+    corroboration_label = (
+        "coherence without corroboration risk"
+        if max_regime_support <= 1
+        else "multi-regime corroboration"
+    )
+    if not focus_terms:
+        return {
+            "matched_query_terms": (),
+            "query_alignment_score": 0.0,
+            "relevance_label": "unscored",
+            "corroboration_label": corroboration_label,
+            "relevance_weighted_score": float(total_document_support),
+        }
+    text_parts = [canonical_subj, canonical_obj, *regimes, *canonical_relations]
+    token_set = set(_tokenize_query_text(" ".join(part for part in text_parts if part)))
+    matched_query_terms = tuple(term for term in focus_terms if term in token_set)
+    alignment_score = round(len(matched_query_terms) / float(len(focus_terms)), 3)
+    support_density = float(total_document_support) / float(max(1, regime_count))
+    corroboration_bonus = min(1.0, support_density / 2.0)
+    singleton_penalty = 0.35 if max_regime_support <= 1 else 0.0
+    weighted_score = max(0.0, alignment_score + 0.25 * corroboration_bonus - singleton_penalty)
+    if alignment_score >= 0.6:
+        relevance_label = "high relevance"
+    elif alignment_score >= 0.3:
+        relevance_label = "moderate relevance"
+    elif alignment_score > 0.0:
+        relevance_label = "weak relevance"
+    else:
+        relevance_label = "low relevance"
+    return {
+        "matched_query_terms": matched_query_terms,
+        "query_alignment_score": alignment_score,
+        "relevance_label": relevance_label,
+        "corroboration_label": corroboration_label,
+        "relevance_weighted_score": round(weighted_score, 3),
+    }
 
 
 def _support_truth_value(*, document_support: int, total_documents: int) -> str:
@@ -666,7 +778,7 @@ def _load_homotopy_claim_classes(
     return homotopy_classes
 
 
-def _load_regime_gluing_claims(connection: sqlite3.Connection) -> list[RegimeGluingClaim]:
+def _load_regime_gluing_claims(connection: sqlite3.Connection, *, query: str) -> list[RegimeGluingClaim]:
     rows = connection.execute(
         """
         SELECT
@@ -732,6 +844,16 @@ def _load_regime_gluing_claims(connection: sqlite3.Connection) -> list[RegimeGlu
             gluing_state = "single_regime"
         if regime_count <= 1 and polarity_count <= 1 and canonical_relation_count <= 1:
             continue
+        alignment = _regime_gluing_alignment(
+            query=query,
+            canonical_subj=canonical_subj,
+            canonical_obj=canonical_obj,
+            regimes=regimes,
+            canonical_relations=canonical_relations,
+            total_document_support=int(bucket["total_document_support"]),
+            max_regime_support=int(bucket["max_regime_support"]),
+            regime_count=regime_count,
+        )
         claims.append(
             RegimeGluingClaim(
                 canonical_subj=canonical_subj,
@@ -745,11 +867,19 @@ def _load_regime_gluing_claims(connection: sqlite3.Connection) -> list[RegimeGlu
                 regimes=regimes,
                 canonical_relations=canonical_relations,
                 gluing_state=gluing_state,
+                matched_query_terms=tuple(alignment.get("matched_query_terms") or ()),
+                query_alignment_score=float(alignment.get("query_alignment_score") or 0.0),
+                relevance_label=str(alignment.get("relevance_label") or "unscored"),
+                corroboration_label=str(alignment.get("corroboration_label") or ""),
+                relevance_weighted_score=float(alignment.get("relevance_weighted_score") or 0.0),
             )
         )
     claims.sort(
         key=lambda item: (
+            -item.relevance_weighted_score,
+            -item.query_alignment_score,
             {"obstructed": 0, "regime_sensitive": 1, "multi_regime_glued": 2}.get(item.gluing_state, 3),
+            -item.max_regime_support,
             -item.total_document_support,
             item.canonical_subj,
             item.canonical_obj,
@@ -1786,6 +1916,7 @@ def _render_regime_gluing_card(item: dict[str, object]) -> str:
     regimes = " | ".join(str(entry) for entry in (item.get("regimes") or [])[:4])
     relations = " | ".join(str(entry) for entry in (item.get("canonical_relations") or [])[:4])
     gluing_state = str(item.get("gluing_state") or "single_regime").replace("_", " ")
+    matched_terms = " | ".join(str(entry) for entry in (item.get("matched_query_terms") or [])[:4])
     return (
         '<article class="regime-card">'
         f'<div class="claim-meta">{esc(gluing_state)} · {esc(item.get("regime_count") or 0)} regime(s) · '
@@ -1794,9 +1925,20 @@ def _render_regime_gluing_card(item: dict[str, object]) -> str:
         + (f'<p class="trace">Regimes: {esc(regimes)}</p>' if regimes else "")
         + (f'<p class="trace">Relation family: {esc(relations)}</p>' if relations else "")
         + (
+            f'<p class="trace">Query alignment: {esc(item.get("relevance_label") or "unscored")} '
+            f'({esc(item.get("query_alignment_score") or 0)})'
+            + (f' · Matched terms: {esc(matched_terms)}' if matched_terms else "")
+            + "</p>"
+        )
+        + (
             f'<p class="trace">Regime variants: {esc(item.get("regime_variant_count") or 0)} · '
             f'Polarity count: {esc(item.get("polarity_count") or 0)} · '
             f'Max single-regime support: {esc(item.get("max_regime_support") or 0)}</p>'
+        )
+        + (
+            f'<p class="trace">{esc(item.get("corroboration_label") or "")}</p>'
+            if item.get("corroboration_label")
+            else ""
         )
         + "</article>"
     )
@@ -1890,7 +2032,7 @@ def _render_dashboard_html(
         "This section localizes causally equivalent mentions by a normalized subject-relation-object key, then measures whether their paraphrase family forms a coherent simplicial patch. Filled triangles indicate multiway agreement; open horns flag wording drift or regime-sensitive gluing failures. The chips below separate within-document paraphrase families from cross-document homotopy classes."
     )
     regime_trace = (
-        "These cards read directly from the CSQL bundle's regime-gluing view. They distinguish claims that glue cleanly across multiple canonical regimes from claims whose relation family or polarity changes across regimes, which is where descent starts to fail."
+        "These cards read from the CSQL bundle's regime-gluing view, but are ranked here by query alignment and corroboration as well as raw gluing state. This helps distinguish claims that are merely well-glued from claims that are both relevant to the query and meaningfully supported across regimes."
     )
 
     strong_markup = "".join(_render_claim_card(item) for item in payload.get("strongly_supported") or []) or (
@@ -2055,6 +2197,9 @@ def _render_dashboard_html(
           <span class="chip">{esc(int((payload.get("regime_gluing_summary") or {}).get("multi_regime_glued_count") or 0))} multi-regime glued</span>
           <span class="chip">{esc(int((payload.get("regime_gluing_summary") or {}).get("regime_sensitive_count") or 0))} regime-sensitive</span>
           <span class="chip">{esc(int((payload.get("regime_gluing_summary") or {}).get("obstructed_count") or 0))} obstructed</span>
+          <span class="chip">{esc(int((payload.get("regime_gluing_summary") or {}).get("query_aligned_count") or 0))} query-aligned</span>
+          <span class="chip">{esc(int((payload.get("regime_gluing_summary") or {}).get("strongly_aligned_count") or 0))} strongly aligned</span>
+          <span class="chip">{esc(int((payload.get("regime_gluing_summary") or {}).get("thin_support_count") or 0))} thin-support surfaces</span>
         </div>
         <div class="claim-grid" style="margin-top:12px;">{regime_markup}</div>
       </section>
