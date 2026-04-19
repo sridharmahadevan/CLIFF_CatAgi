@@ -117,8 +117,23 @@ python3 -m functorflow_v3.cliff --outdir /tmp/cliff-session
 
 ### Headless / Remote CLIFF Sessions
 
-On a remote machine without a desktop session, start CLIFF without trying to
-open a browser and choose a stable port:
+CLIFF can run on a headless server while you use the interface from a browser
+on your laptop or desktop.
+
+This is useful when:
+
+- the compute machine has no display attached
+- you are SSH'd into a remote GPU or DGX box
+- you want CLIFF to use remote compute resources but keep the interface local
+
+The basic pattern is:
+
+1. run CLIFF on the remote machine
+2. keep the CLIFF process alive there
+3. forward the CLIFF port over SSH
+4. open the forwarded URL in a browser on your local machine
+
+Start CLIFF on the remote machine without trying to open a browser:
 
 ```bash
 python3 -m functorflow_v3.cliff \
@@ -128,18 +143,71 @@ python3 -m functorflow_v3.cliff \
   --no-browser
 ```
 
-CLIFF prints both the listening URL and the session URL as JSON. For SSH
-tunneling, forward the same port from your laptop:
+CLIFF will print JSON similar to:
 
-```bash
-ssh -L 8765:127.0.0.1:8765 your-dgx-host
+```json
+{
+  "system_name": "CLIFF",
+  "session_url": "http://127.0.0.1:8765/",
+  "session_listen_url": "http://127.0.0.1:8765/",
+  "session_outdir_root": "/tmp/cliff-session",
+  "mode": "interactive_session"
+}
 ```
 
-Then open `http://127.0.0.1:8765/` in your local browser.
+Keep that remote CLIFF process running. Then, from your local machine, create
+an SSH tunnel to the same port:
 
-If you expose CLIFF through a reverse proxy or tunnel that gives you an
-external URL, pass it with `--public-url` so the printed session link matches
-the address you actually want to open.
+```bash
+ssh -N -L 8765:127.0.0.1:8765 your-remote-host
+```
+
+After the tunnel is up, open the CLIFF session locally:
+
+```bash
+open http://127.0.0.1:8765/
+```
+
+Or open the same URL manually in your browser:
+
+```text
+http://127.0.0.1:8765/
+```
+
+If your SSH path uses a jump host, tunnel through it explicitly:
+
+```bash
+ssh -N -J your-login-host -L 8765:127.0.0.1:8765 your-remote-host
+```
+
+#### Notes
+
+- `--no-browser` only disables automatic browser launching on the remote host. It does not open a browser on your laptop for you.
+- `--host 127.0.0.1` is usually the safest choice for SSH tunneling because CLIFF only listens on the remote loopback interface.
+- `--port 8765` is just an example; any unused port is fine as long as the CLIFF process and the SSH tunnel use the same one.
+- `session_listen_url` tells you where CLIFF is actually listening on the remote machine.
+- `session_url` is the URL CLIFF wants to advertise to the user. By default it matches the listen URL.
+
+#### Reverse Proxy Or External Tunnel
+
+If you expose CLIFF through a reverse proxy, Tailscale funnel, cloud tunnel, or
+some other externally reachable URL, pass that public address so the printed
+session link matches what users should open:
+
+```bash
+python3 -m functorflow_v3.cliff \
+  --outdir /tmp/cliff-session \
+  --host 127.0.0.1 \
+  --port 8765 \
+  --no-browser \
+  --public-url https://your-public-cliff-url.example.com/
+```
+
+#### Quick Troubleshooting
+
+- If `curl -I http://127.0.0.1:8765/` on your local machine says `Couldn't connect to server`, the SSH tunnel is not up or is pointed at the wrong host.
+- If `curl -I` returns `501 Unsupported method ('HEAD')`, that is usually fine. The lightweight server may not implement `HEAD`; try `open http://127.0.0.1:8765/` or `curl http://127.0.0.1:8765/` instead.
+- If the browser still cannot load CLIFF, make sure the remote CLIFF process is still running and that the local tunnel command is still active.
 
 ### Saved Runs And Session Restore
 
