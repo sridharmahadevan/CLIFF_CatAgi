@@ -80,6 +80,9 @@ class LLMUsageTests(unittest.TestCase):
         self.assertEqual(summary["prompt_tokens"], 200)
         self.assertEqual(summary["completion_tokens"], 50)
         self.assertEqual(summary["total_tokens"], 250)
+        self.assertAlmostEqual(summary["estimated_cost_usd"], 0.000416, places=6)
+        self.assertEqual(summary["priced_requests"], 2)
+        self.assertEqual(summary["unpriced_requests"], 0)
         self.assertEqual(summary["by_agent"][0]["agent_name"], "root_topic_discovery_agent")
         self.assertEqual(summary["by_model"][0]["model"], "gpt-4.1-mini")
 

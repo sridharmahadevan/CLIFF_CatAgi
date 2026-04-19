@@ -2634,6 +2634,9 @@ class DashboardQueryLauncher:
         request_count = int(llm_usage.get("request_count") or 0)
         total_tokens = int(llm_usage.get("total_tokens") or 0)
         requests_with_usage = int(llm_usage.get("requests_with_usage") or 0)
+        estimated_cost_usd = float(llm_usage.get("estimated_cost_usd") or 0.0)
+        priced_requests = int(llm_usage.get("priced_requests") or 0)
+        unpriced_requests = int(llm_usage.get("unpriced_requests") or 0)
         if request_count <= 0 and total_tokens <= 0:
             return {}
         tracked_requests = requests_with_usage or request_count
@@ -2642,11 +2645,25 @@ class DashboardQueryLauncher:
             label += "s"
         if request_count > tracked_requests:
             label += f" ({request_count - tracked_requests} pending usage rows)"
+        estimated_cost_label = ""
+        if priced_requests > 0 or estimated_cost_usd > 0:
+            formatted_cost = "<$0.01" if 0 < estimated_cost_usd < 0.01 else f"${estimated_cost_usd:,.2f}"
+            if unpriced_requests > 0:
+                estimated_cost_label = (
+                    f"at least {formatted_cost} from priced models "
+                    f"({unpriced_requests} unpriced request{'s' if unpriced_requests != 1 else ''})"
+                )
+            else:
+                estimated_cost_label = f"about {formatted_cost}"
         return {
             "request_count": request_count,
             "requests_with_usage": requests_with_usage,
             "total_tokens": total_tokens,
             "label": label,
+            "estimated_cost_usd": estimated_cost_usd,
+            "estimated_cost_label": estimated_cost_label,
+            "priced_requests": priced_requests,
+            "unpriced_requests": unpriced_requests,
         }
 
     def _llm_budget_summary(self, run_state: dict[str, object], llm_usage: dict[str, object]) -> dict[str, object]:
@@ -2750,6 +2767,8 @@ class DashboardQueryLauncher:
             run_state["llm_usage_label"] = llm_usage_summary.get("label")
             run_state["llm_total_tokens"] = llm_usage_summary.get("total_tokens")
             run_state["llm_request_count"] = llm_usage_summary.get("request_count")
+            run_state["llm_estimated_cost_usd"] = llm_usage_summary.get("estimated_cost_usd")
+            run_state["llm_estimated_cost_label"] = llm_usage_summary.get("estimated_cost_label")
         research_profile = self._route_research_profile(run_state.get("route_name"))
         run_state["research_profile_class"] = research_profile.get("class_name")
         run_state["research_profile_label"] = research_profile.get("label")
@@ -3727,6 +3746,7 @@ class DashboardQueryLauncher:
         note = html.escape(str(run_state.get("note") or "CLIFF is gathering live partial outputs from this run."))
         llm_budget_label = html.escape(str(run_state.get("llm_budget_label") or ""))
         llm_usage_label = html.escape(str(run_state.get("llm_usage_label") or ""))
+        llm_estimated_cost_label = html.escape(str(run_state.get("llm_estimated_cost_label") or ""))
         iframe_src = self._launcher_href_for_run_file(run_id, artifact_path)
         return f"""<!doctype html>
 <html lang="en">
@@ -3793,6 +3813,7 @@ class DashboardQueryLauncher:
         <p>{note}</p>
         {'<p><strong>LLM budget:</strong> ' + llm_budget_label + '</p>' if llm_budget_label else ''}
         {'<p><strong>LLM usage:</strong> ' + llm_usage_label + '</p>' if llm_usage_label else ''}
+        {'<p><strong>Estimated cost:</strong> ' + llm_estimated_cost_label + '</p>' if llm_estimated_cost_label else ''}
       </section>
       <section class="artifact-shell">
         <iframe id="artifact-frame" src="{html.escape(iframe_src)}" title="Live CLIFF artifact"></iframe>
@@ -4161,6 +4182,9 @@ class DashboardQueryLauncher:
                 var llmUsage = run.llm_usage_label
                   ? '<div class="run-meta"><strong>LLM usage:</strong> ' + escapeHtml(run.llm_usage_label) + '</div>'
                   : '';
+                var llmEstimatedCost = run.llm_estimated_cost_label
+                  ? '<div class="run-meta"><strong>Estimated cost:</strong> ' + escapeHtml(run.llm_estimated_cost_label) + '</div>'
+                  : '';
                 var unconscious = (run.eta_label || run.parallelism_label || run.current_stage_label)
                   ? '<div class="run-meta"><strong>Unconscious report:</strong> '
                     + (run.eta_label ? escapeHtml(run.eta_label) : 'ETA warming up')
@@ -4184,6 +4208,7 @@ class DashboardQueryLauncher:
                   + researchNote
                   + llmBudget
                   + llmUsage
+                  + llmEstimatedCost
                   + unconscious
                   + outdir
                   + artifact
@@ -4941,6 +4966,11 @@ class DashboardQueryLauncher:
                 if run.get("llm_usage_label")
                 else ""
             )
+            llm_estimated_cost_markup = (
+                f'<div class="run-meta"><strong>Estimated cost:</strong> {esc(run.get("llm_estimated_cost_label"))}</div>'
+                if run.get("llm_estimated_cost_label")
+                else ""
+            )
             cards.append(
                 f'<article class="{card_class}">'
                 '<div class="run-topline">'
@@ -4964,6 +4994,7 @@ class DashboardQueryLauncher:
                 f"{research_note_markup}"
                 f"{llm_budget_markup}"
                 f"{llm_usage_markup}"
+                f"{llm_estimated_cost_markup}"
                 f"{unconscious_markup}"
                 f"{outdir_markup}"
                 f"{artifact_markup}"

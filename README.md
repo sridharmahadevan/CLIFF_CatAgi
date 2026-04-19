@@ -37,6 +37,11 @@ same causal-state-building machinery.
 CLIFF now exposes both execution depth and route latency more explicitly in the
 GUI.
 
+For routes that emit LLM usage telemetry, CLIFF also shows token counts and a
+rough estimated API cost in the session UI. The cost number is only an
+approximation, intended as a budgeting aid for students and researchers rather
+than exact billing.
+
 - `Quick answer`
   lightweight routes such as textbook lookup and some filing-oriented lookups
 - `Longer analysis`

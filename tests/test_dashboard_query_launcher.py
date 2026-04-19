@@ -1491,6 +1491,9 @@ class DashboardQueryLauncherTests(unittest.TestCase):
                             "request_count": 18,
                             "requests_with_usage": 18,
                             "total_tokens": 12345,
+                            "estimated_cost_usd": 0.1234,
+                            "priced_requests": 18,
+                            "unpriced_requests": 0,
                         }
                     }
                 ),
@@ -1511,8 +1514,11 @@ class DashboardQueryLauncherTests(unittest.TestCase):
             markup = launcher._render_session_runs_markup(state["runs"])
 
         self.assertEqual(state["runs"][0]["llm_usage_label"], "12,345 tokens across 18 LLM requests")
+        self.assertEqual(state["runs"][0]["llm_estimated_cost_label"], "about $0.12")
         self.assertIn("LLM usage:", markup)
         self.assertIn("12,345 tokens across 18 LLM requests", markup)
+        self.assertIn("Estimated cost:", markup)
+        self.assertIn("about $0.12", markup)
 
     def test_state_payload_promotes_llm_budget_summary(self) -> None:
         launcher = DashboardQueryLauncher(

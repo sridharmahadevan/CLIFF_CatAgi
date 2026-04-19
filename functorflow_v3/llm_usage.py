@@ -14,8 +14,19 @@ from typing import Mapping
 
 _WRITE_LOCK = threading.Lock()
 _LLM_TOKEN_BUDGET_ENV = "CLIFF_LLM_TOKEN_BUDGET"
+_LLM_PRICING_JSON_ENV = "CLIFF_LLM_PRICING_JSON"
 _PROMPT_TOKEN_ESTIMATE_DIVISOR = 3
 _PROMPT_TOKEN_ESTIMATE_OVERHEAD = 32
+_DEFAULT_LLM_PRICING_USD_PER_MILLION: dict[str, dict[str, float]] = {
+    "gpt-5.4": {"input": 2.50, "output": 15.00},
+    "gpt-5.4-mini": {"input": 0.75, "output": 4.50},
+    "gpt-5.4-nano": {"input": 0.20, "output": 1.25},
+    "gpt-4.1": {"input": 2.00, "output": 8.00},
+    "gpt-4.1-mini": {"input": 0.40, "output": 1.60},
+    "gpt-4.1-nano": {"input": 0.10, "output": 0.40},
+    "gpt-4o": {"input": 2.50, "output": 10.00},
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+}
 
 
 def _safe_int(value: object) -> int:
@@ -23,6 +34,61 @@ def _safe_int(value: object) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _safe_float(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _normalized_model_name(model: object) -> str:
+    normalized = str(model or "").strip().lower()
+    if not normalized:
+        return ""
+    for key in sorted(_llm_pricing_table().keys(), key=len, reverse=True):
+        if normalized == key or normalized.startswith(f"{key}-"):
+            return key
+    return normalized
+
+
+def _llm_pricing_table() -> dict[str, dict[str, float]]:
+    table = {key: dict(value) for key, value in _DEFAULT_LLM_PRICING_USD_PER_MILLION.items()}
+    raw_override = str(os.getenv(_LLM_PRICING_JSON_ENV) or "").strip()
+    if not raw_override:
+        return table
+    try:
+        payload = json.loads(raw_override)
+    except json.JSONDecodeError:
+        return table
+    if not isinstance(payload, dict):
+        return table
+    for model_name, model_rates in payload.items():
+        if not isinstance(model_rates, dict):
+            continue
+        normalized_name = str(model_name or "").strip().lower()
+        if not normalized_name:
+            continue
+        input_rate = _safe_float(model_rates.get("input"))
+        output_rate = _safe_float(model_rates.get("output"))
+        if input_rate < 0 or output_rate < 0:
+            continue
+        table[normalized_name] = {"input": input_rate, "output": output_rate}
+    return table
+
+
+def estimate_llm_cost_usd(*, model: object, prompt_tokens: int | None = None, completion_tokens: int | None = None) -> float | None:
+    normalized_model = _normalized_model_name(model)
+    pricing = _llm_pricing_table().get(normalized_model)
+    if pricing is None:
+        return None
+    prompt_token_count = max(0, _safe_int(prompt_tokens))
+    completion_token_count = max(0, _safe_int(completion_tokens))
+    return (
+        (prompt_token_count / 1_000_000.0) * float(pricing.get("input") or 0.0)
+        + (completion_token_count / 1_000_000.0) * float(pricing.get("output") or 0.0)
+    )
 
 
 def llm_usage_path_from_env() -> Path | None:
@@ -259,6 +325,10 @@ def summarize_llm_usage(path: Path) -> dict[str, object]:
             "completion_tokens": 0,
             "total_tokens": 0,
             "avg_total_tokens_per_request": 0.0,
+            "estimated_cost_usd": 0.0,
+            "priced_requests": 0,
+            "unpriced_requests": 0,
+            "cost_incomplete": False,
             "by_agent": [],
             "by_model": [],
         }
@@ -268,6 +338,9 @@ def summarize_llm_usage(path: Path) -> dict[str, object]:
     prompt_tokens = 0
     completion_tokens = 0
     total_tokens = 0
+    estimated_cost_usd = 0.0
+    priced_requests = 0
+    unpriced_requests = 0
     by_agent: dict[str, dict[str, int | str]] = defaultdict(
         lambda: {
             "agent_name": "",
@@ -283,7 +356,10 @@ def summarize_llm_usage(path: Path) -> dict[str, object]:
             "model": "",
             "requests": 0,
             "requests_with_usage": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
             "total_tokens": 0,
+            "estimated_cost_usd": 0.0,
         }
     )
 
@@ -305,12 +381,13 @@ def summarize_llm_usage(path: Path) -> dict[str, object]:
             prompt_tokens += row_prompt_tokens
             completion_tokens += row_completion_tokens
             total_tokens += row_total_tokens or (row_prompt_tokens + row_completion_tokens)
+            row_has_usage = row_total_tokens > 0 or row_prompt_tokens > 0 or row_completion_tokens > 0
 
             agent_name = str(row.get("agent_name") or "unknown")
             agent_bucket = by_agent[agent_name]
             agent_bucket["agent_name"] = agent_name
             agent_bucket["requests"] = int(agent_bucket["requests"]) + 1
-            if row_total_tokens > 0 or row_prompt_tokens > 0 or row_completion_tokens > 0:
+            if row_has_usage:
                 agent_bucket["requests_with_usage"] = int(agent_bucket["requests_with_usage"]) + 1
             agent_bucket["prompt_tokens"] = int(agent_bucket["prompt_tokens"]) + row_prompt_tokens
             agent_bucket["completion_tokens"] = int(agent_bucket["completion_tokens"]) + row_completion_tokens
@@ -322,11 +399,25 @@ def summarize_llm_usage(path: Path) -> dict[str, object]:
             model_bucket = by_model[model_name]
             model_bucket["model"] = model_name
             model_bucket["requests"] = int(model_bucket["requests"]) + 1
-            if row_total_tokens > 0 or row_prompt_tokens > 0 or row_completion_tokens > 0:
+            if row_has_usage:
                 model_bucket["requests_with_usage"] = int(model_bucket["requests_with_usage"]) + 1
+            model_bucket["prompt_tokens"] = int(model_bucket["prompt_tokens"]) + row_prompt_tokens
+            model_bucket["completion_tokens"] = int(model_bucket["completion_tokens"]) + row_completion_tokens
             model_bucket["total_tokens"] = int(model_bucket["total_tokens"]) + (
                 row_total_tokens or (row_prompt_tokens + row_completion_tokens)
             )
+            row_estimated_cost = estimate_llm_cost_usd(
+                model=model_name,
+                prompt_tokens=row_prompt_tokens,
+                completion_tokens=row_completion_tokens,
+            )
+            if row_has_usage:
+                if row_estimated_cost is None:
+                    unpriced_requests += 1
+                else:
+                    priced_requests += 1
+                    estimated_cost_usd += float(row_estimated_cost)
+                    model_bucket["estimated_cost_usd"] = float(model_bucket["estimated_cost_usd"]) + float(row_estimated_cost)
 
     sorted_agents = sorted(
         by_agent.values(),
@@ -356,6 +447,10 @@ def summarize_llm_usage(path: Path) -> dict[str, object]:
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
         "avg_total_tokens_per_request": round(total_tokens / requests_with_usage, 1) if requests_with_usage else 0.0,
+        "estimated_cost_usd": round(estimated_cost_usd, 6),
+        "priced_requests": priced_requests,
+        "unpriced_requests": unpriced_requests,
+        "cost_incomplete": unpriced_requests > 0,
         "by_agent": list(sorted_agents[:8]),
         "by_model": list(sorted_models[:5]),
     }
