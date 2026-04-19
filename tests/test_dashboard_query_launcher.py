@@ -19,6 +19,116 @@ except ModuleNotFoundError:
 
 
 class DashboardQueryLauncherTests(unittest.TestCase):
+    def test_start_uses_configured_bind_endpoint_without_opening_browser(self) -> None:
+        opened_urls: list[str] = []
+        created_servers: list[object] = []
+
+        class FakeServer:
+            def __init__(self, server_address, handler) -> None:
+                self.requested_server_address = server_address
+                self.server_address = server_address
+                self.daemon_threads = False
+                created_servers.append(self)
+
+            def serve_forever(self) -> None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+            def server_close(self) -> None:
+                return None
+
+        class FakeThread:
+            def __init__(self, target=None, name=None, daemon=None) -> None:
+                self.target = target
+                self.name = name
+                self.daemon = daemon
+
+            def start(self) -> None:
+                return None
+
+            def join(self, timeout=None) -> None:
+                return None
+
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Headless remote session",
+                query_label="CLIFF query",
+                query_placeholder="Analyze 10 studies on resveratrol",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                bind_host="0.0.0.0",
+                bind_port=8765,
+                auto_open_browser=False,
+            ),
+            browser_opener=lambda url: opened_urls.append(url) or True,
+        )
+        self.addCleanup(launcher.close)
+
+        with patch.object(module, "ThreadingHTTPServer", FakeServer):
+            with patch.object(module.threading, "Thread", FakeThread):
+                launcher.start()
+
+        self.assertEqual(created_servers[0].requested_server_address, ("0.0.0.0", 8765))
+        self.assertEqual(launcher.listen_url, "http://0.0.0.0:8765/")
+        self.assertEqual(launcher.url, "http://0.0.0.0:8765/")
+        self.assertEqual(opened_urls, [])
+
+    def test_start_prefers_advertised_url(self) -> None:
+        created_servers: list[object] = []
+
+        class FakeServer:
+            def __init__(self, server_address, handler) -> None:
+                self.server_address = ("127.0.0.1", 8765)
+                self.daemon_threads = False
+                created_servers.append(self)
+
+            def serve_forever(self) -> None:
+                return None
+
+            def shutdown(self) -> None:
+                return None
+
+            def server_close(self) -> None:
+                return None
+
+        class FakeThread:
+            def __init__(self, target=None, name=None, daemon=None) -> None:
+                self.target = target
+                self.name = name
+                self.daemon = daemon
+
+            def start(self) -> None:
+                return None
+
+            def join(self, timeout=None) -> None:
+                return None
+
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Remote session",
+                query_label="CLIFF query",
+                query_placeholder="Analyze 10 studies on resveratrol",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                bind_host="127.0.0.1",
+                bind_port=8765,
+                advertised_url="https://dgx.example.internal/cliff",
+                auto_open_browser=False,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with patch.object(module, "ThreadingHTTPServer", FakeServer):
+            with patch.object(module.threading, "Thread", FakeThread):
+                launcher.start()
+
+        self.assertEqual(launcher.listen_url, "http://127.0.0.1:8765/")
+        self.assertEqual(launcher.url, "https://dgx.example.internal/cliff/")
+
     def test_session_mode_queues_submissions_and_exposes_run_state(self) -> None:
         launcher = DashboardQueryLauncher(
             DashboardQueryLauncherConfig(

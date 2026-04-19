@@ -21,6 +21,29 @@ except ModuleNotFoundError:
 
 
 class CLIFFTests(unittest.TestCase):
+    def test_parse_args_accepts_remote_launcher_options(self) -> None:
+        argv = [
+            "cliff",
+            "--outdir",
+            "/tmp/cliff-session",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8765",
+            "--public-url",
+            "https://dgx.example.internal/cliff",
+            "--no-browser",
+        ]
+
+        with patch("sys.argv", argv):
+            args = module._parse_args()
+
+        self.assertEqual(args.outdir, "/tmp/cliff-session")
+        self.assertEqual(args.host, "0.0.0.0")
+        self.assertEqual(args.port, 8765)
+        self.assertEqual(args.public_url, "https://dgx.example.internal/cliff")
+        self.assertTrue(args.no_browser)
+
     def test_launcher_archive_roots_prefers_existing_outdir_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             outdir = Path(tmpdir) / "CLIFF_runs_archive"

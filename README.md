@@ -115,6 +115,32 @@ Run CLIFF:
 python3 -m functorflow_v3.cliff --outdir /tmp/cliff-session
 ```
 
+### Headless / Remote CLIFF Sessions
+
+On a remote machine without a desktop session, start CLIFF without trying to
+open a browser and choose a stable port:
+
+```bash
+python3 -m functorflow_v3.cliff \
+  --outdir /tmp/cliff-session \
+  --host 127.0.0.1 \
+  --port 8765 \
+  --no-browser
+```
+
+CLIFF prints both the listening URL and the session URL as JSON. For SSH
+tunneling, forward the same port from your laptop:
+
+```bash
+ssh -L 8765:127.0.0.1:8765 your-dgx-host
+```
+
+Then open `http://127.0.0.1:8765/` in your local browser.
+
+If you expose CLIFF through a reverse proxy or tunnel that gives you an
+external URL, pass it with `--public-url` so the printed session link matches
+the address you actually want to open.
+
 ### Saved Runs And Session Restore
 
 CLIFF now treats the `--outdir` tree as a reusable run workspace, not just a

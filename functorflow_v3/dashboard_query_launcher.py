@@ -68,6 +68,10 @@ class DashboardQueryLauncherConfig:
     archive_roots: tuple[Path, ...] = ()
     archive_max_runs: int = 120
     archive_cache_dir: Path | None = None
+    bind_host: str = "127.0.0.1"
+    bind_port: int = 0
+    advertised_url: str = ""
+    auto_open_browser: bool = True
 
 
 class DashboardQueryLauncher:
@@ -98,6 +102,7 @@ class DashboardQueryLauncher:
         self._server: ThreadingHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
         self.url = ""
+        self.listen_url = ""
 
     def __enter__(self) -> "DashboardQueryLauncher":
         self.start()
@@ -109,16 +114,26 @@ class DashboardQueryLauncher:
     def start(self) -> None:
         if self._server_thread is not None:
             return
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
+        self._server = ThreadingHTTPServer((self.config.bind_host, self.config.bind_port), self._make_handler())
         self._server.daemon_threads = True
         host, port = self._server.server_address
-        self.url = f"http://{host}:{port}/"
+        self.listen_url = f"http://{host}:{port}/"
+        self.url = self._advertised_url(host=host, port=port)
         self._server_thread = threading.Thread(target=self._server.serve_forever, name="ff2-dashboard-query", daemon=True)
         self._server_thread.start()
-        try:
-            self.browser_opener(self.url)
-        except Exception:
-            pass
+        if self.config.auto_open_browser:
+            try:
+                self.browser_opener(self.url)
+            except Exception:
+                pass
+
+    def _advertised_url(self, *, host: str, port: int) -> str:
+        raw_value = str(self.config.advertised_url or "").strip()
+        if raw_value:
+            if raw_value.endswith("/"):
+                return raw_value
+            return f"{raw_value}/"
+        return f"http://{host}:{port}/"
 
     @staticmethod
     def _normalize_execution_mode(value: object) -> str:

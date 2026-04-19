@@ -802,6 +802,27 @@ def _parse_args() -> argparse.Namespace:
         help="Natural-language request for CLIFF. If omitted, CLIFF opens its GUI conscious interface.",
     )
     parser.add_argument("--outdir", required=True)
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host interface for the CLIFF session server. Use 127.0.0.1 for SSH tunneling or 0.0.0.0 for direct remote access.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help="Port for the CLIFF session server. Defaults to an ephemeral port when omitted.",
+    )
+    parser.add_argument(
+        "--public-url",
+        default="",
+        help="Optional externally reachable URL to print for the CLIFF session, such as a tunneled or proxied address.",
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not try to open a local browser when starting the CLIFF session server.",
+    )
     parser.add_argument("--execution-mode", choices=("quick", "interactive", "deep"), default="quick")
     parser.add_argument("--llm-token-budget", type=int, default=None)
     parser.add_argument("--route", choices=("auto", "democritus", "basket_rocket_sec", "culinary_tour", "product_feedback", "company_similarity", "course_demo"), default="auto")
@@ -964,6 +985,10 @@ def main() -> None:
                     enable_execution_mode=True,
                     archive_roots=_launcher_archive_roots(Path(args.outdir)),
                     archive_cache_dir=_launcher_archive_cache_dir(),
+                    bind_host=str(args.host),
+                    bind_port=int(args.port),
+                    advertised_url=str(args.public_url),
+                    auto_open_browser=not bool(args.no_browser),
                     run_control_handler=lambda action, run_id: _handle_cliff_run_control(
                         action,
                         run_id,
@@ -977,6 +1002,7 @@ def main() -> None:
                         {
                             "system_name": "CLIFF",
                             "session_url": launcher.url,
+                            "session_listen_url": launcher.listen_url,
                             "session_outdir_root": str(Path(args.outdir).resolve()),
                             "mode": "interactive_session",
                         },
