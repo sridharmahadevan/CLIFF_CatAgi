@@ -360,6 +360,64 @@ Useful checks:
 python3 -m unittest tests.test_democritus_agentic tests.test_democritus_query_agentic
 ```
 
+### Writing Better Democritus Queries
+
+Democritus works best when the query is narrow enough that retrieval and
+synthesis can converge on one shared evidence question.
+
+In practice, the strongest Democritus prompts usually specify:
+
+- a concrete phenomenon or intervention
+- a concrete outcome
+- a population, system, or setting
+- optionally a study type such as randomized trials, observational studies,
+  systematic reviews, or meta-analyses
+
+This general pattern works well:
+
+```text
+Analyze N recent [study type] on X effect on Y in Z, and synthesize their joint support.
+```
+
+Good examples:
+
+```text
+Analyze 5 recent randomized trials of semaglutide for weight loss in adults with obesity and synthesize their joint support.
+```
+
+```text
+Analyze 5 recent studies on how rising ocean temperatures affect wild fish population abundance and distribution, and synthesize their joint support.
+```
+
+```text
+Analyze 5 recent studies on the effect of rising ocean temperatures on marine fisheries yields, and synthesize their joint support.
+```
+
+Less effective broad prompts often mix several adjacent topics into one run. For
+example, a prompt about fish populations, coral mortality, aquaculture, human
+pathogens, and fisheries economics may all live in the same broad climate/ocean
+neighborhood while still failing to form one coherent evidence corpus.
+
+If Democritus shows topic drift, fragmented topic partitions, or many unrelated
+singleton partitions, try narrowing one or more of these axes:
+
+- intervention or exposure
+- outcome
+- organism or population
+- geography or environment
+- study type
+
+Examples of useful rewrites:
+
+- instead of `Analyze 5 recent studies of the impact of fish populations of rising ocean temperatures...`
+- try `Analyze 5 recent studies on how rising ocean temperatures affect wild fish population abundance and distribution...`
+- instead of `Analyze 5 recent studies of GLP-1 and synthesize their joint support`
+- try `Analyze 5 recent randomized trials of GLP-1 receptor agonists for weight loss in adults with obesity...`
+
+One practical rule of thumb:
+
+- if the query could reasonably retrieve papers from several neighboring subfields, it is probably too broad for a clean first Democritus run
+
 ### 4. BASKET/ROCKET And Company Similarity Setup
 
 Best for:

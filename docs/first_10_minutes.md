@@ -157,6 +157,56 @@ What to expect:
 - inner Democritus-style stages such as causal statements, triple recovery, and
   yearly atlas construction
 
+### How To Ask Democritus Better Questions
+
+If you are using Democritus for the first time, the most common mistake is to
+ask for a corpus that is too broad.
+
+Democritus usually works best when the query clearly names:
+
+- one intervention, exposure, or phenomenon
+- one main outcome
+- one population, system, or setting
+- optionally one study type
+
+This pattern is a good default:
+
+```text
+Analyze N recent [study type] on X effect on Y in Z, and synthesize their joint support.
+```
+
+Better Democritus-style prompts:
+
+```text
+Analyze 5 recent randomized trials of semaglutide for weight loss in adults with obesity and synthesize their joint support.
+```
+
+```text
+Analyze 5 recent studies on how rising ocean temperatures affect wild fish population abundance and distribution, and synthesize their joint support.
+```
+
+Broader prompts often drift into neighboring topics. For example, a query about
+ocean temperatures and fish populations can easily wander into coral systems,
+aquaculture, pathogens, or fisheries economics unless the prompt narrows the
+outcome or system more explicitly.
+
+Signs the query is too broad:
+
+- topic partitions are mostly singleton partitions
+- many partitions are about adjacent but different topics
+- the run keeps surfacing institution names, locations, or side domains instead
+  of one shared evidence theme
+
+If that happens, rewrite the query by tightening one of these axes:
+
+- intervention or exposure
+- outcome
+- population or organism
+- environment or setting
+- study type
+
+That usually improves Democritus more than simply increasing the document count.
+
 ## 5. What “Success” Looks Like
 
 In your first session, success is not “install every backend.”
