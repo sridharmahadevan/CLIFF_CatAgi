@@ -251,6 +251,21 @@ _CLIMATE_BREADTH_FACETS: tuple[str, ...] = (
     "extreme weather",
 )
 
+_JUNK_PAGE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("recaptcha", "reCAPTCHA challenge"),
+    ("captcha", "CAPTCHA challenge"),
+    ("browser check", "browser check page"),
+    ("security check", "security check page"),
+    ("access denied", "access denied page"),
+    ("verify you are human", "human verification page"),
+    ("checking if the site connection is secure", "browser security interstitial"),
+    ("press and hold", "bot-verification page"),
+    ("not a robot", "bot-verification page"),
+    ("unusual traffic", "traffic-verification page"),
+    ("enable javascript", "javascript gate page"),
+    ("attention required", "attention-required interstitial"),
+)
+
 _TOPIC_EQUIVALENCE_STOPWORDS = {
     "a",
     "an",
@@ -948,6 +963,76 @@ def _document_context_text(document: "DiscoveredDocument") -> str:
         )
         if part
     ).strip()
+
+
+def _junk_page_reason(*parts: object) -> str | None:
+    haystack = " ".join(" ".join(str(part or "").lower().split()) for part in parts if str(part or "").strip())
+    if not haystack:
+        return None
+    for marker, reason in _JUNK_PAGE_MARKERS:
+        if marker in haystack:
+            return reason
+    return None
+
+
+def _document_anchor_overlap_reason(plan: "QueryPlan", document: "DiscoveredDocument") -> str | None:
+    focus_terms = _checkpoint_query_focus_terms(plan.retrieval_query or plan.query)
+    if len(focus_terms) < 2:
+        return None
+    primary_text = " ".join(str(document.title or "").lower().split()).strip()
+    full_text = " ".join(
+        part
+        for part in (
+            primary_text,
+            _document_context_text(document).lower(),
+        )
+        if part
+    ).strip()
+    if not full_text:
+        return "document had no extractable title/abstract context for anchor checking"
+    if plan.normalized_query and plan.normalized_query in full_text:
+        return None
+    phrase_bonus, _phrase_evidence = _best_query_phrase_match(plan, primary_text, full_text)
+    if phrase_bonus > 0.0:
+        return None
+    context_tokens = set(_tokenize(full_text))
+    matched_terms = tuple(term for term in focus_terms if term in context_tokens)
+    required_matches = 2 if len(focus_terms) <= 3 else 3 if len(focus_terms) <= 6 else 4
+    if len(matched_terms) >= required_matches:
+        return None
+    matched_label = ", ".join(matched_terms) if matched_terms else "none"
+    return (
+        f"matched only {len(matched_terms)} of {required_matches} query focus terms "
+        f"(matched: {matched_label})"
+    )
+
+
+def _discovered_document_filter_reason(plan: "QueryPlan", document: "DiscoveredDocument") -> str | None:
+    junk_reason = _junk_page_reason(
+        document.title,
+        document.abstract,
+        document.url,
+        document.download_url,
+        " ".join(str(value or "") for value in dict(document.metadata or {}).values()),
+    )
+    if junk_reason:
+        return junk_reason
+    return _document_anchor_overlap_reason(plan, document)
+
+
+def _filter_discovered_documents(
+    plan: "QueryPlan",
+    documents: tuple["DiscoveredDocument", ...],
+) -> tuple[tuple["DiscoveredDocument", ...], tuple[tuple["DiscoveredDocument", str], ...]]:
+    accepted: list[DiscoveredDocument] = []
+    rejected: list[tuple[DiscoveredDocument, str]] = []
+    for document in documents:
+        reason = _discovered_document_filter_reason(plan, document)
+        if reason:
+            rejected.append((document, reason))
+            continue
+        accepted.append(document)
+    return tuple(accepted), tuple(rejected)
 
 
 def _document_local_topic_profile(
@@ -3746,6 +3831,7 @@ class DemocritusQueryAgenticRunner:
         provider = self._provider()
         discovery_limit = self._discovery_limit(plan)
         discovered = self._search_documents(provider, plan, limit=discovery_limit)
+        discovered, rejected = _filter_discovered_documents(plan, discovered)
         discovered = _rebalance_discovered_documents(
             plan,
             discovered,
@@ -3766,6 +3852,10 @@ class DemocritusQueryAgenticRunner:
                 f"[BACKEND] {getattr(provider, 'backend_name', self._backend_name())}",
                 f"[DISCOVERED] {len(discovered)}",
                 f"[TARGET] {plan.target_documents}",
+                *[
+                    f"[FILTERED {index:02d}] reason={reason} backend={item.retrieval_backend} title={item.title}"
+                    for index, (item, reason) in enumerate(rejected[:8], start=1)
+                ],
                 *[
                     f"[RETRIEVAL_COMPONENT {component}] {count}"
                     for component, count in Counter(
@@ -3835,7 +3925,17 @@ class DemocritusQueryAgenticRunner:
                 batch = self._search_documents(provider, plan, limit=next_limit)
                 previous_count = len(discovered_documents)
                 requested_limit = next_limit
-                for document in batch:
+                filtered_batch, rejected_batch = _filter_discovered_documents(plan, batch)
+                for rejected_document, rejected_reason in rejected_batch:
+                    key = _document_identity(rejected_document)
+                    if key in seen_document_keys:
+                        continue
+                    seen_document_keys.add(key)
+                    log_lines.append(
+                        f"[DISCOVERY_SKIP] reason={rejected_reason} backend={rejected_document.retrieval_backend} "
+                        f"title={rejected_document.title}"
+                    )
+                for document in filtered_batch:
                     key = _document_identity(document)
                     if key in seen_document_keys:
                         continue
@@ -4326,6 +4426,11 @@ class DemocritusQueryAgenticRunner:
         if not extracted_text.strip():
             raise RuntimeError(f"Document {source_reference!r} did not yield extractable article text")
         document_title = _extract_html_title(decoded_payload) or document.title or _title_from_url(source_reference)
+        junk_reason = _junk_page_reason(document_title, extracted_text[:4000], source_reference)
+        if junk_reason:
+            raise RuntimeError(
+                f"Document {source_reference!r} appears to be a {junk_reason}, not an article page"
+            )
         self._write_extractable_text_pdf(
             target_path,
             title=document_title,

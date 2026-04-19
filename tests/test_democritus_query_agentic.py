@@ -800,6 +800,52 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
         self.assertTrue(any(item.startswith("title_phrase:red wine") for item in specific_evidence))
         self.assertFalse(any(item.startswith("title:") for item in generic_evidence))
 
+    def test_filter_discovered_documents_rejects_junk_pages_and_low_anchor_overlap(self) -> None:
+        plan = QueryPlan(
+            query="Analyze 5 recent studies of the weight loss drug GLP-1 and synthesize their joint support",
+            normalized_query="weight loss drug glp-1",
+            keyword_tokens=("weight", "loss", "drug", "glp-1"),
+            target_documents=5,
+            retrieval_query="weight loss drug glp-1",
+        )
+        documents = (
+            DiscoveredDocument(
+                title="GLP-1 receptor agonists for weight loss: a systematic review and meta-analysis",
+                score=9.5,
+                retrieval_backend="scholarly",
+                abstract="GLP-1 receptor agonists improve weight loss outcomes in adults with obesity.",
+                document_format="pdf",
+            ),
+            DiscoveredDocument(
+                title="Browser Check reCAPTCHA Security",
+                score=8.0,
+                retrieval_backend="scholarly",
+                url="https://pmc.ncbi.nlm.nih.gov/recaptcha",
+                abstract="Please verify you are human before continuing.",
+                document_format="html",
+            ),
+            DiscoveredDocument(
+                title="Community pharmacists knowledge and counseling competence on GLP-1 receptor agonists",
+                score=7.5,
+                retrieval_backend="scholarly",
+                abstract="A survey of pharmacist counseling competence and training needs.",
+                document_format="pdf",
+            ),
+        )
+
+        accepted, rejected = democritus_query_agentic_module._filter_discovered_documents(plan, documents)
+
+        self.assertEqual(
+            [item.title for item in accepted],
+            ["GLP-1 receptor agonists for weight loss: a systematic review and meta-analysis"],
+        )
+        rejected_by_title = {item.title: reason for item, reason in rejected}
+        self.assertIn("reCAPTCHA challenge", rejected_by_title["Browser Check reCAPTCHA Security"])
+        self.assertIn(
+            "matched only",
+            rejected_by_title["Community pharmacists knowledge and counseling competence on GLP-1 receptor agonists"],
+        )
+
     def test_default_download_headers_use_browser_user_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             runner = DemocritusQueryAgenticRunner(
@@ -2054,7 +2100,7 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
                         del plan, limit
                         return (
                             DiscoveredDocument(
-                                title="Blocked PDF",
+                                title="Blocked red wine benefits study",
                                 score=9.0,
                                 retrieval_backend="crossref",
                                 download_url="https://example.org/blocked.pdf",
@@ -2062,7 +2108,7 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
                                 document_format="pdf",
                             ),
                             DiscoveredDocument(
-                                title="Working PDF",
+                                title="Working red wine benefits study",
                                 score=8.0,
                                 retrieval_backend="semantic_scholar",
                                 download_url="https://example.org/working.pdf",
@@ -2098,7 +2144,7 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
             result = runner.run()
 
             self.assertEqual(len(result.selected_documents), 1)
-            self.assertEqual(result.selected_documents[0].title, "Working PDF")
+            self.assertEqual(result.selected_documents[0].title, "Working red wine benefits study")
             self.assertEqual(len(result.acquired_documents), 1)
             self.assertTrue(Path(result.acquired_documents[0].acquired_pdf_path).exists())
 
@@ -2112,11 +2158,12 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
                         del plan, limit
                         return (
                             DiscoveredDocument(
-                                title="Fallback Article",
+                                title="GLP-1 treatment and weight loss fallback article",
                                 score=9.0,
                                 retrieval_backend="crossref",
                                 download_url="https://example.org/broken.pdf",
                                 url="https://example.org/article",
+                                abstract="GLP-1 treatment reduces body weight in obesity care.",
                                 document_format="pdf",
                             ),
                         )
@@ -2162,7 +2209,83 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
             result = runner.run()
 
             self.assertEqual(len(result.selected_documents), 1)
-            self.assertEqual(result.selected_documents[0].title, "Fallback Article")
+            self.assertEqual(result.selected_documents[0].title, "GLP-1 treatment and weight loss fallback article")
+            self.assertEqual(len(result.acquired_documents), 1)
+            self.assertTrue(Path(result.acquired_documents[0].acquired_pdf_path).exists())
+
+    def test_materialization_skips_browser_check_html_fallback_and_uses_next_candidate(self) -> None:
+        class FallbackRunner(DemocritusQueryAgenticRunner):
+            def _provider(self):
+                class FakeProvider:
+                    backend_name = "scholarly"
+
+                    def search(self, plan: QueryPlan, *, limit: int):
+                        del plan, limit
+                        return (
+                            DiscoveredDocument(
+                                title="Potentially blocked article",
+                                score=9.0,
+                                retrieval_backend="crossref",
+                                download_url="https://example.org/broken.pdf",
+                                url="https://example.org/browser-check",
+                                document_format="pdf",
+                            ),
+                            DiscoveredDocument(
+                                title="GLP-1 receptor agonists for weight loss review",
+                                score=8.0,
+                                retrieval_backend="semantic_scholar",
+                                download_url="https://example.org/working.pdf",
+                                url="https://example.org/working",
+                                document_format="pdf",
+                            ),
+                        )
+
+                return FakeProvider()
+
+            def _download_file(self, url: str, target_path: Path, *, referer: str | None = None) -> None:
+                del referer
+                if "broken" in url:
+                    raise RuntimeError("HTTP Error 404: Not Found")
+                if "working" not in url:
+                    raise AssertionError(f"unexpected URL: {url}")
+                target_path.write_bytes(b"%PDF-1.4\n")
+
+            def _validate_materialized_pdf(self, path: Path) -> None:
+                self._validate_pdf_file(path)
+
+            def _fetch_url_payload(
+                self,
+                url: str,
+                *,
+                referer: str | None = None,
+            ) -> tuple[bytes, str, str]:
+                del referer
+                if url != "https://example.org/browser-check":
+                    raise AssertionError(f"unexpected fallback URL: {url}")
+                return (
+                    b"<html><head><title>Browser Check</title></head>"
+                    b"<body><main><p>reCAPTCHA security check</p><p>Please verify you are human.</p></main></body></html>",
+                    "text/html; charset=utf-8",
+                    url,
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir) / "query_run"
+            runner = FallbackRunner(
+                DemocritusQueryAgenticConfig(
+                    query="glp-1 weight loss",
+                    outdir=outdir,
+                    target_documents=1,
+                    retrieval_backend="scholarly",
+                    include_phase2=False,
+                    root_topic_strategy="heuristic",
+                    dry_run=True,
+                )
+            )
+            result = runner.run()
+
+            self.assertEqual(len(result.selected_documents), 1)
+            self.assertEqual(result.selected_documents[0].title, "GLP-1 receptor agonists for weight loss review")
             self.assertEqual(len(result.acquired_documents), 1)
             self.assertTrue(Path(result.acquired_documents[0].acquired_pdf_path).exists())
 
@@ -2224,21 +2347,21 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
                         del plan, limit
                         return (
                             DiscoveredDocument(
-                                title="Empty Payload",
+                                title="Climate change empty payload study",
                                 score=9.0,
                                 retrieval_backend="crossref",
                                 download_url="https://example.org/empty.pdf",
                                 document_format="pdf",
                             ),
                             DiscoveredDocument(
-                                title="HTML Payload",
+                                title="Climate change html payload study",
                                 score=8.0,
                                 retrieval_backend="crossref",
                                 download_url="https://example.org/html.pdf",
                                 document_format="pdf",
                             ),
                             DiscoveredDocument(
-                                title="Valid Payload",
+                                title="Climate change valid payload study",
                                 score=7.0,
                                 retrieval_backend="semantic_scholar",
                                 download_url="https://example.org/valid.pdf",
@@ -2261,6 +2384,9 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
                 target_path.write_bytes(b"%PDF-1.4\n")
                 self._validate_pdf_file(target_path)
 
+            def _validate_materialized_pdf(self, path: Path) -> None:
+                self._validate_pdf_file(path)
+
         with tempfile.TemporaryDirectory() as tmpdir:
             outdir = Path(tmpdir) / "query_run"
             runner = ValidationRunner(
@@ -2277,7 +2403,7 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
             result = runner.run()
 
             self.assertEqual(len(result.selected_documents), 1)
-            self.assertEqual(result.selected_documents[0].title, "Valid Payload")
+            self.assertEqual(result.selected_documents[0].title, "Climate change valid payload study")
             self.assertEqual(len(result.acquired_documents), 1)
 
     def test_query_runner_streams_documents_into_live_batch_runner(self) -> None:
@@ -2367,14 +2493,14 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
             )
             runner._fake_documents = (
                 DiscoveredDocument(
-                    title="Alpha Study",
+                    title="Red wine alpha study",
                     score=10.0,
                     retrieval_backend="manifest",
                     source_path=str(alpha_pdf),
                     document_format="pdf",
                 ),
                 DiscoveredDocument(
-                    title="Beta Study",
+                    title="Red wine beta study",
                     score=9.0,
                     retrieval_backend="manifest",
                     source_path=str(beta_pdf),
