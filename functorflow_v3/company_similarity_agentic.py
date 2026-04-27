@@ -652,7 +652,15 @@ def _select_python_for_brand_pipeline() -> str:
     candidates = [
         env_override,
         sys.executable,
+        str((brand_root / ".venv" / "bin" / "python3")),
         str((brand_root / ".venv" / "bin" / "python")),
+        str((brand_root / ".venv_brand" / "bin" / "python3")),
+        str((brand_root / ".venv_brand" / "bin" / "python")),
+        str((repo_root() / ".venv_cliff" / "bin" / "python3")),
+        str((repo_root() / ".venv_cliff" / "bin" / "python")),
+        str((workspace_root / ".venv_cliff" / "bin" / "python3")),
+        str((workspace_root / ".venv_cliff" / "bin" / "python")),
+        str((repo_root() / ".venv" / "bin" / "python3")),
         str((repo_root() / ".venv" / "bin" / "python")),
         "/opt/homebrew/bin/python3",
         "python3",
@@ -665,7 +673,9 @@ def _select_python_for_brand_pipeline() -> str:
     raise RuntimeError(
         "Could not find a Python interpreter with the required brand diffusion pipeline dependencies "
         "(brand_democritus_block_denoise, pandas, pyarrow, matplotlib, tqdm, umap). "
-        "If needed, set CLIFF_BRAND_PIPELINE_PYTHON to the correct interpreter."
+        "Clone brand_democritus_block_denoise next to CLIFF_CatAgi or set CLIFF_BRAND_PANEL_ROOT; "
+        "install it into the active environment with `python -m pip install -e ../brand_democritus_block_denoise`; "
+        "if needed, set CLIFF_BRAND_PIPELINE_PYTHON to that environment's python."
     )
 
 
