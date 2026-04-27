@@ -614,27 +614,41 @@ def _run_command(command: list[str], *, cwd: Path, stream_label: str = "") -> No
         )
 
 
-def _python_has_modules(python_executable: str, modules: tuple[str, ...], *, cwd: Path | None = None) -> bool:
+def _python_module_probe(
+    python_executable: str,
+    modules: tuple[str, ...],
+    *,
+    cwd: Path | None = None,
+) -> tuple[bool, str]:
     probe = [
         python_executable,
         "-c",
-        "import importlib.util, sys; "
-        + "; ".join(
-            f"assert importlib.util.find_spec({module!r}) is not None, {module!r}" for module in modules
-        )
-        + "; print(sys.executable)",
+        (
+            "import importlib.util, json, sys; "
+            f"modules = {list(modules)!r}; "
+            "missing = [module for module in modules if importlib.util.find_spec(module) is None]; "
+            "print(json.dumps({'executable': sys.executable, 'missing': missing}))"
+        ),
     ]
     try:
-        subprocess.run(
+        completed = subprocess.run(
             probe,
             check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
             cwd=str(cwd) if cwd is not None else None,
         )
-        return True
+    except Exception as exc:
+        return False, f"probe failed: {exc}"
+    try:
+        payload = json.loads(completed.stdout.strip().splitlines()[-1])
     except Exception:
-        return False
+        return False, "probe returned unreadable output"
+    missing = tuple(str(item) for item in payload.get("missing", ()))
+    if missing:
+        return False, "missing " + ", ".join(missing)
+    executable = str(payload.get("executable") or python_executable)
+    return True, f"ok ({executable})"
 
 
 def _select_python_for_brand_pipeline() -> str:
@@ -665,17 +679,23 @@ def _select_python_for_brand_pipeline() -> str:
         "/opt/homebrew/bin/python3",
         "python3",
     ]
+    diagnostics: list[str] = []
     for candidate in dict.fromkeys(item for item in candidates if item):
         if candidate != "python3" and not Path(candidate).exists():
+            diagnostics.append(f"{candidate}: path not found")
             continue
-        if _python_has_modules(candidate, required_modules, cwd=workspace_root):
+        ok, detail = _python_module_probe(candidate, required_modules, cwd=workspace_root)
+        diagnostics.append(f"{candidate}: {detail}")
+        if ok:
             return candidate
+    diagnostics_text = "\n".join(f"- {line}" for line in diagnostics[-12:])
     raise RuntimeError(
         "Could not find a Python interpreter with the required brand diffusion pipeline dependencies "
         "(brand_democritus_block_denoise, pandas, pyarrow, matplotlib, tqdm, umap). "
         "Clone brand_democritus_block_denoise next to CLIFF_CatAgi or set CLIFF_BRAND_PANEL_ROOT; "
         "install it into the active environment with `python -m pip install -e ../brand_democritus_block_denoise`; "
-        "if needed, set CLIFF_BRAND_PIPELINE_PYTHON to that environment's python."
+        "if needed, set CLIFF_BRAND_PIPELINE_PYTHON to that environment's python.\n\n"
+        f"Checked interpreters:\n{diagnostics_text}"
     )
 
 
