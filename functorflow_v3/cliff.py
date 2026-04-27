@@ -245,6 +245,8 @@ def _build_worker_command(
         cycle_stage,
         "--execution-mode",
         str(getattr(args, "execution_mode", "quick")),
+        "--analysis-mode",
+        str(getattr(args, "analysis_mode", "standard")),
         "--route",
         str(args.route),
         "--democritus-retrieval-backend",
@@ -824,6 +826,7 @@ def _parse_args() -> argparse.Namespace:
         help="Do not try to open a local browser when starting the CLIFF session server.",
     )
     parser.add_argument("--execution-mode", choices=("quick", "interactive", "deep"), default="quick")
+    parser.add_argument("--analysis-mode", choices=("standard", "topos_world_model"), default="standard")
     parser.add_argument("--llm-token-budget", type=int, default=None)
     parser.add_argument("--route", choices=("auto", "democritus", "basket_rocket_sec", "culinary_tour", "product_feedback", "company_similarity", "course_demo"), default="auto")
     parser.add_argument("--router-excluded-routes", action="append", default=[])

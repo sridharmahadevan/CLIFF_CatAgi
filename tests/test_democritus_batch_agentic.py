@@ -40,6 +40,76 @@ from types import SimpleNamespace
 
 
 class DemocritusBatchAgenticTests(unittest.TestCase):
+    def test_regime_gluing_alignment_demotes_non_ingestion_wine_contexts_for_health_queries(self) -> None:
+        try:
+            from functorflow_v3 import democritus_corpus_synthesis as synthesis_module
+        except ImportError:
+            from ..functorflow_v3 import democritus_corpus_synthesis as synthesis_module
+
+        query = "Give me studies of the health benefits of drinking red wine."
+        health_alignment = synthesis_module._regime_gluing_alignment(
+            query=query,
+            canonical_subj="moderate red wine consumption",
+            canonical_obj="evening postprandial glucose responses",
+            regimes=("glycemic control in insulin resistance", "continuous glucose monitoring in diabetes"),
+            canonical_relations=("reduces",),
+            total_document_support=2,
+            max_regime_support=1,
+            regime_count=2,
+        )
+        dental_alignment = synthesis_module._regime_gluing_alignment(
+            query=query,
+            canonical_subj="red wine immersion",
+            canonical_obj="pigment adsorption and absorption",
+            regimes=("color stability variation among dental composites", "composite resin formulation influence"),
+            canonical_relations=("causes",),
+            total_document_support=5,
+            max_regime_support=1,
+            regime_count=5,
+        )
+
+        self.assertGreater(
+            health_alignment["relevance_weighted_score"],
+            dental_alignment["relevance_weighted_score"],
+        )
+        self.assertIn("glucose", health_alignment["matched_query_terms"])
+        self.assertTrue(any(str(term).startswith("off-topic:") for term in dental_alignment["matched_query_terms"]))
+
+    def test_regime_gluing_alignment_requires_query_target_anchor_terms(self) -> None:
+        try:
+            from functorflow_v3 import democritus_corpus_synthesis as synthesis_module
+        except ImportError:
+            from ..functorflow_v3 import democritus_corpus_synthesis as synthesis_module
+
+        query = "Analyze 5 recent studies of rising ocean temperatures on the fish population and synthesize their joint support."
+        hurricane_alignment = synthesis_module._regime_gluing_alignment(
+            query=query,
+            canonical_subj="rising subsurface ocean temperatures increase ocean heat content",
+            canonical_obj="higher potential hurricane intensity in the caribbean",
+            regimes=("caribbean tropical cyclones", "ocean temperature and hurricane dynamics"),
+            canonical_relations=("causes",),
+            total_document_support=9,
+            max_regime_support=1,
+            regime_count=8,
+        )
+        fish_alignment = synthesis_module._regime_gluing_alignment(
+            query=query,
+            canonical_subj="rising ocean temperatures",
+            canonical_obj="fish population decline and range shifts",
+            regimes=("marine fish thermal stress", "fish population response"),
+            canonical_relations=("causes", "reduces"),
+            total_document_support=4,
+            max_regime_support=2,
+            regime_count=2,
+        )
+
+        self.assertGreater(fish_alignment["query_alignment_score"], hurricane_alignment["query_alignment_score"])
+        self.assertGreater(fish_alignment["relevance_weighted_score"], hurricane_alignment["relevance_weighted_score"])
+        self.assertIn("fish", fish_alignment["matched_query_terms"])
+        self.assertTrue(
+            any(str(term).startswith("off-topic:missing-anchor") for term in hurricane_alignment["matched_query_terms"])
+        )
+
     def test_batch_config_defaults_to_eight_workers(self) -> None:
         config = DemocritusBatchConfig(pdf_dir=Path("/tmp/pdfs"), outdir=Path("/tmp/out"))
 
@@ -726,9 +796,12 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             self.assertEqual(homotopy_class["simplex_triangles"], 1)
             self.assertEqual(homotopy_class["open_horns"], 0)
             self.assertEqual(homotopy_class["coherence_state"], "coherent")
+            self.assertGreaterEqual(homotopy_class["psr_test_witness_count"], 1)
+            self.assertGreater(homotopy_class["psr_max_test_probability"], 0.0)
             synthesis_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
             self.assertIn("Homotopy Localization", synthesis_html)
             self.assertIn("Filled triangles: 1", synthesis_html)
+            self.assertIn("PSR tests:", synthesis_html)
             self.assertIn("glp1 receptor agonist", synthesis_html)
 
     def test_csql_bundle_surfaces_regime_gluing_states(self) -> None:
@@ -821,6 +894,20 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             csql_summary = json.loads(result.csql_bundle.summary_path.read_text(encoding="utf-8"))
             self.assertEqual(csql_summary["n_regime_gluing_surfaces"], 2)
             self.assertEqual(csql_summary["top_regime_gluing_surfaces"][0]["gluing_state"], "obstructed")
+            wine_counterfactual = json.loads(
+                (Path(tmpdir) / "runs" / "run_0" / "counterfactuals" / "democritus_counterfactuals.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            wage_counterfactual = json.loads(
+                (Path(tmpdir) / "runs" / "run_2" / "counterfactuals" / "democritus_counterfactuals.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(wine_counterfactual["counterfactuals"][0]["gluing_label"], "stable")
+            self.assertEqual(wine_counterfactual["counterfactuals"][0]["gluing_state"], "multi_regime_glued")
+            self.assertEqual(wage_counterfactual["counterfactuals"][0]["gluing_label"], "obstructed")
+            self.assertEqual(wage_counterfactual["counterfactuals"][0]["gluing_state"], "obstructed")
             synthesis_payload = json.loads(result.corpus_synthesis.summary_path.read_text(encoding="utf-8"))
             self.assertEqual(synthesis_payload["regime_gluing_summary"]["surface_count"], 2)
             self.assertEqual(synthesis_payload["regime_gluing_summary"]["obstructed_count"], 1)
@@ -835,7 +922,7 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             )
             self.assertEqual(
                 synthesis_payload["regime_gluing_claims"][0]["relevance_label"],
-                "moderate relevance",
+                "high relevance",
             )
             synthesis_html = result.corpus_synthesis.dashboard_path.read_text(encoding="utf-8")
             self.assertIn("Regime Gluing", synthesis_html)
@@ -1848,8 +1935,12 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             self.assertIn("2 questions", gui_html)
             self.assertIn("2 statements", gui_html)
             self.assertIn("1 triples", gui_html)
+            self.assertIn("1 counterfactuals", gui_html)
+            self.assertIn("Counterfactual Assertions", gui_html)
+            self.assertIn("Counterfactual assertions", gui_html)
             self.assertIn("appetite suppression pathway", gui_html)
             self.assertIn("GLP-1 agonists", gui_html)
+            self.assertIn("If `GLP-1 agonists` were reduced or removed", gui_html)
             self.assertIn("This one-page summary ranks causal claims by credibility.", gui_html)
             self.assertIn("Open PDF", gui_html)
             self.assertNotIn("file://", gui_html)
@@ -1862,10 +1953,12 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             credibility_viewer = run_dir / "reports" / "run_alpha_credibility_report.html"
             manifold_viewer = run_dir / "viz" / "relational_manifold_viewer.html"
             lcm_viewer = run_dir / "reports" / "run_alpha_lcm_gallery.html"
+            counterfactual_viewer = run_dir / "counterfactuals" / "democritus_counterfactuals.html"
             self.assertTrue(summary_viewer.exists())
             self.assertTrue(credibility_viewer.exists())
             self.assertTrue(manifold_viewer.exists())
             self.assertTrue(lcm_viewer.exists())
+            self.assertTrue(counterfactual_viewer.exists())
             summary_html = summary_viewer.read_text(encoding="utf-8")
             self.assertIn("BAFFLE Democritus Reader", summary_html)
             self.assertIn("font-size: 22px", summary_html)
@@ -1891,6 +1984,10 @@ class DemocritusBatchAgenticTests(unittest.TestCase):
             self.assertIn("LCM Graph Gallery", lcm_html)
             self.assertIn("appetite suppression pathway", lcm_html)
             self.assertIn("lcm_01_appetite_suppression_pathway.png", lcm_html)
+            counterfactual_html = counterfactual_viewer.read_text(encoding="utf-8")
+            self.assertIn("BAFFLE Democritus Reader", counterfactual_html)
+            self.assertIn("Counterfactual Assertions", counterfactual_html)
+            self.assertIn("GLP-1 agonists", counterfactual_html)
             pdf_fixture.unlink(missing_ok=True)
 
 

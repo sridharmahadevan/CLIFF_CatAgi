@@ -55,6 +55,7 @@ class LLMUsageTests(unittest.TestCase):
                     "route": "democritus",
                     "run_name": "run_alpha",
                     "agent_name": "root_topic_discovery_agent",
+                    "elapsed_seconds": 1.5,
                 },
             )
             append_llm_usage_row(
@@ -69,6 +70,7 @@ class LLMUsageTests(unittest.TestCase):
                     "route": "democritus",
                     "run_name": "run_alpha",
                     "agent_name": "causal_question_agent",
+                    "elapsed_seconds": 0.5,
                 },
             )
 
@@ -80,6 +82,9 @@ class LLMUsageTests(unittest.TestCase):
         self.assertEqual(summary["prompt_tokens"], 200)
         self.assertEqual(summary["completion_tokens"], 50)
         self.assertEqual(summary["total_tokens"], 250)
+        self.assertEqual(summary["requests_with_elapsed"], 2)
+        self.assertEqual(summary["elapsed_seconds"], 2.0)
+        self.assertEqual(summary["tokens_per_second"], 125.0)
         self.assertAlmostEqual(summary["estimated_cost_usd"], 0.000416, places=6)
         self.assertEqual(summary["priced_requests"], 2)
         self.assertEqual(summary["unpriced_requests"], 0)

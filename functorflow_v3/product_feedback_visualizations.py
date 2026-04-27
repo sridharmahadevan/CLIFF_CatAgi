@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
+from .product_feedback_counterfactuals import COUNTERFACTUAL_BUILDER_VERSION, build_product_feedback_counterfactuals
+
 
 @dataclass(frozen=True)
 class ProductFeedbackVisualizationResult:
@@ -232,6 +234,121 @@ def _workflow_rows(rows: list[dict[str, object]]) -> str:
     return "".join(html_rows)
 
 
+def _topos_context_rows(rows: list[dict[str, object]]) -> str:
+    if not rows:
+        return '<tr><td colspan="5" class="empty">No topos-PSR Hankel slices available.</td></tr>'
+    html_rows = []
+    for row in rows[:8]:
+        svd = dict(row.get("svd") or {})
+        html_rows.append(
+            "<tr>"
+            f"<td>{_escape_html(row.get('context_id', ''))}</td>"
+            f"<td>{len(list(row.get('histories') or []))}</td>"
+            f"<td>{len(list(row.get('tests') or []))}</td>"
+            f"<td>{int(svd.get('rank', 0))}</td>"
+            f"<td>{_escape_html(svd.get('energy_captured_top3', 'n/a'))}</td>"
+            "</tr>"
+        )
+    return "".join(html_rows)
+
+
+def _restriction_rows(rows: list[dict[str, object]]) -> str:
+    if not rows:
+        return '<tr><td colspan="5" class="empty">No restriction diagnostics available.</td></tr>'
+    html_rows = []
+    for row in rows[:8]:
+        html_rows.append(
+            "<tr>"
+            f"<td>{_escape_html(row.get('source_context', ''))}</td>"
+            f"<td>{_escape_html(row.get('target_context', ''))}</td>"
+            f"<td>{int(row.get('shared_history_count', 0))}</td>"
+            f"<td>{int(row.get('shared_test_count', 0))}</td>"
+            f"<td>{_tone_chip('compatible' if row.get('compatible') else 'approximate', 'success' if row.get('compatible') else 'mixed')}</td>"
+            "</tr>"
+        )
+    return "".join(html_rows)
+
+
+def _prometheus_gluing_rows(rows: list[dict[str, object]]) -> str:
+    if not rows:
+        return '<tr><td colspan="7" class="empty">No Prometheus GB overlap diagnostics available.</td></tr>'
+    html_rows = []
+    sorted_rows = sorted(
+        rows,
+        key=lambda row: (
+            0 if "learned" in str(row.get("construction") or "").lower() else 1,
+            0 if not row.get("compatible") else 1,
+            -float(row.get("overlap_sections", 0) or 0),
+            -float(row.get("weighted_glue_loss", 0.0) or 0.0),
+        ),
+    )
+    for row in sorted_rows[:12]:
+        construction = str(row.get("construction") or "diagnostic").replace("_", " ")
+        construction_tone = "success" if "learned" in construction else "neutral"
+        html_rows.append(
+            "<tr>"
+            f"<td>{_escape_html(row.get('source_context', ''))}</td>"
+            f"<td>{_escape_html(row.get('target_context', ''))}</td>"
+            f"<td>{_tone_chip(construction, construction_tone)}</td>"
+            f"<td>{int(row.get('overlap_sections', 0) or 0)}</td>"
+            f"<td>{float(row.get('overlap_confidence', 0.0) or 0.0):.3f}</td>"
+            f"<td>{float(row.get('weighted_glue_loss', 0.0) or 0.0):.4f}</td>"
+            f"<td>{_tone_chip('compatible' if row.get('compatible') else 'tense', 'success' if row.get('compatible') else 'mixed')}</td>"
+            "</tr>"
+        )
+    return "".join(html_rows)
+
+
+def _counterfactual_cards(rows: list[dict[str, object]]) -> str:
+    if not rows:
+        return '<div class="empty-card">No supported repair probes passed the strict evidence gate.</div>'
+    cards = []
+    for row in rows[:6]:
+        status = str(row.get("topos_status") or "local_only")
+        tone = "success" if status == "overlap_stable" else "mixed" if "tense" in status else "neutral"
+        support_tier = str(row.get("support_tier") or "support unknown")
+        tier_tone = "success" if support_tier == "strong" else "mixed" if support_tier in {"moderate", "gb-tense"} else "neutral"
+        evidence_label = "GB Tense Overlap" if str(row.get("evidence_status") or "") == "gluing_supported" else "Observed Negative State"
+        cards.append(
+            '<article class="counterfactual-card">'
+            f'<div class="evidence-topline">{_escape_html(row.get("title") or row.get("feedback_id") or "feedback")}</div>'
+            f'<div class="evidence-meta">{_tone_chip(status.replace("_", " "), tone)} {_tone_chip(str(row.get("aspect") or "aspect"), "neutral")} {_tone_chip(support_tier, tier_tone)}</div>'
+            f'<div class="key-label">{evidence_label}</div>'
+            f'<p>{_escape_html(row.get("observed_evidence") or "")}</p>'
+            f'<div class="key-label">Counterfactual Intervention</div>'
+            f'<p>{_escape_html(row.get("repair") or "")}</p>'
+            f'<div class="key-label">Prometheus Repair Probe</div>'
+            f'<p>{_escape_html(row.get("counterfactual") or "")}</p>'
+            f'<div class="evidence-tags">estimated satisfaction gain: {_escape_html(row.get("estimated_satisfaction_gain", "n/a"))}</div>'
+            "</article>"
+        )
+    return "".join(cards)
+
+
+def _exploratory_counterfactual_cards(rows: list[dict[str, object]]) -> str:
+    if not rows:
+        return '<div class="empty-card">No exploratory repair opportunities available.</div>'
+    cards = []
+    for row in rows[:4]:
+        status = str(row.get("topos_status") or "local_only")
+        tone = "success" if status == "overlap_stable" else "mixed" if status == "context_tense" else "neutral"
+        evidence_status = str(row.get("evidence_status") or "domain_plausible").replace("_", " ")
+        cards.append(
+            '<article class="counterfactual-card exploratory-card">'
+            f'<div class="evidence-topline">{_escape_html(row.get("title") or row.get("feedback_id") or "feedback")}</div>'
+            f'<div class="evidence-meta">{_tone_chip(status.replace("_", " "), tone)} {_tone_chip(str(row.get("aspect") or "aspect"), "neutral")} {_tone_chip("exploratory", "neutral")} {_tone_chip(evidence_status, "mixed")}</div>'
+            f'<div class="key-label">{"Query-Conditioned Opportunity" if str(row.get("evidence_status") or "") == "query_conditioned" else "Observed Local Opportunity"}</div>'
+            f'<p>{_escape_html(row.get("observed_evidence") or "")}</p>'
+            f'<div class="key-label">Candidate Intervention</div>'
+            f'<p>{_escape_html(row.get("repair") or "")}</p>'
+            f'<div class="key-label">Prometheus Exploratory Probe</div>'
+            f'<p>{_escape_html(row.get("counterfactual") or "")}</p>'
+            f'<div class="evidence-tags">estimated satisfaction gain: {_escape_html(row.get("estimated_satisfaction_gain", "n/a"))}</div>'
+            "</article>"
+        )
+    return "".join(cards)
+
+
 _EVIDENCE_NOISE_PATTERNS = (
     "affiliate",
     "commission",
@@ -268,17 +385,36 @@ _WORKFLOW_STAGE_HINTS = {
     "order": ("order", "ordered", "purchased", "bought"),
     "deliver": ("arrived", "delivery", "shipped", "boxes"),
     "unbox": ("unbox", "unboxed", "opened", "pieces arrived"),
+    "open": ("open", "opened", "unwrap", "unwrapped", "first bite"),
     "assemble": ("assemble", "assembly", "clamp", "setup", "set up"),
     "configure": ("configure", "configuration", "layout", "orientation", "rearranged"),
     "wear": ("wear", "wore", "upper", "slip on", "fit"),
     "run": ("run", "running", "miles", "trainer", "ride"),
+    "drive": ("drive", "driving", "steering", "ride", "handling", "commute"),
     "sit": ("sit", "sitting", "seat depth", "loung", "movie"),
+    "taste": ("taste", "tasty", "flavor", "flavour", "mouthfeel", "cocoa", "sweetness", "aroma"),
+    "eat": ("eat", "eating", "bite", "ate", "snack", "dessert"),
+    "share": ("share", "shared", "served", "gifted"),
+    "store": ("store", "stored", "freshness", "fridge", "pantry"),
     "clean": ("clean", "spot-treat", "maintenance", "upkeep"),
     "wash": ("wash", "washed", "washable", "line dry", "covers"),
     "reconfigure": ("reconfigure", "modular", "swap", "change the layout"),
     "return": ("return", "returned", "send it back", "didn't fit", "did not fit"),
     "recommend": ("recommend", "worth it", "favorite", "would buy"),
 }
+
+
+def _workflow_family_footnote(usage_workflow_payload: dict[str, object]) -> str:
+    family = str(usage_workflow_payload.get("usage_family") or "generic").strip().lower()
+    if family == "food":
+        return "Food-product success often depends on what customers actually do with the product: unwrap it, taste it, eat it, share it, store it, or return it."
+    if family == "vehicle":
+        return "Vehicle satisfaction often depends on what drivers actually do with the product: order it, configure it, drive it, charge it, clean it, or return it."
+    if family == "shoe":
+        return "Product success often depends on what customers actually do with the product: wear it, run in it, clean it, or return it."
+    if family == "sofa":
+        return "Product success often depends on what customers actually do with the product: assemble it, sit on it, wash it, reconfigure it, or return it."
+    return "Product success often depends on what customers actually do with the product over time, not just how they describe it in isolation."
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -451,6 +587,10 @@ def _dashboard_html(
     hypothesis_payload: dict[str, object],
     usage_workflow_payload: dict[str, object],
     ablation_payload: dict[str, object],
+    topos_psr_payload: dict[str, object],
+    prometheus_twm_payload: dict[str, object],
+    prometheus_twm_summary_payload: dict[str, object],
+    counterfactual_payload: dict[str, object],
     events: list[dict[str, object]],
     product_visual_asset: dict[str, object],
 ) -> str:
@@ -466,6 +606,15 @@ def _dashboard_html(
     workflow_motifs = list(usage_workflow_payload.get("top_workflow_motifs") or [])
     ablation_rows = list(ablation_payload.get("rows") or [])
     ablation_takeaways = list(ablation_payload.get("takeaways") or [])
+    topos_summary = dict(topos_psr_payload.get("summary") or {})
+    topos_contexts = list(topos_psr_payload.get("local_hankel_family") or [])
+    topos_restrictions = list(topos_psr_payload.get("restriction_diagnostics") or [])
+    prometheus_twm_summary = dict(prometheus_twm_payload.get("summary") or {})
+    prometheus_gluing = list(prometheus_twm_payload.get("gluing_diagnostics") or [])
+    prometheus_status = str(prometheus_twm_summary_payload.get("status") or "missing")
+    counterfactual_summary = dict(counterfactual_payload.get("summary") or {})
+    counterfactuals = list(counterfactual_payload.get("counterfactuals") or [])
+    exploratory_counterfactuals = list(counterfactual_payload.get("exploratory_counterfactuals") or [])
     top_negative = ", ".join(str(item) for item in scorecard.get("top_negative_aspects") or []) or "none detected"
     top_positive = ", ".join(str(item) for item in scorecard.get("top_positive_aspects") or []) or "none detected"
     top_return = ", ".join(str(item) for item in scorecard.get("top_return_risk_aspects") or []) or "none detected"
@@ -641,7 +790,7 @@ def _dashboard_html(
       font-size: 22px;
     }}
     .panel h3 {{
-      margin: 0 0 12px;
+      margin: 18px 0 12px;
       font-size: 16px;
       color: var(--muted);
       text-transform: uppercase;
@@ -755,6 +904,16 @@ def _dashboard_html(
       border-radius: 20px;
       padding: 16px;
     }}
+    .counterfactual-card {{
+      background: #f0f2ff;
+      border: 1px solid #c7ccff;
+      border-radius: 20px;
+      padding: 16px;
+    }}
+    .counterfactual-card.exploratory-card {{
+      background: #fffaf0;
+      border-color: #f4d38e;
+    }}
     .evidence-topline {{
       font-size: 16px;
       margin-bottom: 8px;
@@ -765,7 +924,7 @@ def _dashboard_html(
       flex-wrap: wrap;
       margin-bottom: 10px;
     }}
-    .evidence-card p {{
+    .evidence-card p, .counterfactual-card p {{
       margin: 0 0 12px;
       color: var(--muted);
       line-height: 1.5;
@@ -947,7 +1106,106 @@ def _dashboard_html(
           </tbody>
         </table>
         <div class="footnote">
-          Product success often depends on what customers actually do with the product: assemble it, sit on it, run in it, wash it, reconfigure it, or return it.
+          {_escape_html(_workflow_family_footnote(usage_workflow_payload))}
+        </div>
+      </div>
+
+      <div class="panel span-12">
+        <h2>Topos PSR</h2>
+        <div class="metrics">
+          {_metric_card("Episode Views", int(topos_summary.get("n_episodes", 0)))}
+          {_metric_card("Contexts", int(topos_summary.get("n_contexts", 0)))}
+          {_metric_card("Mean Local Rank", topos_summary.get("mean_rank", "n/a"), tone="mixed")}
+          {_metric_card("Restriction Compatibility", f"{int(topos_summary.get('n_compatible_restrictions', 0))}/{int(topos_summary.get('n_restriction_checks', 0))}", tone="success")}
+        </div>
+        <div class="grid" style="margin-top:18px;">
+          <div class="panel span-6" style="box-shadow:none;">
+            <h3>Local Hankel Slices</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Context</th>
+                  <th>Histories</th>
+                  <th>Tests</th>
+                  <th>Rank</th>
+                  <th>Top-3 energy</th>
+                </tr>
+              </thead>
+              <tbody>
+                {_topos_context_rows(topos_contexts)}
+              </tbody>
+            </table>
+          </div>
+          <div class="panel span-6" style="box-shadow:none;">
+            <h3>Restriction Diagnostics</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Source</th>
+                  <th>Target</th>
+                  <th>Shared histories</th>
+                  <th>Shared tests</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {_restriction_rows(topos_restrictions)}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="footnote">
+          This panel summarizes the presheaf-valued predictive state construction over review contexts. Each local Hankel slice is built fiberwise over a review context, and the restriction table checks compatibility across context projections.
+        </div>
+      </div>
+
+      <div class="panel span-12">
+        <h2>Prometheus Counterfactuals</h2>
+        <div class="metrics">
+          {_metric_card("Supported Repairs", int(counterfactual_summary.get("counterfactual_count", 0)), tone="mixed")}
+          {_metric_card("Strict Candidates", int(counterfactual_summary.get("candidate_count", 0)))}
+          {_metric_card("Low-Confidence Probes", int(counterfactual_summary.get("exploratory_count", 0)), tone="neutral")}
+          {_metric_card("Semantics", "local j-do repair", tone="success")}
+        </div>
+        <div class="evidence-grid" style="margin-top:18px;">
+          {_counterfactual_cards(counterfactuals)}
+        </div>
+        <h3>Low-Confidence Repair Probes</h3>
+        <div class="evidence-grid" style="margin-top:14px;">
+          {_exploratory_counterfactual_cards(exploratory_counterfactuals)}
+        </div>
+        <div class="footnote">
+          This layer is Prometheus-inspired counterfactual reasoning: supported repairs require either an observed negative local state or a tense Prometheus GB overlap for the queried aspect. Low-confidence probes include domain-plausible or query-conditioned repairs that did not meet the stricter evidence gate. These are repair hypotheses, not identified causal effects.
+        </div>
+      </div>
+
+      <div class="panel span-12">
+        <h2>Prometheus Topos World Model</h2>
+        <div class="metrics">
+          {_metric_card("Status", prometheus_status, tone="success" if prometheus_status == "ok" else "mixed")}
+          {_metric_card("Local PSRs", int(prometheus_twm_summary.get("local_psr_count", 0) or 0))}
+          {_metric_card("Sheaf Objects", int(prometheus_twm_summary.get("sheaf_object_count", 0) or 0))}
+          {_metric_card("Learned Overlap Edges", int(prometheus_twm_summary.get("learned_overlap_edge_count", 0) or 0), tone="mixed")}
+          {_metric_card("GB Glue Term", f"{float(prometheus_twm_summary.get('twm_objective_glue_term', 0.0) or 0.0):.4f}", tone="success")}
+        </div>
+        <table style="margin-top:18px;">
+          <thead>
+            <tr>
+              <th>Source</th>
+              <th>Target</th>
+              <th>Construction</th>
+              <th>Overlap sections</th>
+              <th>Confidence</th>
+              <th>Weighted loss</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {_prometheus_gluing_rows(prometheus_gluing)}
+          </tbody>
+        </table>
+        <div class="footnote">
+          This is the Prometheus_v1 GB artifact: local product-feedback PSRs are converted into sheaf objects, an overlap graph is inferred, and disagreement is summarized as a weighted gluing objective.
         </div>
       </div>
 
@@ -976,8 +1234,23 @@ def generate_product_feedback_dashboard(run_outdir: str | Path) -> ProductFeedba
     hypothesis_payload = _load_json(run_path / "causal_hypotheses.json")
     usage_workflow_payload = _load_json(run_path / "usage_workflows.json")
     ablation_payload = _load_json(run_path / "ablation_comparison.json")
+    topos_psr_payload = _load_json(run_path / "topos_psr_hankel.json")
+    counterfactual_payload = _load_json(run_path / "prometheus_counterfactuals.json")
+    prometheus_twm_summary = _load_json(run_path / "prometheus_twm" / "prometheus_twm_summary.json")
+    prometheus_twm_payload = _load_json(run_path / "prometheus_twm" / "prometheus_world_model.json")
     events = _load_jsonl(run_path / "normalized_feedback.jsonl")
     product_visual_asset = _load_product_visual_asset(run_path)
+    counterfactual_summary = dict(counterfactual_payload.get("summary") or {})
+    counterfactual_is_stale = int(counterfactual_summary.get("builder_version", 0) or 0) < COUNTERFACTUAL_BUILDER_VERSION
+    if (not counterfactual_payload or counterfactual_is_stale) and events:
+        counterfactual_payload = build_product_feedback_counterfactuals(
+            events,
+            topos_psr=topos_psr_payload,
+            prometheus_twm=prometheus_twm_payload,
+            product_name=str(scorecard.get("product_name") or ""),
+            brand_name=str(scorecard.get("brand_name") or ""),
+        )
+        _write_json(run_path / "prometheus_counterfactuals.json", counterfactual_payload)
 
     dashboard_path = run_path / "product_feedback_dashboard.html"
     summary_path = run_path / "product_feedback_dashboard_summary.json"
@@ -991,6 +1264,10 @@ def generate_product_feedback_dashboard(run_outdir: str | Path) -> ProductFeedba
             hypothesis_payload=hypothesis_payload,
             usage_workflow_payload=usage_workflow_payload,
             ablation_payload=ablation_payload,
+            topos_psr_payload=topos_psr_payload,
+            prometheus_twm_payload=prometheus_twm_payload,
+            prometheus_twm_summary_payload=prometheus_twm_summary,
+            counterfactual_payload=counterfactual_payload,
             events=events,
             product_visual_asset=product_visual_asset,
         ),
@@ -1007,6 +1284,19 @@ def generate_product_feedback_dashboard(run_outdir: str | Path) -> ProductFeedba
             "hypothesis_count": len(list(hypothesis_payload.get("hypotheses") or [])),
             "workflow_motif_count": len(list(usage_workflow_payload.get("top_workflow_motifs") or [])),
             "ablation_row_count": len(list(ablation_payload.get("rows") or [])),
+            "topos_context_count": int(dict(topos_psr_payload.get("summary") or {}).get("n_contexts", 0)),
+            "topos_mean_rank": dict(topos_psr_payload.get("summary") or {}).get("mean_rank"),
+            "prometheus_counterfactual_count": int(
+                dict(counterfactual_payload.get("summary") or {}).get("counterfactual_count", 0)
+            ),
+            "prometheus_twm_status": str(prometheus_twm_summary.get("status") or "missing"),
+            "prometheus_twm_local_psr_count": int(
+                dict(dict(prometheus_twm_summary.get("summary") or {})).get("local_psr_count", 0) or 0
+            ),
+            "prometheus_twm_learned_overlap_edge_count": int(
+                dict(dict(prometheus_twm_summary.get("summary") or {})).get("learned_overlap_edge_count", 0) or 0
+            ),
+            "prometheus_twm_glue_term": dict(dict(prometheus_twm_summary.get("summary") or {})).get("twm_objective_glue_term"),
             "product_visual_available": bool(product_visual_asset.get("image_url")),
             "product_visual_asset_path": (
                 str(run_path / "product_visual_asset.json") if (run_path / "product_visual_asset.json").exists() else None

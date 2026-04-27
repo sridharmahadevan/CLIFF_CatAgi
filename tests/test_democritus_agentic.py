@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import sys
 import threading
@@ -30,6 +31,99 @@ except ModuleNotFoundError:
 
 
 class DemocritusAgenticTests(unittest.TestCase):
+    def test_democritus_counterfactuals_derive_assertions_from_red_wine_claims(self) -> None:
+        try:
+            from functorflow_v3.democritus_counterfactuals import build_democritus_counterfactuals_from_triples
+        except ImportError:
+            from ..functorflow_v3.democritus_counterfactuals import build_democritus_counterfactuals_from_triples
+
+        payload = build_democritus_counterfactuals_from_triples(
+            [
+                {
+                    "topic": "red wine health",
+                    "path": ["red wine health"],
+                    "question": "How does drinking red wine affect health?",
+                    "statement": "Moderate red wine consumption increases resveratrol intake.",
+                    "subj": "moderate red wine consumption",
+                    "rel": "increases",
+                    "obj": "resveratrol intake",
+                    "domain": "dietary polyphenols",
+                },
+                {
+                    "topic": "red wine health",
+                    "path": ["red wine health"],
+                    "question": "How does alcohol affect health?",
+                    "statement": "Alcohol exposure increases cancer risk.",
+                    "subj": "alcohol exposure",
+                    "rel": "increases",
+                    "obj": "cancer risk",
+                    "domain": "adverse health outcomes",
+                },
+            ],
+            domain_name="red_wine_health",
+        )
+
+        self.assertEqual(payload["summary"]["counterfactual_count"], 2)
+        first = payload["counterfactuals"][0]
+        self.assertEqual(first["canonical_subj"], "moderate red wine consumption")
+        self.assertEqual(first["canonical_rel"], "increases")
+        self.assertEqual(first["canonical_obj"], "resveratrol intake")
+        self.assertIn("reduced or removed", first["counterfactual"])
+        self.assertEqual(first["evidence_status"], "derived_from_causal_claim")
+
+    def test_democritus_counterfactuals_label_regime_gluing_from_csql(self) -> None:
+        try:
+            from functorflow_v3.csql_bundle import build_batch_csql_bundle
+            from functorflow_v3.democritus_counterfactuals import (
+                build_democritus_counterfactuals_from_triples,
+                enrich_democritus_counterfactual_payload,
+            )
+        except ImportError:
+            from ..functorflow_v3.csql_bundle import build_batch_csql_bundle
+            from ..functorflow_v3.democritus_counterfactuals import (
+                build_democritus_counterfactuals_from_triples,
+                enrich_democritus_counterfactual_payload,
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir)
+            triples_path = outdir / "relational_triples.jsonl"
+            triples = [
+                {
+                    "topic": "wage policy",
+                    "path": ["wage policy"],
+                    "question": "q",
+                    "statement": "Minimum wage increases employment.",
+                    "subj": "minimum wage",
+                    "rel": "increases",
+                    "obj": "employment",
+                    "domain": "urban labor regime",
+                },
+                {
+                    "topic": "wage policy",
+                    "path": ["wage policy"],
+                    "question": "q",
+                    "statement": "Minimum wage reduces employment.",
+                    "subj": "minimum wage",
+                    "rel": "reduces",
+                    "obj": "employment",
+                    "domain": "rural labor regime",
+                },
+            ]
+            triples_path.write_text("\n".join(json.dumps(row) for row in triples) + "\n", encoding="utf-8")
+            bundle = build_batch_csql_bundle(
+                batch_outdir=outdir,
+                records=[{"run_name": "wage", "triples_path": str(triples_path), "pdf_path": ""}],
+                pdf_dir=outdir,
+            )
+
+            payload = build_democritus_counterfactuals_from_triples(triples, domain_name="wage_policy")
+            enriched = enrich_democritus_counterfactual_payload(payload, csql_sqlite_path=bundle.sqlite_path)
+
+            labels = {row["gluing_label"] for row in enriched["counterfactuals"]}
+            self.assertEqual(labels, {"obstructed"})
+            self.assertEqual(enriched["summary"]["gluing_label_counts"], {"obstructed": 2})
+
     def test_pipeline_frontiers_reflect_parallel_restructure(self) -> None:
         workflow = build_democritus_agentic_workflow(include_phase2=True)
 
@@ -67,6 +161,34 @@ class DemocritusAgenticTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(set(runner.plan()[7]), {"manifold_visualization_agent", "topos_slice_agent"})
+
+    def test_subprocess_agents_run_with_democritus_python(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir)
+            democritus_root = outdir / "Democritus_OpenAI"
+            democritus_python = democritus_root / ".venv" / "bin" / "python3"
+            democritus_python.parent.mkdir(parents=True)
+            democritus_python.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            democritus_python.chmod(0o755)
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CLIFF_DEMOCRITUS_ROOT": str(democritus_root),
+                    "CLIFF_DEMOCRITUS_PYTHON": str(democritus_python),
+                },
+                clear=False,
+            ):
+                runner = DemocritusAgenticRunner(
+                    DemocritusAgenticConfig(
+                        outdir=outdir / "run",
+                        root_topic_strategy="summary_guided",
+                        include_phase2=False,
+                    )
+                )
+
+        command = runner._subprocess_command([sys.executable, "-m", "scripts.causal_question_builder"])
+        self.assertEqual(os.path.realpath(command[0]), os.path.realpath(democritus_python))
 
     def test_root_topic_discovery_agent_writes_root_topics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -560,6 +682,56 @@ class DemocritusAgenticTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertIn("--document-guide", calls[0][1])
             self.assertIn(str(guide_path.resolve()), calls[0][1])
+
+    def test_triple_extraction_agent_materializes_counterfactual_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outdir = Path(tmpdir)
+            runner = DemocritusAgenticRunner(
+                DemocritusAgenticConfig(
+                    outdir=outdir,
+                    domain_name="red_wine_health",
+                    root_topics=("red wine health",),
+                    include_phase2=False,
+                )
+            )
+
+            original = runner._run_subprocess_agent
+
+            def fake_run(agent_name, cmd, *, cwd, outputs):
+                del agent_name, cmd, cwd
+                output = Path(outputs[0])
+                output.write_text(
+                    json.dumps(
+                        {
+                            "topic": "red wine health",
+                            "path": ["red wine health"],
+                            "question": "How does drinking red wine affect health?",
+                            "statement": "Moderate red wine consumption increases resveratrol intake.",
+                            "subj": "moderate red wine consumption",
+                            "rel": "increases",
+                            "obj": "resveratrol intake",
+                            "domain": "dietary polyphenols",
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return tuple(str(path) for path in outputs)
+
+            runner._run_subprocess_agent = fake_run  # type: ignore[assignment]
+            try:
+                outputs = runner._run_triple_extraction_agent()
+            finally:
+                runner._run_subprocess_agent = original  # type: ignore[assignment]
+
+            counterfactual_path = outdir / "counterfactuals" / "democritus_counterfactuals.json"
+            markdown_path = outdir / "counterfactuals" / "democritus_counterfactuals.md"
+            resolved_outputs = {str(Path(output).resolve()) for output in outputs}
+            self.assertIn(str(counterfactual_path.resolve()), resolved_outputs)
+            self.assertIn(str(markdown_path.resolve()), resolved_outputs)
+            payload = json.loads(counterfactual_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["summary"]["counterfactual_count"], 1)
+            self.assertIn("resveratrol intake", payload["counterfactuals"][0]["counterfactual"])
 
     def test_manifold_visualization_agent_serializes_matplotlib_rendering(self) -> None:
         fake_matplotlib = ModuleType("matplotlib")

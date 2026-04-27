@@ -26,6 +26,11 @@ from .consciousness import (
     UnconsciousProcess,
 )
 from .csql_bundle import BatchCSQLBundleResult
+from .democritus_counterfactuals import (
+    build_democritus_counterfactuals_from_jsonl,
+    build_democritus_counterfactuals_from_triples,
+    write_democritus_counterfactual_artifacts,
+)
 from .semantic_kernel import Category, Functor, Interface, ModelObject, Morphism
 
 if TYPE_CHECKING:
@@ -174,12 +179,15 @@ __all__ = [
     "build_agentic_workflow",
     "build_basket_rocket_workflow",
     "build_democritus_agentic_workflow",
+    "build_democritus_counterfactuals_from_jsonl",
+    "build_democritus_counterfactuals_from_triples",
     "build_democritus_workflow",
     "build_product_feedback_agentic_workflow",
     "generate_basket_rocket_visualizations",
     "generate_product_feedback_dashboard",
     "route_ff2_query",
     "route_ff3_query",
+    "write_democritus_counterfactual_artifacts",
     "report_to_cliff_consciousness",
     "route_cliff_query",
 ]

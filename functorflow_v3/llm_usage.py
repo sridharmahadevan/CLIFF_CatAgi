@@ -306,6 +306,7 @@ def append_llm_usage_row(
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
+        "elapsed_seconds": _safe_float(merged_metadata.get("elapsed_seconds")),
     }
     resolved_path.parent.mkdir(parents=True, exist_ok=True)
     with _WRITE_LOCK:
@@ -325,6 +326,10 @@ def summarize_llm_usage(path: Path) -> dict[str, object]:
             "completion_tokens": 0,
             "total_tokens": 0,
             "avg_total_tokens_per_request": 0.0,
+            "elapsed_seconds": 0.0,
+            "requests_with_elapsed": 0,
+            "avg_elapsed_seconds_per_request": 0.0,
+            "tokens_per_second": 0.0,
             "estimated_cost_usd": 0.0,
             "priced_requests": 0,
             "unpriced_requests": 0,
@@ -338,6 +343,8 @@ def summarize_llm_usage(path: Path) -> dict[str, object]:
     prompt_tokens = 0
     completion_tokens = 0
     total_tokens = 0
+    elapsed_seconds = 0.0
+    requests_with_elapsed = 0
     estimated_cost_usd = 0.0
     priced_requests = 0
     unpriced_requests = 0
@@ -382,6 +389,10 @@ def summarize_llm_usage(path: Path) -> dict[str, object]:
             completion_tokens += row_completion_tokens
             total_tokens += row_total_tokens or (row_prompt_tokens + row_completion_tokens)
             row_has_usage = row_total_tokens > 0 or row_prompt_tokens > 0 or row_completion_tokens > 0
+            row_elapsed_seconds = _safe_float(row.get("elapsed_seconds"))
+            if row_elapsed_seconds > 0:
+                elapsed_seconds += row_elapsed_seconds
+                requests_with_elapsed += 1
 
             agent_name = str(row.get("agent_name") or "unknown")
             agent_bucket = by_agent[agent_name]
@@ -447,6 +458,12 @@ def summarize_llm_usage(path: Path) -> dict[str, object]:
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
         "avg_total_tokens_per_request": round(total_tokens / requests_with_usage, 1) if requests_with_usage else 0.0,
+        "elapsed_seconds": round(elapsed_seconds, 6),
+        "requests_with_elapsed": requests_with_elapsed,
+        "avg_elapsed_seconds_per_request": (
+            round(elapsed_seconds / requests_with_elapsed, 6) if requests_with_elapsed else 0.0
+        ),
+        "tokens_per_second": round(total_tokens / elapsed_seconds, 3) if elapsed_seconds > 0 else 0.0,
         "estimated_cost_usd": round(estimated_cost_usd, 6),
         "priced_requests": priced_requests,
         "unpriced_requests": unpriced_requests,

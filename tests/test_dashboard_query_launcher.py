@@ -6,6 +6,7 @@ import io
 import json
 import tempfile
 import unittest
+from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -19,6 +20,105 @@ except ModuleNotFoundError:
 
 
 class DashboardQueryLauncherTests(unittest.TestCase):
+    def test_launcher_form_exposes_topos_world_model_analysis_option(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Session",
+                query_label="Query",
+                query_placeholder="How comfortable is the Lovesac sectional sofa?",
+                submit_label="Run",
+                waiting_message="Working.",
+                auto_open_browser=False,
+            )
+        )
+
+        html = launcher._render_launcher_page()
+
+        self.assertIn('name="analysis_mode"', html)
+        self.assertIn('value="topos_world_model"', html)
+        self.assertIn("Topos World Model", html)
+
+    def test_launcher_page_serves_optional_hero_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_path = Path(tmpdir) / "hero.png"
+            image_path.write_bytes(b"fake-png")
+            launcher = DashboardQueryLauncher(
+                DashboardQueryLauncherConfig(
+                    title="Prometheus",
+                    subtitle="Session",
+                    query_label="Query",
+                    query_placeholder="How comfortable is the Lovesac sectional sofa?",
+                    submit_label="Run",
+                    waiting_message="Working.",
+                    hero_image_path=image_path,
+                    hero_image_alt="Prometheus Topos Theory",
+                    auto_open_browser=False,
+                )
+            )
+
+            html = launcher._render_launcher_page()
+            body, content_type, status = launcher._render_launcher_hero_image_response()
+
+        self.assertIn('src="/launcher-hero-image"', html)
+        self.assertIn('alt="Prometheus Topos Theory"', html)
+        self.assertEqual(body, b"fake-png")
+        self.assertEqual(content_type, "image/png")
+        self.assertEqual(status, HTTPStatus.OK)
+
+    def test_prometheus_launcher_rebrands_cliff_artifact_templates(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="Prometheus",
+                subtitle="Test session",
+                query_label="Prometheus query",
+                query_placeholder="How comfortable is the Lovesac sectional sofa?",
+                submit_label="Ask Prometheus",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            artifact_path = root / "product_feedback" / "product_feedback_dashboard.html"
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_path.write_text(
+                (
+                    "<html><head><title>CLIFF Product Feedback Dashboard</title></head>"
+                    "<body><p>CLIFF Topos World Model</p>"
+                    "<p>CLIFF Review Synthesis</p>"
+                    '<section class="panel"><p class="eyebrow">Read This in the Book</p>'
+                    '<p class="trace">Textbook source: <code>catagi.pdf</code></p></section>'
+                    '<section class="card"><p class="eyebrow">Read This in the Book</p>'
+                    '<p class="trace">Textbook source: <code>catagi.pdf</code></p></section>'
+                    "<p>CLIFF is a research prototype.</p></body></html>"
+                ),
+                encoding="utf-8",
+            )
+
+            run_id = launcher.submit_query("How comfortable is the Lovesac sectional sofa?")
+            launcher.update_session_run(
+                run_id,
+                status="complete",
+                mind_layer="prometheus",
+                route_name="product_feedback",
+                note="Finished.",
+                artifact_path=artifact_path,
+                outdir=root,
+            )
+
+            rendered = launcher._render_run_artifact_page(run_id)
+
+        self.assertIn("Prometheus Product Feedback Dashboard", rendered)
+        self.assertIn("Prometheus Topos World Model", rendered)
+        self.assertIn("Prometheus Review Synthesis", rendered)
+        self.assertIn("Prometheus is a research prototype.", rendered)
+        self.assertNotIn("CLIFF Product Feedback Dashboard", rendered)
+        self.assertNotIn("Read This in the Book", rendered)
+        self.assertNotIn("catagi.pdf", rendered)
+
     def test_start_uses_configured_bind_endpoint_without_opening_browser(self) -> None:
         opened_urls: list[str] = []
         created_servers: list[object] = []
@@ -2041,6 +2141,52 @@ class DashboardQueryLauncherTests(unittest.TestCase):
 
             self.assertIn("/run-file?run_id=", rendered)
             self.assertIn("Visualization suite", launcher._render_run_file_response(run_id, str(linked_path))[0].decode("utf-8"))
+
+    def test_render_run_artifact_page_rewrites_absolute_local_links_to_launcher_endpoint(self) -> None:
+        launcher = DashboardQueryLauncher(
+            DashboardQueryLauncherConfig(
+                title="CLIFF",
+                subtitle="Test session",
+                query_label="CLIFF query",
+                query_placeholder="How comfortable is the Lovesac sectional sofa?",
+                submit_label="Ask CLIFF",
+                waiting_message="Runs stay in the background.",
+                session_mode=True,
+            )
+        )
+        self.addCleanup(launcher.close)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            linked_path = root / "product_feedback_run" / "corpus_synthesis" / "product_feedback_corpus_synthesis.html"
+            linked_path.parent.mkdir(parents=True, exist_ok=True)
+            linked_path.write_text("<html><body>Lovesac synthesis</body></html>", encoding="utf-8")
+            artifact_path = root / "product_feedback" / "topos_world_model" / "topos_world_model.html"
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_path.write_text(
+                (
+                    '<html><body>'
+                    f'<a href="{linked_path.resolve()}">Open route dashboard</a>'
+                    '</body></html>'
+                ),
+                encoding="utf-8",
+            )
+
+            run_id = launcher.submit_query("How comfortable is the Lovesac sectional sofa?")
+            launcher.update_session_run(
+                run_id,
+                status="complete",
+                mind_layer="conscious",
+                route_name="product_feedback",
+                note="Finished.",
+                artifact_path=artifact_path,
+                outdir=root,
+            )
+
+            rendered = launcher._render_run_artifact_page(run_id)
+
+            self.assertIn("/run-file?run_id=", rendered)
+            self.assertIn("Lovesac synthesis", launcher._render_run_file_response(run_id, str(linked_path))[0].decode("utf-8"))
 
     def test_render_run_file_response_wraps_markdown_as_html(self) -> None:
         launcher = DashboardQueryLauncher(

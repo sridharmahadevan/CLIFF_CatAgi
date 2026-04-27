@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -314,6 +315,89 @@ class QueryRouterAgenticTests(unittest.TestCase):
         self.assertEqual(result.route_decision.route_name, "democritus")
         self.assertEqual(FakeDemocritusRunner.instances[0].config.outdir, Path(tmpdir).resolve() / "democritus")
         self.assertEqual(FakeDemocritusRunner.instances[0].config.execution_mode, "quick")
+
+    def test_topos_world_model_mode_wraps_product_feedback_psr_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            route_outdir = root / "product_feedback"
+            route_outdir.mkdir(parents=True)
+            dashboard = route_outdir / "product_feedback_dashboard.html"
+            dashboard.write_text("<html>product</html>", encoding="utf-8")
+            psr_path = route_outdir / "topos_psr_hankel.json"
+            psr_path.write_text('{"summary": {"n_contexts": 1}}', encoding="utf-8")
+            router = module.FF2QueryRouter(
+                module.FF2QueryRouterConfig(
+                    query="How comfortable is the Lovesac sectional sofa?",
+                    outdir=root,
+                    analysis_mode="topos_world_model",
+                )
+            )
+            fake_product_result = SimpleNamespace(
+                query_plan=SimpleNamespace(query="How comfortable is the Lovesac sectional sofa?"),
+                summary_path=route_outdir / "product_feedback_query_summary.json",
+                product_feedback_result=SimpleNamespace(dashboard_path=dashboard, topos_psr_path=psr_path),
+                corpus_synthesis_result=None,
+            )
+            fake_result = module.FF2QueryRouterRunResult(
+                route_decision=module.FF2RouteDecision(
+                    route_name="product_feedback",
+                    module_name="functorflow_v3.product_feedback_query_agentic",
+                    rationale="test",
+                ),
+                route_outdir=route_outdir,
+                summary_path=root / "ff2_query_router_summary.json",
+                product_feedback_result=fake_product_result,
+            )
+
+            wrapped = router._attach_topos_world_model(fake_result)
+
+            self.assertIsNotNone(wrapped.topos_world_model_path)
+            assert wrapped.topos_world_model_path is not None
+            self.assertTrue(wrapped.topos_world_model_path.exists())
+            self.assertEqual(module._artifact_path_for_result(wrapped), wrapped.topos_world_model_path)
+            payload = json.loads((wrapped.topos_world_model_path.parent / "topos_world_model.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["route_name"], "product_feedback")
+            self.assertEqual(payload["psr_path"], str(psr_path))
+
+    def test_topos_world_model_mode_wraps_company_similarity_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            route_outdir = root / "company_similarity"
+            analysis_dir = route_outdir / "adobe_vs_nike_functors"
+            analysis_dir.mkdir(parents=True)
+            dashboard = route_outdir / "company_similarity_dashboard.html"
+            dashboard.write_text("<html>company</html>", encoding="utf-8")
+            router = module.FF2QueryRouter(
+                module.FF2QueryRouterConfig(
+                    query="How similar is Adobe to Nike?",
+                    outdir=root,
+                    analysis_mode="topos_world_model",
+                )
+            )
+            fake_company_result = SimpleNamespace(
+                query_plan=SimpleNamespace(query="How similar is Adobe to Nike?", company_a="Adobe", company_b="Nike"),
+                analysis_dir=analysis_dir,
+                summary_path=route_outdir / "company_similarity_summary.json",
+                artifact_path=dashboard,
+            )
+            fake_result = module.FF2QueryRouterRunResult(
+                route_decision=module.FF2RouteDecision(
+                    route_name="company_similarity",
+                    module_name="functorflow_v3.company_similarity_agentic",
+                    rationale="test",
+                ),
+                route_outdir=route_outdir,
+                summary_path=root / "ff2_query_router_summary.json",
+                company_similarity_result=fake_company_result,
+            )
+
+            wrapped = router._attach_topos_world_model(fake_result)
+
+            self.assertIsNotNone(wrapped.topos_world_model_path)
+            assert wrapped.topos_world_model_path is not None
+            payload = json.loads((wrapped.topos_world_model_path.parent / "topos_world_model.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["route_name"], "company_similarity")
+            self.assertEqual(payload["model_family"], "company_similarity_functor_topos_world_model")
 
     def test_router_passes_deep_mode_to_company_similarity_runner(self) -> None:
         class FakeCompanySimilarityRunner:

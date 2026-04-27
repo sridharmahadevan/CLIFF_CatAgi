@@ -77,6 +77,11 @@ class CLIFFTests(unittest.TestCase):
 
         self.assertEqual(decision.route_name, "product_feedback")
 
+    def test_route_cliff_query_routes_food_product_taste_query_to_product_feedback(self) -> None:
+        decision = module.route_cliff_query("How tasty is it to eat the Amedei Porcelana Chocolate Bars?")
+
+        self.assertEqual(decision.route_name, "product_feedback")
+
     def test_route_cliff_query_routes_culinary_tour_request(self) -> None:
         decision = module.route_cliff_query("Plan a kimchi culinary tour in Seoul July 6-11 under $50 per meal")
 
@@ -111,6 +116,13 @@ class CLIFFTests(unittest.TestCase):
         decision = module.route_cliff_query(
             "Analyze 5 recent primary randomized controlled trials of semaglutide for weight loss in adults with obesity "
             "and synthesize their joint support."
+        )
+
+        self.assertEqual(decision.route_name, "democritus")
+
+    def test_route_cliff_query_routes_topos_world_model_study_request_to_democritus(self) -> None:
+        decision = module.route_cliff_query(
+            "Find 5 studies of the weight loss drug GLP-1 and build a topos world model from them"
         )
 
         self.assertEqual(decision.route_name, "democritus")

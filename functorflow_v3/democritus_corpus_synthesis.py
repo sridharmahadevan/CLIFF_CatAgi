@@ -113,6 +113,13 @@ class HomotopyClaimClass:
     connected_components: int
     horn_fill_ratio: float
     coherence_state: str
+    matched_query_terms: tuple[str, ...] = ()
+    query_alignment_score: float = 0.0
+    relevance_label: str = "unscored"
+    relevance_weighted_score: float = 0.0
+    psr_test_witness_count: int = 0
+    psr_max_test_probability: float = 0.0
+    psr_contexts: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -136,6 +143,9 @@ class RegimeGluingClaim:
     relevance_label: str = "unscored"
     corroboration_label: str = ""
     relevance_weighted_score: float = 0.0
+    psr_test_witness_count: int = 0
+    psr_max_test_probability: float = 0.0
+    psr_contexts: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -253,6 +263,9 @@ def build_democritus_corpus_synthesis(
 
     with sqlite3.connect(str(csql_sqlite_path)) as connection:
         total_documents = _scalar(connection, "SELECT COUNT(*) FROM documents")
+        psr_test_witnesses = _load_psr_test_witness_index(
+            batch_outdir / "topos_psr" / "democritus_topos_psr_hankel.json"
+        )
         claims = _load_claims(connection, total_documents=total_documents)
         equivalence_classes, disagreements = _load_relation_groups(connection, total_documents=total_documents)
         diagnostic_claims = _load_diagnostic_claims(connection, total_documents=total_documents)
@@ -260,8 +273,14 @@ def build_democritus_corpus_synthesis(
             connection,
             claims=claims,
             total_documents=total_documents,
+            query=query,
+            psr_test_witnesses=psr_test_witnesses,
         )
-        regime_gluing_claims = _load_regime_gluing_claims(connection, query=query)
+        regime_gluing_claims = _load_regime_gluing_claims(
+            connection,
+            query=query,
+            psr_test_witnesses=psr_test_witnesses,
+        )
         contested_keys = {
             (item.subj, item.obj, item.domain)
             for item in disagreements
@@ -321,6 +340,9 @@ def build_democritus_corpus_synthesis(
     payload = {
         "query": query,
         "csql_sqlite_path": str(csql_sqlite_path),
+        "topos_psr_path": str(batch_outdir / "topos_psr" / "democritus_topos_psr_hankel.json")
+        if (batch_outdir / "topos_psr" / "democritus_topos_psr_hankel.json").exists()
+        else "",
         "n_documents": total_documents,
         "support_summary": {
             "strong_support_count": len(strong_claims),
@@ -371,6 +393,168 @@ def _query_focus_terms(query: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(tokens[:8]))
 
 
+def _query_anchor_terms(query: str) -> tuple[str, ...]:
+    """Return target terms that a relevant synthesis surface should touch.
+
+    Broad climate/medical queries often contain both a driver and a target. A
+    candidate that matches only the driver can look deceptively relevant, so we
+    treat the explicit "on/about/regarding" tail or, failing that, the final
+    focus terms as an anchor.
+    """
+
+    normalized = f" {' '.join(str(query or '').lower().split())} "
+    for marker in (" on ", " about ", " regarding "):
+        if marker not in normalized:
+            continue
+        _, _, tail = normalized.partition(marker)
+        terms = _tokenize_query_text(tail)
+        if terms:
+            return tuple(dict.fromkeys(terms[:4]))
+    focus_terms = _query_focus_terms(query)
+    if len(focus_terms) >= 4:
+        return tuple(dict.fromkeys(focus_terms[-2:]))
+    return ()
+
+
+def _query_alignment(
+    *,
+    query: str,
+    candidate_text: str,
+    total_document_support: int,
+    max_surface_support: int,
+    surface_count: int,
+) -> dict[str, object]:
+    focus_terms = _query_focus_terms(query)
+    corroboration_label = (
+        "coherence without corroboration risk"
+        if max_surface_support <= 1
+        else "multi-surface corroboration"
+    )
+    if not focus_terms:
+        return {
+            "matched_query_terms": (),
+            "query_alignment_score": 0.0,
+            "relevance_label": "unscored",
+            "corroboration_label": corroboration_label,
+            "relevance_weighted_score": float(total_document_support),
+        }
+
+    token_set = set(_tokenize_query_text(candidate_text))
+    matched_query_terms = tuple(term for term in focus_terms if term in token_set)
+    anchor_terms = _query_anchor_terms(query)
+    matched_anchor_terms = tuple(term for term in anchor_terms if term in token_set)
+    missing_anchor_terms = tuple(term for term in anchor_terms if term not in token_set)
+    base_alignment_score = len(matched_query_terms) / float(len(focus_terms))
+    health_adjustment, health_markers = _health_intent_alignment_adjustment(
+        query=query,
+        candidate_text=candidate_text,
+    )
+    alignment_score = base_alignment_score + health_adjustment
+    anchor_markers: tuple[str, ...] = ()
+    if anchor_terms and not matched_anchor_terms:
+        alignment_score = min(alignment_score, 0.25)
+        anchor_markers = tuple(f"off-topic:missing-anchor:{term}" for term in missing_anchor_terms[:3])
+    elif matched_anchor_terms:
+        alignment_score += min(0.15, 0.05 * len(matched_anchor_terms))
+    alignment_score = round(min(1.0, max(0.0, alignment_score)), 3)
+    support_density = float(total_document_support) / float(max(1, surface_count))
+    corroboration_bonus = min(1.0, support_density / 2.0)
+    singleton_penalty = 0.35 if max_surface_support <= 1 else 0.0
+    weighted_score = max(0.0, alignment_score + 0.25 * corroboration_bonus - singleton_penalty)
+    if alignment_score >= 0.6:
+        relevance_label = "high relevance"
+    elif alignment_score >= 0.3:
+        relevance_label = "moderate relevance"
+    elif alignment_score > 0.0:
+        relevance_label = "weak relevance"
+    else:
+        relevance_label = "low relevance"
+    return {
+        "matched_query_terms": tuple(
+            dict.fromkeys((*matched_query_terms, *matched_anchor_terms, *health_markers, *anchor_markers))
+        ),
+        "query_alignment_score": alignment_score,
+        "relevance_label": relevance_label,
+        "corroboration_label": corroboration_label,
+        "relevance_weighted_score": round(weighted_score, 3),
+    }
+
+
+_HEALTH_INTENT_TERMS = {
+    "benefit",
+    "benefits",
+    "health",
+    "healthy",
+    "drinking",
+    "drink",
+    "consumption",
+    "intake",
+    "diet",
+    "cardiovascular",
+}
+
+_HEALTH_EVIDENCE_TERMS = {
+    "alcohol",
+    "bioactive",
+    "cancer",
+    "cardiovascular",
+    "coronary",
+    "diabetes",
+    "dietary",
+    "drink",
+    "drinking",
+    "glucose",
+    "glycemic",
+    "health",
+    "insulin",
+    "intake",
+    "metabolism",
+    "plaque",
+    "polyphenol",
+    "polyphenols",
+    "postprandial",
+    "resveratrol",
+}
+
+_NON_INGESTION_WINE_TERMS = {
+    "adsorbent",
+    "adsorption",
+    "aging",
+    "bottle",
+    "composite",
+    "composites",
+    "dental",
+    "discoloration",
+    "immersion",
+    "label",
+    "labels",
+    "ota",
+    "pigment",
+    "resin",
+    "staining",
+    "sulfite",
+    "sulfites",
+    "warning",
+    "winemaking",
+}
+
+
+def _health_intent_alignment_adjustment(*, query: str, candidate_text: str) -> tuple[float, tuple[str, ...]]:
+    query_tokens = set(_tokenize_query_text(query))
+    if not (query_tokens & _HEALTH_INTENT_TERMS):
+        return 0.0, ()
+    candidate_tokens = set(_tokenize_query_text(candidate_text))
+    if not (candidate_tokens & {"wine", "red"}):
+        return 0.0, ()
+    health_hits = tuple(sorted(candidate_tokens & _HEALTH_EVIDENCE_TERMS))
+    non_ingestion_hits = tuple(sorted(candidate_tokens & _NON_INGESTION_WINE_TERMS))
+    if health_hits:
+        return 0.18, health_hits[:4]
+    if non_ingestion_hits:
+        return -0.35, tuple(f"off-topic:{term}" for term in non_ingestion_hits[:4])
+    return -0.12, ("off-topic:wine-context",)
+
+
 def _regime_gluing_alignment(
     *,
     query: str,
@@ -382,43 +566,21 @@ def _regime_gluing_alignment(
     max_regime_support: int,
     regime_count: int,
 ) -> dict[str, object]:
-    focus_terms = _query_focus_terms(query)
     corroboration_label = (
         "coherence without corroboration risk"
         if max_regime_support <= 1
         else "multi-regime corroboration"
     )
-    if not focus_terms:
-        return {
-            "matched_query_terms": (),
-            "query_alignment_score": 0.0,
-            "relevance_label": "unscored",
-            "corroboration_label": corroboration_label,
-            "relevance_weighted_score": float(total_document_support),
-        }
     text_parts = [canonical_subj, canonical_obj, *regimes, *canonical_relations]
-    token_set = set(_tokenize_query_text(" ".join(part for part in text_parts if part)))
-    matched_query_terms = tuple(term for term in focus_terms if term in token_set)
-    alignment_score = round(len(matched_query_terms) / float(len(focus_terms)), 3)
-    support_density = float(total_document_support) / float(max(1, regime_count))
-    corroboration_bonus = min(1.0, support_density / 2.0)
-    singleton_penalty = 0.35 if max_regime_support <= 1 else 0.0
-    weighted_score = max(0.0, alignment_score + 0.25 * corroboration_bonus - singleton_penalty)
-    if alignment_score >= 0.6:
-        relevance_label = "high relevance"
-    elif alignment_score >= 0.3:
-        relevance_label = "moderate relevance"
-    elif alignment_score > 0.0:
-        relevance_label = "weak relevance"
-    else:
-        relevance_label = "low relevance"
-    return {
-        "matched_query_terms": matched_query_terms,
-        "query_alignment_score": alignment_score,
-        "relevance_label": relevance_label,
-        "corroboration_label": corroboration_label,
-        "relevance_weighted_score": round(weighted_score, 3),
-    }
+    candidate_text = " ".join(part for part in text_parts if part)
+    alignment = _query_alignment(
+        query=query,
+        candidate_text=candidate_text,
+        total_document_support=total_document_support,
+        max_surface_support=max_regime_support,
+        surface_count=regime_count,
+    )
+    return {**alignment, "corroboration_label": corroboration_label}
 
 
 def _support_truth_value(*, document_support: int, total_documents: int) -> str:
@@ -455,6 +617,59 @@ def _decode_json_array(raw_value: object) -> tuple[str, ...]:
         values = parsed if isinstance(parsed, list) else [parsed]
     decoded = [str(item).strip() for item in values if str(item).strip()]
     return tuple(dict.fromkeys(decoded))
+
+
+def _load_psr_test_witness_index(psr_path: Path) -> dict[tuple[str, str], list[dict[str, object]]]:
+    """Load compact PSR test witnesses keyed by canonical cause/outcome."""
+
+    if not psr_path.exists():
+        return {}
+    try:
+        payload = json.loads(psr_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    index: dict[tuple[str, str], list[dict[str, object]]] = {}
+    for raw_row in list(dict(payload).get("claim_test_witnesses") or []):
+        if not isinstance(raw_row, dict):
+            continue
+        row = dict(raw_row)
+        key = (str(row.get("canonical_subj") or ""), str(row.get("canonical_obj") or ""))
+        if not all(key):
+            continue
+        index.setdefault(key, []).append(row)
+    return index
+
+
+def _summarize_psr_witnesses(
+    psr_test_witnesses: dict[tuple[str, str], list[dict[str, object]]],
+    *,
+    canonical_subj: str,
+    canonical_obj: str,
+    canonical_rel: str | None = None,
+) -> dict[str, object]:
+    rows = [
+        dict(row)
+        for row in psr_test_witnesses.get((canonical_subj, canonical_obj), [])
+        if canonical_rel is None or str(row.get("canonical_rel") or "") == canonical_rel
+    ]
+    if not rows:
+        return {
+            "psr_test_witness_count": 0,
+            "psr_max_test_probability": 0.0,
+            "psr_contexts": (),
+        }
+    contexts = tuple(
+        dict.fromkeys(
+            str(row.get("context_label") or row.get("context_id") or "")
+            for row in rows
+            if str(row.get("context_label") or row.get("context_id") or "").strip()
+        )
+    )
+    return {
+        "psr_test_witness_count": len(rows),
+        "psr_max_test_probability": round(max(float(row.get("test_probability") or 0.0) for row in rows), 6),
+        "psr_contexts": contexts[:4],
+    }
 
 
 def _load_diagnostic_claims(
@@ -668,6 +883,8 @@ def _load_homotopy_claim_classes(
     *,
     claims: list[CorpusClaim],
     total_documents: int,
+    query: str,
+    psr_test_witnesses: dict[tuple[str, str], list[dict[str, object]]],
 ) -> list[HomotopyClaimClass]:
     grouped: dict[tuple[str, str, str], list[CorpusClaim]] = {}
     for item in claims:
@@ -713,6 +930,33 @@ def _load_homotopy_claim_classes(
         simplex_edges, simplex_triangles, open_horns, connected_components, horn_fill_ratio, coherence_state = _homotopy_graph_metrics(items)
         supporting_runs = _decode_json_array(row[7])
         document_support = int(row[5] or 0)
+        candidate_text = " ".join(
+            part
+            for part in (
+                canonical_subj,
+                canonical_rel,
+                canonical_obj,
+                str(row[3] or ""),
+                str(row[4] or ""),
+                *surface_forms,
+                *domain_aliases,
+            )
+            if part
+        )
+        alignment = _query_alignment(
+            query=query,
+            candidate_text=candidate_text,
+            total_document_support=document_support,
+            max_surface_support=document_support,
+            surface_count=max(1, int(row[8] or len(surface_forms) or 1)),
+        )
+        psr_summary = _summarize_psr_witnesses(
+            psr_test_witnesses,
+            canonical_subj=canonical_subj,
+            canonical_rel=canonical_rel,
+            canonical_obj=canonical_obj,
+        )
+        psr_bonus = 0.12 * min(1.0, float(psr_summary["psr_max_test_probability"]))
         representative = max(
             items,
             key=lambda item: (
@@ -763,11 +1007,21 @@ def _load_homotopy_claim_classes(
                 connected_components=connected_components,
                 horn_fill_ratio=horn_fill_ratio,
                 coherence_state=coherence_state,
+                matched_query_terms=tuple(alignment.get("matched_query_terms") or ()),
+                query_alignment_score=float(alignment.get("query_alignment_score") or 0.0),
+                relevance_label=str(alignment.get("relevance_label") or "unscored"),
+                relevance_weighted_score=round(float(alignment.get("relevance_weighted_score") or 0.0) + psr_bonus, 3),
+                psr_test_witness_count=int(psr_summary["psr_test_witness_count"]),
+                psr_max_test_probability=float(psr_summary["psr_max_test_probability"]),
+                psr_contexts=tuple(psr_summary["psr_contexts"]),
             )
         )
 
     homotopy_classes.sort(
         key=lambda item: (
+            -item.relevance_weighted_score,
+            -item.query_alignment_score,
+            -(1 if item.document_support > 1 else 0),
             -item.document_support,
             -item.surface_form_count,
             -item.claim_count,
@@ -778,7 +1032,12 @@ def _load_homotopy_claim_classes(
     return homotopy_classes
 
 
-def _load_regime_gluing_claims(connection: sqlite3.Connection, *, query: str) -> list[RegimeGluingClaim]:
+def _load_regime_gluing_claims(
+    connection: sqlite3.Connection,
+    *,
+    query: str,
+    psr_test_witnesses: dict[tuple[str, str], list[dict[str, object]]],
+) -> list[RegimeGluingClaim]:
     rows = connection.execute(
         """
         SELECT
@@ -854,6 +1113,12 @@ def _load_regime_gluing_claims(connection: sqlite3.Connection, *, query: str) ->
             max_regime_support=int(bucket["max_regime_support"]),
             regime_count=regime_count,
         )
+        psr_summary = _summarize_psr_witnesses(
+            psr_test_witnesses,
+            canonical_subj=canonical_subj,
+            canonical_obj=canonical_obj,
+        )
+        psr_bonus = 0.12 * min(1.0, float(psr_summary["psr_max_test_probability"]))
         claims.append(
             RegimeGluingClaim(
                 canonical_subj=canonical_subj,
@@ -871,7 +1136,10 @@ def _load_regime_gluing_claims(connection: sqlite3.Connection, *, query: str) ->
                 query_alignment_score=float(alignment.get("query_alignment_score") or 0.0),
                 relevance_label=str(alignment.get("relevance_label") or "unscored"),
                 corroboration_label=str(alignment.get("corroboration_label") or ""),
-                relevance_weighted_score=float(alignment.get("relevance_weighted_score") or 0.0),
+                relevance_weighted_score=round(float(alignment.get("relevance_weighted_score") or 0.0) + psr_bonus, 3),
+                psr_test_witness_count=int(psr_summary["psr_test_witness_count"]),
+                psr_max_test_probability=float(psr_summary["psr_max_test_probability"]),
+                psr_contexts=tuple(psr_summary["psr_contexts"]),
             )
         )
     claims.sort(
@@ -1881,6 +2149,8 @@ def _render_homotopy_card(item: dict[str, object]) -> str:
         if str(entry).strip()
     ]
     alternate_domains = [entry for entry in domain_aliases if entry != str(item.get("domain") or "")]
+    matched_terms = " | ".join(str(entry) for entry in (item.get("matched_query_terms") or [])[:5])
+    psr_contexts = " | ".join(str(entry) for entry in (item.get("psr_contexts") or [])[:3])
     return (
         '<article class="homotopy-card">'
         f'<div class="claim-meta">{esc(item.get("coherence_state") or "coherent").replace("_", " ")} · '
@@ -1905,6 +2175,18 @@ def _render_homotopy_card(item: dict[str, object]) -> str:
             if alternate_domains
             else ""
         )
+        + (
+            f'<p class="trace">Query alignment: {esc(item.get("relevance_label") or "unscored")} '
+            f'({esc(item.get("query_alignment_score") or 0.0)})'
+            + (f' · Matched terms: {esc(matched_terms)}' if matched_terms else "")
+            + "</p>"
+        )
+        + (
+            f'<p class="trace">PSR tests: {esc(item.get("psr_test_witness_count") or 0)} witness cell(s) · '
+            f'max p={esc(item.get("psr_max_test_probability") or 0.0)}'
+            + (f' · Contexts: {esc(psr_contexts)}' if psr_contexts else "")
+            + "</p>"
+        )
         + "</article>"
     )
 
@@ -1917,6 +2199,7 @@ def _render_regime_gluing_card(item: dict[str, object]) -> str:
     relations = " | ".join(str(entry) for entry in (item.get("canonical_relations") or [])[:4])
     gluing_state = str(item.get("gluing_state") or "single_regime").replace("_", " ")
     matched_terms = " | ".join(str(entry) for entry in (item.get("matched_query_terms") or [])[:4])
+    psr_contexts = " | ".join(str(entry) for entry in (item.get("psr_contexts") or [])[:3])
     return (
         '<article class="regime-card">'
         f'<div class="claim-meta">{esc(gluing_state)} · {esc(item.get("regime_count") or 0)} regime(s) · '
@@ -1934,6 +2217,12 @@ def _render_regime_gluing_card(item: dict[str, object]) -> str:
             f'<p class="trace">Regime variants: {esc(item.get("regime_variant_count") or 0)} · '
             f'Polarity count: {esc(item.get("polarity_count") or 0)} · '
             f'Max single-regime support: {esc(item.get("max_regime_support") or 0)}</p>'
+        )
+        + (
+            f'<p class="trace">PSR tests: {esc(item.get("psr_test_witness_count") or 0)} witness cell(s) · '
+            f'max p={esc(item.get("psr_max_test_probability") or 0.0)}'
+            + (f' · Contexts: {esc(psr_contexts)}' if psr_contexts else "")
+            + "</p>"
         )
         + (
             f'<p class="trace">{esc(item.get("corroboration_label") or "")}</p>'
@@ -2069,6 +2358,7 @@ def _render_dashboard_html(
     )
     democritus_gui_href = _relative_href(batch_outdir / "democritus_gui.html", start=dashboard_path.parent)
     csql_summary_href = _relative_href(Path(str(payload.get("csql_sqlite_path") or "")).with_name("democritus_csql_summary.json"), start=dashboard_path.parent)
+    topos_psr_href = _relative_href(Path(str(payload.get("topos_psr_path") or "")), start=dashboard_path.parent) if payload.get("topos_psr_path") else ""
     return f"""<!doctype html>
 <html lang="en">
   <head>
@@ -2142,6 +2432,7 @@ def _render_dashboard_html(
           <div class="link-row">
             {f'<a href="{esc(democritus_gui_href)}" target="_blank" rel="noreferrer">Open Democritus batch GUI</a>' if democritus_gui_href else ''}
             {f'<a href="{esc(csql_summary_href)}" target="_blank" rel="noreferrer">Open CSQL summary JSON</a>' if csql_summary_href else ''}
+            {f'<a href="{esc(topos_psr_href)}" target="_blank" rel="noreferrer">Open Topos World Model PSR JSON</a>' if topos_psr_href else ''}
           </div>
         </div>
         <div class="panel" style="padding:18px; background:#f8ede0;">

@@ -17,7 +17,12 @@ from pathlib import Path
 from typing import Callable
 
 from .agentic_workflows import AgenticWorkflow, AgentSpec, ArtifactSpec, build_agentic_workflow
-from .repo_layout import resolve_democritus_root, workspace_root
+from .democritus_counterfactuals import write_democritus_counterfactual_artifacts
+from .repo_layout import (
+    resolve_democritus_python,
+    resolve_democritus_root,
+    workspace_root,
+)
 
 
 _MATPLOTLIB_RENDER_LOCK = threading.Lock()
@@ -279,6 +284,7 @@ class DemocritusAgenticRunner:
         self.config = config.resolved()
         self.workflow = build_democritus_agentic_workflow(include_phase2=self.config.include_phase2)
         self.repo_root = _democritus_repo_root()
+        self.democritus_python = resolve_democritus_python(self.repo_root)
         self.outdir = self.config.outdir
         self.logs_dir = self.outdir / "agent_logs"
         self.summary_path = self.outdir / "agent_run_summary.json"
@@ -411,6 +417,13 @@ class DemocritusAgenticRunner:
             env["CLIFF_LLM_USAGE_OUTDIR"] = str(self.outdir)
         return {**base, **env}
 
+    def _subprocess_command(self, cmd: list[str]) -> list[str]:
+        if not cmd:
+            return list(cmd)
+        if Path(str(cmd[0])).resolve() == Path(sys.executable).resolve():
+            return [str(self.democritus_python), *cmd[1:]]
+        return list(cmd)
+
     def _run_subprocess_agent(
         self,
         agent_name: str,
@@ -423,14 +436,15 @@ class DemocritusAgenticRunner:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         env = self._stage_env()
         env["CLIFF_LLM_USAGE_AGENT"] = agent_name
+        resolved_cmd = self._subprocess_command(cmd)
         with log_path.open("w", encoding="utf-8") as log_file:
-            log_file.write("[CMD] " + " ".join(cmd) + "\n\n")
+            log_file.write("[CMD] " + " ".join(resolved_cmd) + "\n\n")
             log_file.write(f"[CWD] {cwd}\n")
             log_file.write(f"[PYTHONPATH] {env.get('PYTHONPATH', '')}\n\n")
             log_file.flush()
             try:
                 subprocess.run(
-                    cmd,
+                    resolved_cmd,
                     cwd=str(cwd),
                     env=env,
                     stdout=log_file,
@@ -869,12 +883,18 @@ class DemocritusAgenticRunner:
 
     def _run_triple_extraction_agent(self) -> tuple[str, ...]:
         output_path = self.outdir / "relational_triples.jsonl"
-        return self._run_subprocess_agent(
+        outputs = self._run_subprocess_agent(
             "triple_extraction_agent",
             [sys.executable, "-m", "scripts.relational_triple_extractor"],
             cwd=self.outdir,
             outputs=(output_path,),
         )
+        counterfactual_paths = write_democritus_counterfactual_artifacts(
+            output_path,
+            outdir=self.outdir / "counterfactuals",
+            domain_name=self.config.domain_name,
+        )
+        return (*outputs, str(counterfactual_paths["json_path"]), str(counterfactual_paths["markdown_path"]))
 
     def _run_manifold_builder_agent(self) -> tuple[str, ...]:
         relational_state = self.outdir / "relational_state.pkl"

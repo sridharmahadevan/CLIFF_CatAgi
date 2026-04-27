@@ -462,6 +462,18 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
         self.assertEqual(config.statement_max_tokens, 72)
         self.assertEqual(config.intra_document_shards, 2)
 
+    def test_query_config_quick_mode_preserves_requested_count_for_topos_world_model(self) -> None:
+        config = DemocritusQueryAgenticConfig(
+            query="Find 5 studies of the weight loss drug GLP-1 and build a topos world model from them",
+            outdir=Path("/tmp/democritus-query"),
+            execution_mode="quick",
+            target_documents=5,
+        ).resolved()
+
+        self.assertEqual(config.target_documents, 5)
+        self.assertEqual(config.max_docs, 10)
+        self.assertFalse(config.include_phase2)
+
     def test_query_config_quick_mode_preserves_full_document_pipeline_for_direct_pdf(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             pdf_path = Path(tmpdir) / "uploaded_paper.pdf"
@@ -638,6 +650,13 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
 
     def test_derive_retrieval_query_preserves_glp1_and_drops_synthesis_boilerplate(self) -> None:
         query = "Analyze 5 recent studies of the weight loss drug GLP-1 and synthesize what they jointly support"
+
+        retrieval_query = _derive_retrieval_query(query)
+
+        self.assertEqual(retrieval_query, "weight loss drug glp-1")
+
+    def test_derive_retrieval_query_drops_topos_world_model_boilerplate(self) -> None:
+        query = "Find 5 studies of the weight loss drug GLP-1 and build a topos world model from them"
 
         retrieval_query = _derive_retrieval_query(query)
 
@@ -1437,21 +1456,21 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
             )
             runner._fake_docs = (
                 DiscoveredDocument(
-                    title="Bad Study",
+                    title="Bad Study of Red Wine Benefits",
                     score=9.0,
                     retrieval_backend="manifest",
                     source_path=str(bad_pdf),
                     document_format="pdf",
                 ),
                 DiscoveredDocument(
-                    title="Good Study 1",
+                    title="Good Study 1 of Red Wine Benefits",
                     score=8.0,
                     retrieval_backend="manifest",
                     source_path=str(good_pdf_1),
                     document_format="pdf",
                 ),
                 DiscoveredDocument(
-                    title="Good Study 2",
+                    title="Good Study 2 of Red Wine Benefits",
                     score=7.0,
                     retrieval_backend="manifest",
                     source_path=str(good_pdf_2),
@@ -1463,9 +1482,9 @@ class DemocritusQueryAgenticTests(unittest.TestCase):
 
             self.assertEqual(len(result.acquired_documents), 2)
             acquired_titles = {item.title for item in result.selected_documents}
-            self.assertNotIn("Bad Study", acquired_titles)
-            self.assertIn("Good Study 1", acquired_titles)
-            self.assertIn("Good Study 2", acquired_titles)
+            self.assertNotIn("Bad Study of Red Wine Benefits", acquired_titles)
+            self.assertIn("Good Study 1 of Red Wine Benefits", acquired_titles)
+            self.assertIn("Good Study 2 of Red Wine Benefits", acquired_titles)
             materialization_log = (outdir / "query_agent_logs" / "corpus_materialization_agent.log").read_text(
                 encoding="utf-8"
             )

@@ -6,6 +6,7 @@ import argparse
 import datetime as dt
 import html
 import json
+import os
 import re
 import sys
 import threading
@@ -46,6 +47,7 @@ from .product_feedback_query_agentic import (
     ProductFeedbackQueryAgenticRunner,
     ProductFeedbackQueryRunResult,
 )
+from .topos_world_model import asdict_safe, materialize_topos_world_model
 
 _SEC_PATTERNS = (
     r"\b10-k\b",
@@ -64,6 +66,14 @@ _PRODUCT_PATTERNS = (
     r"\breviews\b",
     r"\beasy to drive\b",
     r"\beasy to run\b",
+    r"\btasty\b",
+    r"\btaste\b",
+    r"\bflavor\b",
+    r"\bflavour\b",
+    r"\beat\b",
+    r"\beating\b",
+    r"\bdrink\b",
+    r"\bdrinking\b",
     r"\brun with\b",
     r"\brunning shoe\b",
     r"\brunning shoes\b",
@@ -83,6 +93,14 @@ _PRODUCT_PATTERNS = (
     r"\bsectional\b",
     r"\bmattress\b",
     r"\bchair\b",
+    r"\bchocolate\b",
+    r"\bchocolate bar\b",
+    r"\bchocolate bars\b",
+    r"\bcandy\b",
+    r"\bsnack\b",
+    r"\bbeverage\b",
+    r"\bcoffee\b",
+    r"\btea\b",
     r"\breturn risk\b",
     r"\breturns\b",
     r"\bdurability\b",
@@ -138,6 +156,13 @@ _DEMOCRITUS_EVIDENCE_ACTION_PATTERNS = (
     r"\bwhat do\b",
     r"\bwhat does\b",
 )
+
+_ANALYSIS_MODES = {"standard", "topos_world_model"}
+
+
+def _normalize_analysis_mode(value: object) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return normalized if normalized in _ANALYSIS_MODES else "standard"
 
 
 def _looks_like_culinary_tour_query(query: str) -> bool:
@@ -247,6 +272,7 @@ class FF2QueryRouterConfig:
     course_book_pdf_path: Path | None = None
     course_execute_demo: bool = True
     course_execution_timeout_sec: int = 900
+    analysis_mode: str = "standard"
 
     def resolved(self) -> "FF2QueryRouterConfig":
         normalized_mode = str(self.execution_mode).strip().lower()
@@ -335,6 +361,7 @@ class FF2QueryRouterConfig:
             course_book_pdf_path=self.course_book_pdf_path.resolve() if self.course_book_pdf_path else None,
             course_execute_demo=bool(self.course_execute_demo),
             course_execution_timeout_sec=max(30, int(self.course_execution_timeout_sec)),
+            analysis_mode=_normalize_analysis_mode(self.analysis_mode),
         )
 
 
@@ -351,6 +378,7 @@ class FF2QueryRouterRunResult:
     culinary_tour_result: CulinaryTourRunResult | None = None
     company_similarity_result: CompanySimilarityRunResult | None = None
     course_demo_result: CourseDemoRunResult | None = None
+    topos_world_model_path: Path | None = None
 
 
 def _normalized_route_exclusions(excluded_routes: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
@@ -537,6 +565,8 @@ class FF2QueryRouter:
             result = self._run_product_feedback(decision)
         else:
             result = self._run_democritus(decision)
+        if self.config.analysis_mode == "topos_world_model":
+            result = self._attach_topos_world_model(result)
         self.summary_path.write_text(
             json.dumps(
                 {
@@ -562,12 +592,57 @@ class FF2QueryRouter:
                     "course_demo_summary_path": (
                         str(result.course_demo_result.summary_path) if result.course_demo_result else None
                     ),
+                    "topos_world_model_path": str(result.topos_world_model_path) if result.topos_world_model_path else None,
                 },
                 indent=2,
             ),
             encoding="utf-8",
         )
         return result
+
+    def _attach_topos_world_model(self, result: FF2QueryRouterRunResult) -> FF2QueryRouterRunResult:
+        base_artifact = _artifact_path_for_result(result, prefer_topos_world_model=False)
+        route_name = result.route_decision.route_name
+        psr_path: Path | None = None
+        route_summary_path: Path | None = result.summary_path
+        model_family = f"{route_name}_topos_world_model"
+        extra: dict[str, object] = {"route_decision": asdict(result.route_decision)}
+        if result.democritus_result:
+            psr_path = result.democritus_result.topos_psr_path
+            route_summary_path = result.democritus_result.summary_path
+            extra["query_plan"] = asdict_safe(result.democritus_result.query_plan)
+        elif result.product_feedback_result:
+            feedback = result.product_feedback_result.product_feedback_result
+            psr_path = getattr(feedback, "topos_psr_path", None) if feedback else None
+            route_summary_path = result.product_feedback_result.summary_path
+            extra["query_plan"] = asdict_safe(result.product_feedback_result.query_plan)
+        elif result.company_similarity_result:
+            extra["query_plan"] = asdict_safe(result.company_similarity_result.query_plan)
+            extra["analysis_dir"] = str(result.company_similarity_result.analysis_dir)
+            route_summary_path = result.company_similarity_result.summary_path
+            model_family = "company_similarity_functor_topos_world_model"
+        topos_path = materialize_topos_world_model(
+            query=self.config.query,
+            route_name=route_name,
+            route_outdir=result.route_outdir,
+            base_artifact_path=base_artifact,
+            summary_path=route_summary_path,
+            psr_path=psr_path,
+            model_family=model_family,
+            extra=extra,
+        )
+        return FF2QueryRouterRunResult(
+            route_decision=result.route_decision,
+            route_outdir=result.route_outdir,
+            summary_path=result.summary_path,
+            democritus_result=result.democritus_result,
+            basket_rocket_sec_result=result.basket_rocket_sec_result,
+            product_feedback_result=result.product_feedback_result,
+            culinary_tour_result=result.culinary_tour_result,
+            company_similarity_result=result.company_similarity_result,
+            course_demo_result=result.course_demo_result,
+            topos_world_model_path=topos_path,
+        )
 
     def _run_democritus(self, decision: FF2RouteDecision) -> FF2QueryRouterRunResult:
         route_outdir = self.config.outdir / "democritus"
@@ -748,7 +823,9 @@ def _resolve_query_for_main(args: argparse.Namespace, *, artifact_path: Path | N
         return launcher.wait_for_submission()
 
 
-def _artifact_path_for_result(result: FF2QueryRouterRunResult) -> Path | None:
+def _artifact_path_for_result(result: FF2QueryRouterRunResult, *, prefer_topos_world_model: bool = True) -> Path | None:
+    if prefer_topos_world_model and result.topos_world_model_path and result.topos_world_model_path.exists():
+        return result.topos_world_model_path
     if result.product_feedback_result:
         if result.product_feedback_result.corpus_synthesis_result:
             return result.product_feedback_result.corpus_synthesis_result.dashboard_path
@@ -1005,6 +1082,7 @@ def _build_router_from_args_with_outdir(
             execution_mode=getattr(args, "execution_mode", "quick"),
             route_override=args.route,
             router_excluded_routes=tuple(getattr(args, "router_excluded_routes", ()) or ()),
+            analysis_mode=getattr(args, "analysis_mode", "standard"),
             democritus_input_pdf_path=(
                 Path(getattr(args, "democritus_input_pdf", ""))
                 if getattr(args, "democritus_input_pdf", "")
@@ -1192,6 +1270,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--execution-mode", choices=("quick", "interactive", "deep"), default="quick")
+    parser.add_argument("--analysis-mode", choices=("standard", "topos_world_model"), default="standard")
     parser.add_argument("--route", choices=("auto", "democritus", "basket_rocket_sec", "culinary_tour", "product_feedback", "company_similarity", "course_demo"), default="auto")
     parser.add_argument("--router-excluded-routes", action="append", default=[])
     parser.add_argument("--democritus-manifest", default="")
@@ -1286,9 +1365,13 @@ def main() -> None:
                     if submission is None:
                         continue
                     run_id, query, execution_mode = submission
+                    submission_overrides = launcher.submission_overrides_for_run(run_id)
                     threading.Thread(
                         target=_run_session_query,
-                        args=(launcher, argparse.Namespace(**dict(vars(args), execution_mode=execution_mode))),
+                        args=(
+                            launcher,
+                            argparse.Namespace(**dict(vars(args), execution_mode=execution_mode, **submission_overrides)),
+                        ),
                         kwargs={"run_id": run_id, "query": query},
                         name=f"ff2-session-{run_id}",
                         daemon=True,

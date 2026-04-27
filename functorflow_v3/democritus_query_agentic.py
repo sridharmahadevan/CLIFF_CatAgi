@@ -104,9 +104,16 @@ _STOPWORDS = {
     "at",
     "document",
     "documents",
+    "build",
+    "building",
+    "causal",
+    "model",
+    "models",
     "page",
     "pages",
+    "psr",
     "url",
+    "world",
 }
 
 _GENERIC_RETRIEVAL_TOKENS = {
@@ -2077,6 +2084,9 @@ def _derive_retrieval_query(query: str) -> str:
         stripped = re.sub(pattern, "", stripped)
     for pattern in (
         r"\s+and\s+synthesize\s+what\s+they\s+jointly\s+support\b.*$",
+        r"\s+and\s+build\s+(?:a\s+)?(?:causal\s+)?(?:topos\s+|topos-theoretic\s+|topos\s+world\s+|world\s+)?model\b.*$",
+        r"\s+and\s+build\s+(?:a\s+)?topos\s+world\s+model\b.*$",
+        r"\s+and\s+construct\s+(?:a\s+)?(?:causal\s+)?(?:topos\s+)?world\s+model\b.*$",
         r"\s+and\s+summari[sz]e\b.*$",
         r"\s+and\s+extract\b.*$",
     ):
@@ -2090,6 +2100,16 @@ def _derive_retrieval_query(query: str) -> str:
     if had_url:
         return ""
     return normalized
+
+
+def _looks_like_topos_world_model_request(query: str) -> bool:
+    normalized = " ".join(str(query or "").lower().split())
+    return bool(
+        re.search(r"\btopos\s+world\s+model\b", normalized)
+        or re.search(r"\btopos-theoretic\s+world\s+model\b", normalized)
+        or re.search(r"\bcausal\s+psr\b", normalized)
+        or re.search(r"\btopos\s+psr\b", normalized)
+    )
 
 
 def _compose_structured_democritus_query(
@@ -2616,11 +2636,12 @@ class DemocritusQueryAgenticConfig:
         else:
             execution_mode = "quick"
         target_documents = max(1, int(self.target_documents))
-        if execution_mode == "quick":
+        preserves_requested_corpus_size = _looks_like_topos_world_model_request(self.query)
+        if execution_mode == "quick" and not preserves_requested_corpus_size:
             target_documents = min(target_documents, 3)
         max_docs = int(self.max_docs)
         if execution_mode == "quick":
-            quick_max_docs = target_documents + 2
+            quick_max_docs = target_documents + (5 if preserves_requested_corpus_size else 2)
             max_docs = min(max_docs, quick_max_docs) if max_docs > 0 else quick_max_docs
         elif execution_mode == "interactive":
             interactive_max_docs = target_documents + 2
@@ -2652,6 +2673,14 @@ class DemocritusQueryAgenticConfig:
         include_phase2 = self.include_phase2
         if execution_mode in {"quick", "interactive"}:
             include_phase2 = False
+        llm_probe = DemocritusBatchConfig(
+            pdf_dir=self.outdir,
+            outdir=self.outdir,
+            root_topic_strategy=root_topic_strategy,
+            max_workers=self.max_workers,
+            intra_document_shards=intra_document_shards,
+        ).resolved()
+        max_workers = max(1, int(self.max_workers))
         return DemocritusQueryAgenticConfig(
             query=self.query.strip(),
             outdir=self.outdir.resolve(),
@@ -2680,11 +2709,11 @@ class DemocritusQueryAgenticConfig:
             consensus_batch_size=self.consensus_batch_size,
             consensus_similarity_threshold=self.consensus_similarity_threshold,
             consensus_required_stable_passes=self.consensus_required_stable_passes,
-            max_workers=self.max_workers,
+            max_workers=max_workers,
             agent_concurrency_limits=tuple(self.agent_concurrency_limits),
             include_phase2=include_phase2,
             auto_topics_from_pdf=self.auto_topics_from_pdf,
-            root_topic_strategy=root_topic_strategy,
+            root_topic_strategy=llm_probe.root_topic_strategy,
             depth_limit=depth_limit,
             max_total_topics=max_total_topics,
             statements_per_question=statements_per_question,
@@ -2735,6 +2764,7 @@ class DemocritusQueryRunResult:
     convergence_assessment: dict[str, object] | None = None
     csql_sqlite_path: Path | None = None
     csql_summary_path: Path | None = None
+    topos_psr_path: Path | None = None
     corpus_synthesis_summary_path: Path | None = None
     corpus_synthesis_dashboard_path: Path | None = None
     checkpoint_manifest_path: Path | None = None
@@ -3473,6 +3503,7 @@ class DemocritusQueryAgenticRunner:
             convergence_assessment=convergence_assessment,
             csql_sqlite_path=batch_result.csql_bundle.sqlite_path if batch_result and batch_result.csql_bundle else None,
             csql_summary_path=batch_result.csql_bundle.summary_path if batch_result and batch_result.csql_bundle else None,
+            topos_psr_path=batch_result.topos_psr_path if batch_result else None,
             corpus_synthesis_summary_path=(
                 batch_result.corpus_synthesis.summary_path
                 if batch_result and batch_result.corpus_synthesis
@@ -3509,6 +3540,7 @@ class DemocritusQueryAgenticRunner:
                 "retrieval_backend": self._backend_name(),
                 "csql_sqlite_path": str(result.csql_sqlite_path) if result.csql_sqlite_path else None,
                 "csql_summary_path": str(result.csql_summary_path) if result.csql_summary_path else None,
+                "topos_psr_path": str(result.topos_psr_path) if result.topos_psr_path else None,
                 "corpus_synthesis_summary_path": (
                     str(result.corpus_synthesis_summary_path)
                     if result.corpus_synthesis_summary_path
@@ -3665,6 +3697,7 @@ class DemocritusQueryAgenticRunner:
             target_documents = max(1, self.config.target_documents)
         if (
             self.config.execution_mode == "quick"
+            and not _looks_like_topos_world_model_request(base_query)
             and sec_cohort_mode != "latest_per_company"
             and not (direct_document_paths or direct_document_directories or direct_document_urls)
         ):

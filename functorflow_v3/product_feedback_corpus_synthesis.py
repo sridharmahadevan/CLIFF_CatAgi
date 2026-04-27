@@ -53,6 +53,12 @@ def build_product_feedback_corpus_synthesis(
     outcomes = json.loads(feedback_result.outcome_summary_path.read_text(encoding="utf-8"))
     workflows = json.loads(feedback_result.usage_workflows_path.read_text(encoding="utf-8"))
     hypotheses = json.loads(feedback_result.causal_hypotheses_path.read_text(encoding="utf-8"))
+    topos_psr_path = feedback_result.topos_psr_path or (base_outdir / "topos_psr_hankel.json")
+    topos_psr = (
+        json.loads(topos_psr_path.read_text(encoding="utf-8"))
+        if topos_psr_path.exists()
+        else {}
+    )
 
     payload = {
         "query": query,
@@ -68,6 +74,10 @@ def build_product_feedback_corpus_synthesis(
         "usage_workflows": list((workflows.get("workflow_summaries") or workflows.get("usage_workflows") or [])),
         "causal_hypotheses": list(hypotheses.get("hypotheses") or hypotheses.get("drivers") or []),
         "dashboard_path": str(feedback_result.dashboard_path),
+        "report_path": str(feedback_result.report_path),
+        "topos_summary": dict(topos_psr.get("summary") or {}),
+        "topos_path": str(topos_psr_path) if topos_psr_path.exists() else "",
+        "review_episodes_path": str(feedback_result.review_episodes_path) if feedback_result.review_episodes_path else "",
     }
     summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     dashboard_path.write_text(_render_dashboard_html(payload, dashboard_path=dashboard_path, feedback_result=feedback_result), encoding="utf-8")
@@ -97,8 +107,11 @@ def _render_dashboard_html(
 
     dashboard_href = _relative_href(feedback_result.dashboard_path, start=dashboard_path.parent)
     report_href = _relative_href(feedback_result.report_path, start=dashboard_path.parent)
+    topos_href = _relative_href(Path(str(payload.get("topos_path") or "")), start=dashboard_path.parent) if payload.get("topos_path") else ""
+    review_episodes_href = _relative_href(Path(str(payload.get("review_episodes_path") or "")), start=dashboard_path.parent) if payload.get("review_episodes_path") else ""
     workflows = [item.get("summary") if isinstance(item, dict) else item for item in payload.get("usage_workflows") or []]
     hypotheses = [item.get("statement") if isinstance(item, dict) else item for item in payload.get("causal_hypotheses") or []]
+    topos_summary = dict(payload.get("topos_summary") or {})
     textbook_html = render_textbook_backstop_html(
         recommend_textbook_backstop(str(payload.get("query") or ""), route_name="product_feedback"),
     )
@@ -144,6 +157,18 @@ def _render_dashboard_html(
         <div class="links">
           {f'<a href="{esc(dashboard_href)}" target="_blank" rel="noreferrer">Open product feedback dashboard</a>' if dashboard_href else ''}
           {f'<a href="{esc(report_href)}" target="_blank" rel="noreferrer">Open product feedback report</a>' if report_href else ''}
+          {f'<a href="{esc(topos_href)}" target="_blank" rel="noreferrer">Open topos PSR bundle</a>' if topos_href else ''}
+          {f'<a href="{esc(review_episodes_href)}" target="_blank" rel="noreferrer">Open review episodes</a>' if review_episodes_href else ''}
+        </div>
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Topos PSR</p>
+        <p class="trace">The presheaf-valued predictive state layer was computed from the normalized review corpus and induced usage workflows.</p>
+        <div class="chips">
+          <span class="chip">episode views: {esc(int(topos_summary.get("n_episodes", 0)))}</span>
+          <span class="chip">contexts: {esc(int(topos_summary.get("n_contexts", 0)))}</span>
+          <span class="chip">mean rank: {esc(topos_summary.get("mean_rank", 0.0))}</span>
+          <span class="chip">restriction checks: {esc(f"{int(topos_summary.get('n_compatible_restrictions', 0))}/{int(topos_summary.get('n_restriction_checks', 0))}")}</span>
         </div>
       </section>
       <section class="panel">

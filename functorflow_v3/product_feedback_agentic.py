@@ -19,13 +19,21 @@ from .agentic_workflows import (
     DiffusionSpec,
     build_agentic_workflow,
 )
+from .product_feedback_counterfactuals import build_product_feedback_counterfactuals
 from .product_feedback_visualizations import bootstrap_product_feedback_dashboard, generate_product_feedback_dashboard
+from .prometheus_bridge import build_prometheus_world_model_from_feedback, prometheus_available
+from .topos_psr import build_topos_psr_bundle
 
 _POSITIVE_TERMS = (
     "comfortable",
     "great",
     "excellent",
     "love",
+    "tasty",
+    "delicious",
+    "flavorful",
+    "rich flavor",
+    "smooth texture",
     "stylish",
     "good value",
     "worth it",
@@ -40,6 +48,11 @@ _POSITIVE_TERMS = (
 
 _NEGATIVE_TERMS = (
     "uncomfortable",
+    "bland",
+    "not tasty",
+    "waxy",
+    "chalky",
+    "too bitter",
     "tight",
     "too tight",
     "too small",
@@ -138,6 +151,10 @@ _ASPECT_LEXICONS: dict[str, dict[str, tuple[str, ...]]] = {
         "positive": ("easy to slip on", "easy to put on", "convenient", "easy to wear"),
         "negative": ("hard to put on", "hard to slip on", "takes effort"),
     },
+    "taste": {
+        "positive": ("tasty", "delicious", "flavorful", "rich flavor", "great taste", "excellent taste"),
+        "negative": ("bland", "not tasty", "waxy", "chalky", "too bitter", "artificial taste"),
+    },
 }
 
 _USAGE_ACTION_ORDER = (
@@ -145,6 +162,7 @@ _USAGE_ACTION_ORDER = (
     "order",
     "deliver",
     "unbox",
+    "open",
     "assemble",
     "configure",
     "wear",
@@ -152,6 +170,10 @@ _USAGE_ACTION_ORDER = (
     "drive",
     "charge",
     "sit",
+    "taste",
+    "eat",
+    "share",
+    "store",
     "clean",
     "wash",
     "reconfigure",
@@ -164,6 +186,7 @@ _USAGE_ACTION_KEYWORDS: dict[str, tuple[str, ...]] = {
     "order": ("ordered", "placed our order", "buy", "purchased", "purchase"),
     "deliver": ("arrived", "delivery", "shipping", "shipped"),
     "unbox": ("unbox", "unboxed", "opened the boxes", "pieces arrived"),
+    "open": ("open", "opened", "unwrap", "unwrapped", "broke the seal", "first bite"),
     "assemble": ("assemble", "assembly", "put it together", "set up", "setup"),
     "configure": ("configuration", "arrangement", "layout", "orientation", "deep seats", "fit"),
     "wear": ("wear", "wore", "upper comfort", "true to size", "slip on", "midfoot"),
@@ -171,6 +194,10 @@ _USAGE_ACTION_KEYWORDS: dict[str, tuple[str, ...]] = {
     "drive": ("drive", "driving", "steering", "ride", "handling", "commute", "road trip", "autopilot"),
     "charge": ("charge", "charging", "supercharger", "charger", "battery", "range"),
     "sit": ("sit", "seating", "loung", "movie", "watch", "nap", "couch"),
+    "taste": ("taste", "tasty", "flavor", "flavour", "mouthfeel", "cocoa", "sweetness", "aroma"),
+    "eat": ("eat", "eating", "bite", "ate", "snack", "dessert"),
+    "share": ("share", "shared", "served", "gifted"),
+    "store": ("store", "stored", "kept in the fridge", "kept in pantry", "freshness"),
     "clean": ("clean", "pet hair", "spot treat", "upkeep", "maintenance"),
     "wash": ("wash", "washed", "washable", "line dry", "covers"),
     "reconfigure": ("rearrange", "reconfigure", "modular", "swap covers", "change the layout", "guest bed"),
@@ -189,6 +216,11 @@ _USAGE_MACRO_TEMPLATES: dict[str, tuple[tuple[str, ...], ...]] = {
         ("research", "order", "deliver", "configure", "drive", "charge", "recommend"),
         ("research", "drive", "charge", "recommend"),
     ),
+    "food": (
+        ("research", "order", "deliver", "open", "taste", "eat", "recommend"),
+        ("research", "order", "deliver", "open", "taste", "share", "recommend"),
+        ("order", "deliver", "open", "eat", "store", "recommend"),
+    ),
     "sofa": (
         ("order", "deliver", "assemble", "sit", "recommend"),
         ("order", "assemble", "configure", "sit", "wash", "recommend"),
@@ -202,6 +234,7 @@ _USAGE_MACRO_TEMPLATES: dict[str, tuple[tuple[str, ...], ...]] = {
 _USAGE_ALLOWED_ACTIONS: dict[str, tuple[str, ...]] = {
     "shoe": ("research", "order", "deliver", "unbox", "configure", "wear", "run", "clean", "return", "recommend"),
     "vehicle": ("research", "order", "deliver", "configure", "drive", "charge", "clean", "return", "recommend"),
+    "food": ("research", "order", "deliver", "unbox", "open", "taste", "eat", "share", "store", "return", "recommend"),
     "sofa": ("research", "order", "deliver", "unbox", "assemble", "configure", "sit", "clean", "wash", "reconfigure", "return", "recommend"),
     "generic": _USAGE_ACTION_ORDER,
 }
@@ -545,8 +578,22 @@ def _clamp_score(value: float) -> float:
 
 def _product_usage_family(product_name: str, brand_name: str, texts: list[str]) -> str:
     haystack = " ".join([product_name, brand_name, *texts]).lower()
+    token_set = set(re.findall(r"[a-z0-9]+", haystack))
+
+    def _matches(*terms: str) -> bool:
+        for term in terms:
+            normalized = str(term).strip().lower()
+            if not normalized:
+                continue
+            if " " in normalized:
+                if normalized in haystack:
+                    return True
+            elif normalized in token_set:
+                return True
+        return False
+
     if any(
-        token in haystack
+        _matches(token)
         for token in (
             "tesla",
             "model 3",
@@ -564,9 +611,31 @@ def _product_usage_family(product_name: str, brand_name: str, texts: list[str]) 
         )
     ):
         return "vehicle"
-    if any(token in haystack for token in ("pegasus", "shoe", "runner", "running", "sneaker")):
+    if any(
+        _matches(token)
+        for token in (
+            "chocolate",
+            "chocolate bar",
+            "bar",
+            "candy",
+            "snack",
+            "dessert",
+            "coffee",
+            "tea",
+            "taste",
+            "tasty",
+            "flavor",
+            "flavour",
+            "eat",
+            "eating",
+            "amedei",
+            "porcelana",
+        )
+    ):
+        return "food"
+    if _matches("pegasus", "shoe", "runner", "running", "sneaker"):
         return "shoe"
-    if any(token in haystack for token in ("sactional", "sofa", "couch", "sectional", "seat")):
+    if _matches("sactional", "sofa", "couch", "sectional", "seat"):
         return "sofa"
     return "generic"
 
@@ -663,6 +732,11 @@ class ProductFeedbackRunResult:
     report_path: Path
     dashboard_path: Path
     dashboard_summary_path: Path
+    review_episodes_path: Path | None = None
+    topos_psr_path: Path | None = None
+    prometheus_counterfactuals_path: Path | None = None
+    prometheus_twm_path: Path | None = None
+    prometheus_twm_report_path: Path | None = None
 
 
 def build_product_feedback_agentic_workflow() -> AgenticWorkflow:
@@ -868,6 +942,11 @@ class ProductFeedbackAgenticRunner:
                 )
         ordered = tuple(records)
         self.summary_path.write_text(json.dumps([asdict(record) for record in ordered], indent=2), encoding="utf-8")
+        bundle_paths = self._state.get("topos_psr_paths")
+        if not isinstance(bundle_paths, dict):
+            bundle_paths = self._materialize_topos_psr_bundle()
+        prometheus_twm_paths = self._materialize_prometheus_twm()
+        counterfactuals_path = self._materialize_prometheus_counterfactuals()
         dashboard_result = generate_product_feedback_dashboard(self.outdir)
         return ProductFeedbackRunResult(
             records=ordered,
@@ -881,6 +960,11 @@ class ProductFeedbackAgenticRunner:
             report_path=self.outdir / "product_feedback_report.md",
             dashboard_path=dashboard_result.dashboard_path,
             dashboard_summary_path=dashboard_result.summary_path,
+            review_episodes_path=bundle_paths["review_episodes_path"],
+            topos_psr_path=bundle_paths["topos_psr_path"],
+            prometheus_counterfactuals_path=counterfactuals_path,
+            prometheus_twm_path=prometheus_twm_paths.get("artifact_path"),
+            prometheus_twm_report_path=prometheus_twm_paths.get("report_path"),
         )
 
     def _raw_records(self) -> list[dict[str, object]]:
@@ -911,6 +995,75 @@ class ProductFeedbackAgenticRunner:
         payload = dict(json.loads((self.outdir / filename).read_text(encoding="utf-8")))
         self._state[key] = payload
         return payload
+
+    def _materialize_topos_psr_bundle(self) -> dict[str, Path]:
+        bundle = build_topos_psr_bundle(
+            self._normalized_events(),
+            self._json_state("usage_workflows", "usage_workflows.json"),
+            product_name=self.config.product_name,
+            brand_name=self.config.brand_name,
+        )
+        review_episodes_path = self.outdir / "review_episodes.jsonl"
+        topos_psr_path = self.outdir / "topos_psr_hankel.json"
+        _write_jsonl(review_episodes_path, list(bundle.get("episodes") or []))
+        _write_json(topos_psr_path, bundle)
+        self._state["topos_psr"] = bundle
+        paths = {
+            "review_episodes_path": review_episodes_path,
+            "topos_psr_path": topos_psr_path,
+        }
+        self._state["topos_psr_paths"] = paths
+        return paths
+
+    def _materialize_prometheus_counterfactuals(self) -> Path:
+        topos_psr = self._state.get("topos_psr")
+        if not isinstance(topos_psr, dict):
+            topos_psr = self._json_state("topos_psr", "topos_psr_hankel.json")
+        prometheus_twm = self._state.get("prometheus_twm")
+        if not isinstance(prometheus_twm, dict):
+            artifact_path = self.outdir / "prometheus_twm" / "prometheus_world_model.json"
+            if artifact_path.exists():
+                prometheus_twm = dict(json.loads(artifact_path.read_text(encoding="utf-8")))
+            else:
+                prometheus_twm = {}
+        payload = build_product_feedback_counterfactuals(
+            self._normalized_events(),
+            topos_psr=topos_psr,
+            prometheus_twm=prometheus_twm,
+            product_name=self.config.product_name,
+            brand_name=self.config.brand_name,
+        )
+        path = self.outdir / "prometheus_counterfactuals.json"
+        _write_json(path, payload)
+        self._state["prometheus_counterfactuals"] = payload
+        return path
+
+    def _materialize_prometheus_twm(self) -> dict[str, Path]:
+        output_dir = self.outdir / "prometheus_twm"
+        if not prometheus_available():
+            payload = {
+                "status": "unavailable",
+                "reason": "Prometheus_v1 sibling repo was not found.",
+            }
+            output_dir.mkdir(parents=True, exist_ok=True)
+            _write_json(output_dir / "prometheus_twm_summary.json", payload)
+            return {}
+        summary = build_prometheus_world_model_from_feedback(
+            self._normalized_events(),
+            product_name=self.config.product_name,
+            brand_name=self.config.brand_name,
+            outdir=output_dir,
+        )
+        paths = {
+            "artifact_path": Path(str(summary["artifact"])),
+            "report_path": Path(str(summary["report"])),
+            "summary_path": output_dir / "prometheus_twm_summary.json",
+        }
+        artifact_path = paths["artifact_path"]
+        if artifact_path.exists():
+            self._state["prometheus_twm"] = dict(json.loads(artifact_path.read_text(encoding="utf-8")))
+        self._state["prometheus_twm_paths"] = paths
+        return paths
 
     def _run_feedback_collection_agent(self) -> tuple[str, ...]:
         records = self._raw_records()
@@ -991,6 +1144,17 @@ class ProductFeedbackAgenticRunner:
         for action, keywords in _USAGE_ACTION_KEYWORDS.items():
             if any(keyword in lowered for keyword in keywords):
                 _append_unique(actions, action)
+        if family == "food":
+            if any(token in lowered for token in ("open", "opened", "unwrap", "unwrapped", "first bite")):
+                _append_unique(actions, "open")
+            if any(token in lowered for token in ("taste", "tasty", "flavor", "flavour", "mouthfeel", "cocoa", "sweetness", "aroma")):
+                _append_unique(actions, "taste")
+            if any(token in lowered for token in ("eat", "eating", "bite", "ate", "snack", "dessert")):
+                _append_unique(actions, "eat")
+            if any(token in lowered for token in ("share", "shared", "gifted", "served")):
+                _append_unique(actions, "share")
+            if any(token in lowered for token in ("store", "stored", "freshness", "fridge", "pantry")):
+                _append_unique(actions, "store")
         if family == "shoe":
             if any(token in lowered for token in ("easy run", "tempo", "daily trainer", "miles", "training")):
                 _append_unique(actions, "wear", "run")
@@ -1005,7 +1169,7 @@ class ProductFeedbackAgenticRunner:
             if any(token in lowered for token in ("covers", "washable", "line dry")):
                 _append_unique(actions, "wash")
         if not actions:
-            _append_unique(actions, "configure")
+            _append_unique(actions, "taste" if family == "food" else "configure")
         if any(token in lowered for token in ("recommend", "worth it", "favorite", "good option")):
             _append_unique(actions, "recommend")
         if any(token in lowered for token in ("return", "returned", "send it back")):
@@ -1030,6 +1194,19 @@ class ProductFeedbackAgenticRunner:
             if "charge" not in current and any(token in lowered for token in ("charge", "charging", "supercharger", "charger", "battery", "range")):
                 variants.append({"label": "add_charge", "source": "local_insert", "workflow_stages": _insert_action(current, "charge", before=("recommend", "return"))})
             if "return" not in current and any(token in lowered for token in ("return", "returned", "gave it back", "trade in")):
+                variants.append({"label": "add_return", "source": "local_insert", "workflow_stages": _insert_action(current, "return")})
+        if family == "food":
+            if "open" not in current and any(token in lowered for token in ("open", "opened", "unwrap", "unwrapped", "first bite")):
+                variants.append({"label": "add_open", "source": "local_insert", "workflow_stages": _insert_action(current, "open", before=("taste", "eat", "share", "recommend", "return"))})
+            if "taste" not in current and any(token in lowered for token in ("taste", "tasty", "flavor", "flavour", "mouthfeel", "cocoa", "sweetness", "aroma")):
+                variants.append({"label": "add_taste", "source": "local_insert", "workflow_stages": _insert_action(current, "taste", before=("eat", "share", "recommend", "return"))})
+            if "eat" not in current and any(token in lowered for token in ("eat", "eating", "bite", "ate", "snack", "dessert")):
+                variants.append({"label": "add_eat", "source": "local_insert", "workflow_stages": _insert_action(current, "eat", before=("share", "recommend", "return"))})
+            if "share" not in current and any(token in lowered for token in ("share", "shared", "gifted", "served")):
+                variants.append({"label": "add_share", "source": "local_insert", "workflow_stages": _insert_action(current, "share", before=("recommend", "return"))})
+            if "store" not in current and any(token in lowered for token in ("store", "stored", "freshness", "fridge", "pantry")):
+                variants.append({"label": "add_store", "source": "local_insert", "workflow_stages": _insert_action(current, "store", before=("recommend", "return"))})
+            if "return" not in current and any(token in lowered for token in ("return", "returned", "refund", "sent back")):
                 variants.append({"label": "add_return", "source": "local_insert", "workflow_stages": _insert_action(current, "return")})
         if family == "sofa":
             if "assemble" not in current and any(token in lowered for token in ("assembly", "assemble", "put it together")):
@@ -1591,6 +1768,37 @@ class ProductFeedbackAgenticRunner:
         ablation_rows = list(ablation_payload.get("rows") or [])
         ablation_takeaways = list(ablation_payload.get("takeaways") or [])
         top_workflow_motifs = list(usage_workflows.get("top_workflow_motifs") or [])
+        topos_psr = self._state.get("topos_psr")
+        if not isinstance(topos_psr, dict):
+            self._materialize_topos_psr_bundle()
+            topos_psr = self._state.get("topos_psr")
+        if not isinstance(topos_psr, dict):
+            topos_psr = {}
+        topos_summary = dict(topos_psr.get("summary") or {})
+        local_hankel_family = list(topos_psr.get("local_hankel_family") or [])
+        restriction_rows = list(topos_psr.get("restriction_diagnostics") or [])
+        counterfactual_payload = self._state.get("prometheus_counterfactuals")
+        if not isinstance(counterfactual_payload, dict):
+            counterfactual_path = self.outdir / "prometheus_counterfactuals.json"
+            if counterfactual_path.exists():
+                counterfactual_payload = dict(json.loads(counterfactual_path.read_text(encoding="utf-8")))
+            else:
+                prometheus_twm = self._state.get("prometheus_twm")
+                if not isinstance(prometheus_twm, dict):
+                    prometheus_twm_path = self.outdir / "prometheus_twm" / "prometheus_world_model.json"
+                    prometheus_twm = (
+                        dict(json.loads(prometheus_twm_path.read_text(encoding="utf-8")))
+                        if prometheus_twm_path.exists()
+                        else {}
+                    )
+                counterfactual_payload = build_product_feedback_counterfactuals(
+                    self._normalized_events(),
+                    topos_psr=topos_psr,
+                    prometheus_twm=prometheus_twm,
+                    product_name=self.config.product_name,
+                    brand_name=self.config.brand_name,
+                )
+        counterfactuals = list(counterfactual_payload.get("counterfactuals") or [])
 
         title = self.config.product_name
         if self.config.brand_name:
@@ -1640,6 +1848,47 @@ class ProductFeedbackAgenticRunner:
                 )
         else:
             lines.append("- No workflow motifs were extracted from the available feedback.")
+        if topos_summary:
+            lines.extend(["", "## Topos PSR"])
+            lines.extend(
+                [
+                    f"- episode views: {int(topos_summary.get('n_episodes', 0))}",
+                    f"- contexts: {int(topos_summary.get('n_contexts', 0))}",
+                    f"- mean local rank: {topos_summary.get('mean_rank', 0.0)}",
+                    (
+                        "- restriction compatibility: "
+                        f"{int(topos_summary.get('n_compatible_restrictions', 0))}/"
+                        f"{int(topos_summary.get('n_restriction_checks', 0))}"
+                    ),
+                ]
+            )
+            if local_hankel_family:
+                lines.append("- local Hankel slices:")
+                for row in local_hankel_family[:5]:
+                    svd = dict(row.get("svd") or {})
+                    lines.append(
+                        f"  - {row.get('context_id', 'context')}: histories={len(list(row.get('histories') or []))}, "
+                        f"tests={len(list(row.get('tests') or []))}, rank={int(svd.get('rank', 0))}, "
+                        f"top3_energy={svd.get('energy_captured_top3', 'n/a')}"
+                    )
+            if restriction_rows:
+                lines.append("- restriction diagnostics:")
+                for row in restriction_rows[:5]:
+                    lines.append(
+                        f"  - {row.get('source_context', 'source')} -> {row.get('target_context', 'target')}: "
+                        f"shared_histories={int(row.get('shared_history_count', 0))}, "
+                        f"shared_tests={int(row.get('shared_test_count', 0))}, "
+                        f"compatible={'yes' if row.get('compatible') else 'no'}"
+                    )
+        if counterfactuals:
+            lines.extend(["", "## Prometheus Counterfactuals"])
+            for row in counterfactuals[:5]:
+                lines.append(
+                    f"- `{row.get('aspect', 'aspect')}` repair probe "
+                    f"(gain={float(row.get('estimated_satisfaction_gain', 0.0)):.3f}, "
+                    f"status={row.get('topos_status', 'local_only')}): {row.get('repair', '')}"
+                )
+                lines.append(f"  - {row.get('counterfactual', '')}")
         lines.extend(
             [
                 "",

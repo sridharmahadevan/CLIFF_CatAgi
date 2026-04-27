@@ -23,7 +23,9 @@ from .democritus_corpus_synthesis import (
     DemocritusCorpusSynthesisResult,
     build_democritus_corpus_synthesis,
 )
+from .democritus_counterfactuals import write_democritus_counterfactual_artifacts
 from .democritus_decision_metrics import compute_batch_decision_state
+from .democritus_psr import DemocritusPSRSource, write_democritus_topos_psr_bundle
 from .llm_usage import summarize_llm_usage
 from .repo_layout import resolve_democritus_seed_pdf_root
 
@@ -385,18 +387,25 @@ class DemocritusBatchConfig:
     stop_after_frontier_index: int | None = None
 
     def resolved(self) -> "DemocritusBatchConfig":
+        probe_config = DemocritusAgenticConfig(
+            outdir=self.outdir,
+            root_topic_strategy=self.root_topic_strategy,
+            intra_document_shards=self.intra_document_shards,
+        ).resolved()
+        max_workers = max(1, int(self.max_workers))
+        intra_document_shards = max(1, int(self.intra_document_shards))
         return DemocritusBatchConfig(
             pdf_dir=self.pdf_dir.resolve(),
             outdir=self.outdir.resolve(),
             request_query=" ".join(self.request_query.split()),
             max_docs=self.max_docs,
-            max_workers=self.max_workers,
+            max_workers=max_workers,
             agent_concurrency_limits=tuple(
                 (agent_name, limit) for agent_name, limit in self.agent_concurrency_limits
             ),
             include_phase2=self.include_phase2,
             auto_topics_from_pdf=self.auto_topics_from_pdf,
-            root_topic_strategy=self.root_topic_strategy,
+            root_topic_strategy=probe_config.root_topic_strategy,
             depth_limit=max(1, int(self.depth_limit)),
             max_total_topics=max(10, int(self.max_total_topics)),
             statements_per_question=max(1, int(self.statements_per_question)),
@@ -426,7 +435,7 @@ class DemocritusBatchConfig:
             allow_incremental_admission=self.allow_incremental_admission,
             idle_poll_seconds=self.idle_poll_seconds,
             dry_run=self.dry_run,
-            intra_document_shards=max(1, int(self.intra_document_shards)),
+            intra_document_shards=intra_document_shards,
             enable_corpus_synthesis=self.enable_corpus_synthesis,
             stop_after_frontier_index=(
                 None
@@ -464,6 +473,7 @@ class DemocritusBatchRunResult:
     records: tuple[DemocritusBatchRecord, ...]
     csql_bundle: BatchCSQLBundleResult | None = None
     corpus_synthesis: DemocritusCorpusSynthesisResult | None = None
+    topos_psr_path: Path | None = None
 
 
 class DemocritusBatchAgenticRunner:
@@ -875,6 +885,12 @@ class DemocritusBatchAgenticRunner:
         )
         self._write_summary(ordered)
         csql_bundle = self._build_csql_bundle(ordered)
+        topos_psr_path = self._build_topos_psr_bundle(ordered)
+        self._label_counterfactual_artifacts(
+            ordered,
+            csql_bundle=csql_bundle,
+            topos_psr_path=topos_psr_path,
+        )
         corpus_synthesis = self._build_corpus_synthesis(csql_bundle) if self.config.enable_corpus_synthesis else None
         if corpus_synthesis is not None:
             self._latest_incremental_corpus_synthesis = corpus_synthesis
@@ -893,6 +909,7 @@ class DemocritusBatchAgenticRunner:
             records=ordered,
             csql_bundle=csql_bundle,
             corpus_synthesis=corpus_synthesis,
+            topos_psr_path=topos_psr_path,
         )
 
     def _write_summary(self, records: tuple[DemocritusBatchRecord, ...]) -> None:
@@ -978,6 +995,47 @@ class DemocritusBatchAgenticRunner:
             records=bundle_records,
             pdf_dir=self.config.pdf_dir,
         )
+
+    def _build_topos_psr_bundle(
+        self,
+        records: tuple[DemocritusBatchRecord, ...],
+    ) -> Path | None:
+        sources = [
+            DemocritusPSRSource(
+                run_name=str(entry["run_name"]),
+                triples_path=Path(str(entry["triples_path"])),
+                pdf_path=str(entry.get("pdf_path") or ""),
+            )
+            for entry in self._triple_source_entries(records)
+        ]
+        if not sources:
+            return None
+        return write_democritus_topos_psr_bundle(
+            batch_outdir=self.config.outdir,
+            sources=sources,
+            corpus_label=self.config.request_query or self.config.title or "Democritus corpus",
+        )
+
+    def _label_counterfactual_artifacts(
+        self,
+        records: tuple[DemocritusBatchRecord, ...],
+        *,
+        csql_bundle: BatchCSQLBundleResult | None,
+        topos_psr_path: Path | None,
+    ) -> None:
+        csql_sqlite_path = csql_bundle.sqlite_path if csql_bundle is not None else None
+        for entry in self._triple_source_entries(records):
+            triples_path = Path(str(entry["triples_path"]))
+            if not triples_path.exists():
+                continue
+            document = self._document_by_run_name(str(entry["run_name"]))
+            write_democritus_counterfactual_artifacts(
+                triples_path,
+                outdir=document.outdir / "counterfactuals",
+                domain_name=str(entry["run_name"]),
+                csql_sqlite_path=csql_sqlite_path,
+                topos_psr_path=topos_psr_path,
+            )
 
     def _build_corpus_synthesis(
         self,
@@ -1637,6 +1695,43 @@ class DemocritusBatchAgenticRunner:
             }
             for row in triples[:4]
         ]
+        counterfactual_json_path = run_dir / "counterfactuals" / "democritus_counterfactuals.json"
+        counterfactual_markdown_path = run_dir / "counterfactuals" / "democritus_counterfactuals.md"
+        csql_sqlite_path = self.config.outdir / "csql" / "democritus_csql.sqlite"
+        topos_psr_path = self.config.outdir / "topos_psr" / "democritus_topos_psr_hankel.json"
+        counterfactual_payload = _read_json_object(counterfactual_json_path)
+        counterfactual_summary = dict(counterfactual_payload.get("summary") or {})
+        needs_counterfactual_refresh = (
+            triples
+            and (
+                not counterfactual_json_path.exists()
+                or "gluing_label_counts" not in counterfactual_summary
+                or (csql_sqlite_path.exists() and not int(counterfactual_summary.get("csql_regime_surface_count", 0) or 0))
+            )
+        )
+        if needs_counterfactual_refresh:
+            write_democritus_counterfactual_artifacts(
+                run_dir / "relational_triples.jsonl",
+                outdir=run_dir / "counterfactuals",
+                domain_name=document.run_name,
+                csql_sqlite_path=csql_sqlite_path if csql_sqlite_path.exists() else None,
+                topos_psr_path=topos_psr_path if topos_psr_path.exists() else None,
+            )
+            counterfactual_payload = _read_json_object(counterfactual_json_path)
+        top_counterfactuals = [
+            {
+                "subj": str(row.get("subj") or ""),
+                "obj": str(row.get("obj") or ""),
+                "intervention": str(row.get("intervention") or ""),
+                "expected_shift": str(row.get("expected_shift") or ""),
+                "counterfactual": str(row.get("counterfactual") or ""),
+                "support_tier": str(row.get("support_tier") or ""),
+                "gluing_label": str(row.get("gluing_label") or "local-only"),
+                "topos_label": str(row.get("topos_label") or "topos-unlabeled"),
+            }
+            for row in list(counterfactual_payload.get("counterfactuals") or [])[:3]
+            if isinstance(row, dict)
+        ]
         score_rows = _read_csv_rows(run_dir / "sweep" / "scores.csv")
         score_rows.sort(
             key=lambda row: (
@@ -1665,10 +1760,17 @@ class DemocritusBatchAgenticRunner:
             labels_path=run_dir / "viz" / "relational_manifold_labels.json",
             root_topics=root_topics,
         )
-        summary_viewer_path, credibility_viewer_path, manifold_viewer_path, lcm_viewer_path = self._write_artifact_viewers(
+        (
+            summary_viewer_path,
+            credibility_viewer_path,
+            manifold_viewer_path,
+            lcm_viewer_path,
+            counterfactual_viewer_path,
+        ) = self._write_artifact_viewers(
             document,
             summary_path=summary_path,
             credibility_path=credibility_path,
+            counterfactual_markdown_path=counterfactual_markdown_path,
             manifold_path=manifold_path,
             root_topics=root_topics,
             top_triples=top_triples,
@@ -1690,13 +1792,16 @@ class DemocritusBatchAgenticRunner:
             "summary_excerpt": _markdown_excerpt(summary_path) or _markdown_excerpt(credibility_path),
             "root_topics": root_topics,
             "top_triples": top_triples,
+            "top_counterfactuals": top_counterfactuals,
             "top_lcms": top_lcms,
             "question_count": len(question_rows),
             "statement_count": len(statement_rows),
             "triple_count": len(triples),
+            "counterfactual_count": int(dict(counterfactual_payload.get("summary") or {}).get("counterfactual_count", 0) or 0),
             "lcm_count": len(score_rows),
             "summary_href": self._bundle_relative_href(summary_viewer_path),
             "credibility_href": self._bundle_relative_href(credibility_viewer_path),
+            "counterfactual_href": self._bundle_relative_href(counterfactual_viewer_path),
             "manifold_href": self._bundle_relative_href(manifold_viewer_path),
             "lcm_viewer_href": self._bundle_relative_href(lcm_viewer_path),
         }
@@ -1728,17 +1833,20 @@ class DemocritusBatchAgenticRunner:
         *,
         summary_path: Path,
         credibility_path: Path,
+        counterfactual_markdown_path: Path,
         manifold_path: Path,
         root_topics: list[str],
         top_triples: list[dict[str, object]],
         top_lcms: list[dict[str, object]],
         manifold_hover_clusters: list[dict[str, object]],
-    ) -> tuple[Path, Path, Path, Path]:
+    ) -> tuple[Path, Path, Path, Path, Path]:
         summary_viewer_path = summary_path.with_suffix(".html")
         credibility_viewer_path = credibility_path.with_suffix(".html")
+        counterfactual_viewer_path = counterfactual_markdown_path.with_suffix(".html")
         manifold_viewer_path = manifold_path.with_name("relational_manifold_viewer.html")
         lcm_viewer_path = summary_path.parent / f"{document.run_name}_lcm_gallery.html"
         summary_viewer_path.parent.mkdir(parents=True, exist_ok=True)
+        counterfactual_viewer_path.parent.mkdir(parents=True, exist_ok=True)
         manifold_viewer_path.parent.mkdir(parents=True, exist_ok=True)
         summary_viewer_path.write_text(
             self._render_report_viewer_html(
@@ -1755,6 +1863,15 @@ class DemocritusBatchAgenticRunner:
                 title=_pretty_document_title(document.pdf_path.stem),
                 artifact_label="Credibility Report",
                 markdown_path=credibility_path,
+                strip_leading_title=True,
+            ),
+            encoding="utf-8",
+        )
+        counterfactual_viewer_path.write_text(
+            self._render_report_viewer_html(
+                title=_pretty_document_title(document.pdf_path.stem),
+                artifact_label="Counterfactual Assertions",
+                markdown_path=counterfactual_markdown_path,
                 strip_leading_title=True,
             ),
             encoding="utf-8",
@@ -1778,7 +1895,7 @@ class DemocritusBatchAgenticRunner:
             ),
             encoding="utf-8",
         )
-        return summary_viewer_path, credibility_viewer_path, manifold_viewer_path, lcm_viewer_path
+        return summary_viewer_path, credibility_viewer_path, manifold_viewer_path, lcm_viewer_path, counterfactual_viewer_path
 
     def _render_report_viewer_html(
         self,
@@ -2446,6 +2563,14 @@ class DemocritusBatchAgenticRunner:
                 )
                 for item in card["top_lcms"]
             ) or '<div class="empty">LCM scores will appear here after sweep scoring.</div>'
+            counterfactual_markup = "".join(
+                '<article class="mini-card">'
+                f'<div class="mini-kicker">{esc(item["gluing_label"] or "local-only")} · {esc(item["topos_label"] or "topos-unlabeled")}</div>'
+                f'<div class="mini-title">{esc(item["subj"])} <span class="arrow">⇢</span> {esc(item["obj"])}</div>'
+                f'<p>{esc(item["counterfactual"] or item["expected_shift"] or item["intervention"])}</p>'
+                "</article>"
+                for item in card["top_counterfactuals"]
+            ) or '<div class="empty">Counterfactual assertions will appear after causal triples are extracted.</div>'
             links = []
             if card["pdf_href"]:
                 links.append(f'<a href="{esc(card["pdf_href"])}" target="_blank" rel="noreferrer">Open PDF</a>')
@@ -2453,6 +2578,8 @@ class DemocritusBatchAgenticRunner:
                 links.append(f'<a href="{esc(card["summary_href"])}" target="_blank" rel="noreferrer">Executive summary</a>')
             if card["credibility_href"]:
                 links.append(f'<a href="{esc(card["credibility_href"])}" target="_blank" rel="noreferrer">Credibility report</a>')
+            if card["counterfactual_href"]:
+                links.append(f'<a href="{esc(card["counterfactual_href"])}" target="_blank" rel="noreferrer">Counterfactual assertions</a>')
             if card["manifold_href"]:
                 links.append(f'<a href="{esc(card["manifold_href"])}" target="_blank" rel="noreferrer">Manifold view</a>')
             if card["lcm_viewer_href"]:
@@ -2463,6 +2590,7 @@ class DemocritusBatchAgenticRunner:
             question_chip = chip(f'{card["question_count"]} questions', "neutral")
             statement_chip = chip(f'{card["statement_count"]} statements', "neutral")
             triple_chip = chip(f'{card["triple_count"]} triples', "neutral")
+            counterfactual_chip = chip(f'{card["counterfactual_count"]} counterfactuals', "neutral")
             lcm_chip = chip(f'{card["lcm_count"]} LCMs', "neutral")
             evidence_note = (
                 f'{card["question_count"]} causal questions and {card["statement_count"]} causal statements are already in play; '
@@ -2484,6 +2612,7 @@ class DemocritusBatchAgenticRunner:
                     f"{question_chip}"
                     f"{statement_chip}"
                     f"{triple_chip}"
+                    f"{counterfactual_chip}"
                     f"{lcm_chip}"
                     "</div>"
                     "</div>"
@@ -2496,6 +2625,12 @@ class DemocritusBatchAgenticRunner:
                     + '<div class="section-label">Evidence Preview</div>'
                     + f'<div class="mini-grid">{triple_markup}</div>'
                     + "</div>"
+                    + '<div>'
+                    + '<div class="section-label">Counterfactual Assertions</div>'
+                    + f'<div class="mini-grid">{counterfactual_markup}</div>'
+                    + "</div>"
+                    + "</div>"
+                    + '<div class="two-up">'
                     + '<div>'
                     + '<div class="section-label">Recovered Local Causal Models</div>'
                     + f'<div class="lcm-list">{lcm_markup}</div>'

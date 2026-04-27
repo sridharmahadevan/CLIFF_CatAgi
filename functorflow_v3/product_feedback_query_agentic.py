@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import re
+import socket
 import webbrowser
 from dataclasses import asdict, dataclass, field
 from html import unescape
@@ -78,6 +79,12 @@ _QUERY_PREFIXES = (
     "how easy is to put together ",
     "how easy is it to drive ",
     "how easy is to drive ",
+    "how tasty is it to eat ",
+    "how tasty is to eat ",
+    "how tasty is ",
+    "how tasty are ",
+    "how good is it to eat ",
+    "how good is to eat ",
     "how comfortable is it to run with ",
     "how easy is it to run with ",
     "how comfortable is ",
@@ -92,6 +99,7 @@ _ASPECT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("comfort", ("comfortable", "comfort", "seat comfort", "long term comfort")),
     ("driving", ("drive", "driving", "handle", "handling")),
     ("running", ("run with", "running", "run")),
+    ("taste", ("tasty", "taste", "flavor", "flavour", "eat", "eating", "delicious")),
     ("durability", ("durability", "long term durability", "longevity", "holds up")),
     ("maintenance", ("maintenance", "cleaning", "clean", "washable covers", "wash")),
     ("returns", ("return risk", "returns", "return")),
@@ -145,6 +153,58 @@ def _tokenize(text: str) -> tuple[str, ...]:
     )
 
 
+def _product_feedback_example_dir() -> Path:
+    return (
+        Path(__file__).resolve().parents[2]
+        / "CLIFF"
+        / "examples"
+        / "product_feedback"
+    )
+
+
+def _default_example_manifest_path_for_query(
+    query: str,
+    *,
+    product_name: str = "",
+    brand_name: str = "",
+) -> Path | None:
+    tokens = set(_tokenize(" ".join(part for part in (query, product_name, brand_name) if part)))
+    manifest_name = ""
+    if "lovesac" in tokens and {"sectional", "sactional", "sofa", "couch"} & tokens:
+        manifest_name = "lovesac_review_manifest.jsonl"
+    elif "pegasus" in tokens and "41" in tokens:
+        manifest_name = "nike_pegasus_41_review_manifest.jsonl"
+    if not manifest_name:
+        return None
+    manifest_path = _product_feedback_example_dir() / manifest_name
+    if not manifest_path.exists():
+        return None
+    return manifest_path.resolve()
+
+
+def _is_timeout_like_exception(exc: BaseException) -> bool:
+    pending: list[object] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is None:
+            continue
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        if isinstance(current, (TimeoutError, socket.timeout)):
+            return True
+        if isinstance(current, BaseException):
+            text = str(current).lower()
+            if "timed out" in text or "timeout" in text:
+                return True
+            pending.append(getattr(current, "__cause__", None))
+            pending.append(getattr(current, "__context__", None))
+        pending.append(getattr(current, "reason", None))
+    return False
+
+
 def _strip_wrapping_article(text: str) -> str:
     return re.sub(r"^(?:a|an|the)\s+", "", text.strip(), flags=re.IGNORECASE)
 
@@ -192,6 +252,8 @@ def _build_retrieval_query(query: str, *, configured_product_name: str = "", con
         retrieval_query = f"{product_phrase} driving reviews"
     elif aspect == "running":
         retrieval_query = f"{product_phrase} running reviews"
+    elif aspect == "taste":
+        retrieval_query = f"{product_phrase} taste reviews"
     elif aspect == "durability":
         retrieval_query = f"{product_phrase} durability reviews"
     elif aspect == "maintenance":
@@ -885,7 +947,15 @@ class ProductFeedbackQueryAgenticRunner:
 
     def _run_review_discovery_agent(self, plan: ReviewQueryPlan) -> tuple[DiscoveredReviewDocument, ...]:
         backend = self._resolve_backend()
-        discovered = backend.search(plan, limit=self._discovery_limit(plan))
+        try:
+            discovered = backend.search(plan, limit=self._discovery_limit(plan))
+        except Exception as exc:
+            if not _is_timeout_like_exception(exc):
+                raise
+            fallback_backend = self._resolve_timeout_fallback_backend(plan=plan, original_backend=backend)
+            if fallback_backend is None:
+                raise
+            discovered = fallback_backend.search(plan, limit=self._discovery_limit(plan))
         _write_jsonl(
             self.discovery_manifest_path,
             [
@@ -904,6 +974,25 @@ class ProductFeedbackQueryAgenticRunner:
             ],
         )
         return discovered
+
+    def _resolve_timeout_fallback_backend(
+        self,
+        *,
+        plan: ReviewQueryPlan,
+        original_backend: ReviewRetrievalBackend,
+    ) -> ReviewRetrievalBackend | None:
+        if getattr(original_backend, "backend_name", "") != "web_search":
+            return None
+        if self.config.manifest_path is not None:
+            return None
+        manifest_path = _default_example_manifest_path_for_query(
+            plan.query,
+            product_name=self.config.product_name or plan.product_name,
+            brand_name=self.config.brand_name,
+        )
+        if manifest_path is None:
+            return None
+        return ManifestReviewRetrievalBackend(manifest_path)
 
     def _discovery_limit(self, plan: ReviewQueryPlan) -> int:
         if self.config.discovery_only:
@@ -1036,7 +1125,9 @@ class ProductFeedbackQueryAgenticRunner:
         stem = f"{index:04d}_{_slugify(document.title)}"
         try:
             payload, source_reference, suffix = self._materialize_payload(document)
-        except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+        except Exception as exc:
+            if not (_is_timeout_like_exception(exc) or isinstance(exc, (HTTPError, URLError, ValueError))):
+                raise
             self.materialization_failures.append(
                 {
                     "title": document.title,
@@ -1264,7 +1355,7 @@ class ProductFeedbackQueryAgenticRunner:
                 with urlopen(request, timeout=self.config.retrieval_timeout_seconds) as response:
                     charset = response.headers.get_content_charset() or "utf-8"
                     return response.read().decode(charset, errors="replace")
-            except (HTTPError, URLError, TimeoutError) as exc:
+            except (HTTPError, URLError, TimeoutError, socket.timeout) as exc:
                 last_error = exc
                 continue
         if last_error is None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,6 +37,113 @@ except ModuleNotFoundError:
 
 
 class ProductFeedbackQueryAgenticTests(unittest.TestCase):
+    def test_query_runner_falls_back_to_example_manifest_after_search_timeout(self) -> None:
+        class DiscoveryTimeoutRunner(ProductFeedbackQueryAgenticRunner):
+            def _resolve_backend(self):
+                class TimeoutBackend:
+                    backend_name = "web_search"
+
+                    def search(self, plan: ReviewQueryPlan, *, limit: int):
+                        del plan, limit
+                        raise socket.timeout("The read operation timed out")
+
+                return TimeoutBackend()
+
+            def _materialize_payload(self, document: DiscoveredReviewDocument):
+                source_reference = document.url or document.source_path or "manifest://review"
+                title = document.title
+                return (
+                    (
+                        "<html><body><article>"
+                        f"<h1>{title}</h1>"
+                        "<p>The Lovesac Sactional is comfortable after setup, with some seat-depth tradeoffs.</p>"
+                        "</article></body></html>"
+                    ),
+                    source_reference,
+                    ".html",
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = DiscoveryTimeoutRunner(
+                ProductFeedbackQueryAgenticConfig(
+                    query="How comfortable is the Lovesac sectional sofa?",
+                    outdir=Path(tmpdir) / "out",
+                    target_documents=2,
+                    product_name="Lovesac Sactional",
+                    brand_name="Lovesac",
+                )
+            )
+
+            result = runner.run()
+
+            self.assertGreaterEqual(len(result.selected_documents), 2)
+            self.assertTrue(all(item.retrieval_backend == "manifest" for item in result.selected_documents))
+            self.assertIsNotNone(result.product_feedback_result)
+            self.assertTrue(result.product_feedback_result.dashboard_path.exists())
+            discovery_rows = [
+                json.loads(line)
+                for line in runner.discovery_manifest_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertGreaterEqual(len(discovery_rows), 2)
+            self.assertTrue(all(row["retrieval_backend"] == "manifest" for row in discovery_rows))
+
+    def test_query_runner_tolerates_oserror_timeout_during_materialization(self) -> None:
+        class OSErrorTimeoutRunner(ProductFeedbackQueryAgenticRunner):
+            def _resolve_backend(self):
+                class FakeBackend:
+                    backend_name = "web_search"
+
+                    def search(self, plan: ReviewQueryPlan, *, limit: int):
+                        del plan, limit
+                        return (
+                            DiscoveredReviewDocument(
+                                title="Stable review",
+                                score=4.5,
+                                retrieval_backend="web_search",
+                                url="https://example.com/stable",
+                                abstract="Comfortable and modular.",
+                            ),
+                            DiscoveredReviewDocument(
+                                title="Late timeout review",
+                                score=4.0,
+                                retrieval_backend="web_search",
+                                url="https://example.com/late-timeout",
+                                abstract="This one fails later with a wrapped timeout.",
+                            ),
+                        )
+
+                return FakeBackend()
+
+            def _materialize_payload(self, document: DiscoveredReviewDocument):
+                if document.url == "https://example.com/late-timeout":
+                    raise OSError("The read operation timed out")
+                return (
+                    "<html><body><article><p>Comfortable, modular, and easy to clean.</p></article></body></html>",
+                    "https://example.com/stable",
+                    ".html",
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = OSErrorTimeoutRunner(
+                ProductFeedbackQueryAgenticConfig(
+                    query="How comfortable is the Lovesac sectional sofa?",
+                    outdir=Path(tmpdir) / "out",
+                    target_documents=2,
+                    max_documents=2,
+                    product_name="Sactional",
+                    brand_name="Lovesac",
+                )
+            )
+
+            result = runner.run()
+
+            self.assertEqual(len(result.materialized_documents), 1)
+            self.assertEqual(len(runner.materialization_failures), 1)
+            self.assertIn("timed out", runner.materialization_failures[0]["error"].lower())
+            self.assertIsNotNone(result.product_feedback_result)
+            self.assertTrue(result.product_feedback_result.dashboard_path.exists())
+
     def test_web_search_backend_extracts_review_links_from_search_results(self) -> None:
         class FakeWebSearchBackend(WebSearchReviewRetrievalBackend):
             def _fetch_search_html(self, query: str, *, limit: int) -> str:
@@ -105,6 +213,22 @@ class ProductFeedbackQueryAgenticTests(unittest.TestCase):
             self.assertEqual(plan.retrieval_query, "Lovesac sectional sofa assembly reviews")
             self.assertIn("assembly", plan.keyword_tokens)
             self.assertIn("lovesac", plan.keyword_tokens)
+
+    def test_query_interpretation_rewrites_food_taste_question_into_retrieval_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = ProductFeedbackQueryAgenticRunner(
+                ProductFeedbackQueryAgenticConfig(
+                    query="How tasty is it to eat the Amedei Porcelana Chocolate Bars?",
+                    outdir=Path(tmpdir) / "out",
+                )
+            )
+
+            plan = runner._run_query_interpretation_agent()
+
+            self.assertEqual(plan.product_name, "Amedei Porcelana Chocolate Bars")
+            self.assertEqual(plan.retrieval_query, "Amedei Porcelana Chocolate Bars taste reviews")
+            self.assertIn("amedei", plan.keyword_tokens)
+            self.assertIn("chocolate", plan.keyword_tokens)
 
     def test_web_search_query_prefers_retrieval_query_when_available(self) -> None:
         backend = WebSearchReviewRetrievalBackend(user_agent="test-agent", timeout_seconds=5.0)
@@ -434,6 +558,16 @@ class ProductFeedbackQueryAgenticTests(unittest.TestCase):
             dashboard_html = result.product_feedback_result.dashboard_path.read_text(encoding="utf-8")
             self.assertIn("hero-visual", dashboard_html)
             self.assertIn("https://cdn.example.com/lovesac-sactional.jpg", dashboard_html)
+            self.assertIn("Topos PSR", dashboard_html)
+
+            self.assertIsNotNone(result.product_feedback_result.topos_psr_path)
+            self.assertIsNotNone(result.product_feedback_result.review_episodes_path)
+            self.assertTrue(result.product_feedback_result.topos_psr_path.exists())
+            self.assertTrue(result.product_feedback_result.review_episodes_path.exists())
+
+            corpus_synthesis_html = result.corpus_synthesis_result.dashboard_path.read_text(encoding="utf-8")
+            self.assertIn("Topos PSR", corpus_synthesis_html)
+            self.assertIn("Open topos PSR bundle", corpus_synthesis_html)
 
     def test_query_runner_bootstraps_dashboard_before_search_and_stops_after_consensus(self) -> None:
         class ConsensusRunner(ProductFeedbackQueryAgenticRunner):

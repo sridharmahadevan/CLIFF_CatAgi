@@ -65,6 +65,8 @@ class DashboardQueryLauncherConfig:
     run_control_handler: Callable[[str, str], None] | None = None
     enable_execution_mode: bool = False
     default_execution_mode: str = "quick"
+    enable_analysis_mode: bool = True
+    default_analysis_mode: str = "standard"
     archive_roots: tuple[Path, ...] = ()
     archive_max_runs: int = 120
     archive_cache_dir: Path | None = None
@@ -72,6 +74,8 @@ class DashboardQueryLauncherConfig:
     bind_port: int = 0
     advertised_url: str = ""
     auto_open_browser: bool = True
+    hero_image_path: Path | None = None
+    hero_image_alt: str = ""
 
 
 class DashboardQueryLauncher:
@@ -145,6 +149,11 @@ class DashboardQueryLauncher:
         return "quick"
 
     @staticmethod
+    def _normalize_analysis_mode(value: object) -> str:
+        normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        return normalized if normalized in {"standard", "topos_world_model"} else "standard"
+
+    @staticmethod
     def _normalize_llm_token_budget(value: object) -> int | None:
         try:
             budget_tokens = int(str(value or "").strip())
@@ -156,6 +165,10 @@ class DashboardQueryLauncher:
         overrides = dict(run_state.get("submission_overrides") or {})
         return self._normalize_llm_token_budget(overrides.get("llm_token_budget"))
 
+    def _run_analysis_mode(self, run_state: dict[str, object]) -> str:
+        overrides = dict(run_state.get("submission_overrides") or {})
+        return self._normalize_analysis_mode(overrides.get("analysis_mode", self.config.default_analysis_mode))
+
     @staticmethod
     def _route_research_profile(route_name: object) -> dict[str, str]:
         normalized = str(route_name or "").strip().lower()
@@ -163,7 +176,7 @@ class DashboardQueryLauncher:
             return {
                 "class_name": "quick-answer",
                 "label": "Quick answer",
-                "note": "Usually one of the faster CLIFF routes.",
+                "note": "Usually one of the faster routes.",
             }
         if normalized == "product_feedback":
             return {
@@ -175,12 +188,12 @@ class DashboardQueryLauncher:
             return {
                 "class_name": "deep-research",
                 "label": "Deep research",
-                "note": "Even quick mode may take several minutes while CLIFF builds causal state.",
+                "note": "Even quick mode may take several minutes while the system builds causal state.",
             }
         return {
             "class_name": "route-warming-up",
             "label": "Route warming up",
-            "note": "CLIFF is still determining how much work this question requires.",
+            "note": "The router is still determining how much work this question requires.",
         }
 
     def wait_for_submission(self) -> str:
@@ -802,6 +815,9 @@ class DashboardQueryLauncher:
         execution_mode = self._normalize_execution_mode(run_state.get("execution_mode"))
         llm_token_budget = self._run_llm_token_budget(run_state)
         submission_overrides = {"route": "auto", "router_excluded_routes": list(excluded_routes)}
+        analysis_mode = self._run_analysis_mode(run_state)
+        if analysis_mode != "standard":
+            submission_overrides["analysis_mode"] = analysis_mode
         if llm_token_budget is not None:
             submission_overrides["llm_token_budget"] = llm_token_budget
         new_run_id = self.submit_query(
@@ -851,6 +867,9 @@ class DashboardQueryLauncher:
         if not query:
             return None
         submission_overrides: dict[str, object] = {"route": route_name}
+        analysis_mode = self._run_analysis_mode(dict(run_state))
+        if analysis_mode != "standard":
+            submission_overrides["analysis_mode"] = analysis_mode
         if llm_token_budget is not None:
             submission_overrides["llm_token_budget"] = llm_token_budget
         if democritus_manifest_path is not None:
@@ -2414,7 +2433,7 @@ class DashboardQueryLauncher:
                 return False
             run_state["status"] = "stopping"
             run_state["mind_layer"] = "conscious"
-            run_state["note"] = "Stop requested from CLIFF's conscious layer."
+            run_state["note"] = f"Stop requested from the {self.config.title} session."
             handler = self.config.run_control_handler
         if handler is not None:
             try:
@@ -2444,6 +2463,10 @@ class DashboardQueryLauncher:
                     run_id = " ".join(query.get("run_id", [""])[0].split()).strip()
                     requested_path = " ".join(query.get("path", [""])[0].split()).strip()
                     body, content_type, status = launcher._render_run_file_response(run_id, requested_path)
+                    self._send_bytes(body, content_type=content_type, status=status)
+                    return
+                if parsed.path == "/launcher-hero-image":
+                    body, content_type, status = launcher._render_launcher_hero_image_response()
                     self._send_bytes(body, content_type=content_type, status=status)
                     return
                 if parsed.path == "/state":
@@ -2550,15 +2573,18 @@ class DashboardQueryLauncher:
                 llm_token_budget = launcher._normalize_llm_token_budget(
                     parsed_payload.get("llm_token_budget", [""])[0]
                 )
-                submission_overrides = (
-                    {"llm_token_budget": llm_token_budget}
-                    if llm_token_budget is not None
-                    else None
+                submission_overrides = {}
+                analysis_mode = launcher._normalize_analysis_mode(
+                    parsed_payload.get("analysis_mode", [launcher.config.default_analysis_mode])[0]
                 )
+                if analysis_mode != "standard":
+                    submission_overrides["analysis_mode"] = analysis_mode
+                if llm_token_budget is not None:
+                    submission_overrides["llm_token_budget"] = llm_token_budget
                 launcher.submit_query(
                     query,
                     execution_mode=execution_mode,
-                    submission_overrides=submission_overrides,
+                    submission_overrides=submission_overrides or None,
                 )
                 self._send_html(launcher._render_launcher_page())
 
@@ -3452,14 +3478,15 @@ class DashboardQueryLauncher:
             )
             for path in files
         )
+        display_name = str(self.config.title or "CLIFF").strip() or "CLIFF"
         empty_markup = (
-            "<p class=\"muted\">No partial files are available yet. The worker logs usually appear first while CLIFF is preparing company data.</p>"
+            f"<p class=\"muted\">No partial files are available yet. The worker logs usually appear first while {html.escape(display_name)} is preparing company data.</p>"
             if not files
             else ""
         )
         partial_preview_note_text = str(
             partial_preview.get("note")
-            or "CLIFF is waiting for enough overlap to assemble an initial cross-company read."
+            or f"{display_name} is waiting for enough overlap to assemble an initial cross-company read."
         )
         if str(partial_preview.get("status") or "") == "warming_up":
             atlas_years_ready = int(progress.get("atlas_years_ready") or 0)
@@ -3485,7 +3512,7 @@ class DashboardQueryLauncher:
             else:
                 partial_preview_note_text = (
                     f"{atlas_years_ready} yearly atlas slice"
-                    f"{'s are' if atlas_years_ready != 1 else ' is'} ready, but CLIFF still needs overlap from both companies "
+                    f"{'s are' if atlas_years_ready != 1 else ' is'} ready, but {display_name} still needs overlap from both companies "
                     "before it can assemble the initial similarity read."
                 )
         partial_preview_note = html.escape(partial_preview_note_text)
@@ -3520,7 +3547,7 @@ class DashboardQueryLauncher:
             + html.escape(partial_preview_summary)
             + "</pre>"
             if partial_preview_summary
-            else '<p class="muted">No provisional summary text yet. CLIFF will surface it here as soon as the first overlap is usable.</p>'
+            else f'<p class="muted">No provisional summary text yet. {html.escape(display_name)} will surface it here as soon as the first overlap is usable.</p>'
         )
         return f"""<!doctype html>
 <html lang="en">
@@ -3743,7 +3770,8 @@ class DashboardQueryLauncher:
     ) -> str:
         title = html.escape(self.config.title)
         query = html.escape(str(run_state.get("query") or ""))
-        note = html.escape(str(run_state.get("note") or "CLIFF is gathering live partial outputs from this run."))
+        display_name = str(self.config.title or "CLIFF").strip() or "CLIFF"
+        note = html.escape(str(run_state.get("note") or f"{display_name} is gathering live partial outputs from this run."))
         llm_budget_label = html.escape(str(run_state.get("llm_budget_label") or ""))
         llm_usage_label = html.escape(str(run_state.get("llm_usage_label") or ""))
         llm_estimated_cost_label = html.escape(str(run_state.get("llm_estimated_cost_label") or ""))
@@ -3816,7 +3844,7 @@ class DashboardQueryLauncher:
         {'<p><strong>Estimated cost:</strong> ' + llm_estimated_cost_label + '</p>' if llm_estimated_cost_label else ''}
       </section>
       <section class="artifact-shell">
-        <iframe id="artifact-frame" src="{html.escape(iframe_src)}" title="Live CLIFF artifact"></iframe>
+        <iframe id="artifact-frame" src="{html.escape(iframe_src)}" title="Live {html.escape(display_name)} artifact"></iframe>
       </section>
     </main>
     <script>
@@ -3906,6 +3934,8 @@ class DashboardQueryLauncher:
                 local_path = unquote(parsed.path or "")
                 if local_path:
                     resolved = Path(local_path).resolve()
+            elif target.startswith("/"):
+                resolved = Path(unquote(target)).expanduser().resolve()
             elif not target.startswith("/"):
                 resolved = (source_path.parent / target).resolve()
             if resolved is None:
@@ -3975,18 +4005,55 @@ class DashboardQueryLauncher:
         company_checkpoint_manifest = self._company_similarity_checkpoint_manifest_for_html(file_path)
         if company_checkpoint_manifest is not None:
             return self._render_company_similarity_checkpoint_page(run_id, artifact_path=file_path)
-        return self._rewrite_artifact_links(
+        rendered = self._rewrite_artifact_links(
             file_path.read_text(encoding="utf-8", errors="replace"),
             run_id=run_id,
             source_path=file_path,
         )
+        return self._rewrite_artifact_display_branding(rendered)
+
+    def _rewrite_artifact_display_branding(self, html_body: str) -> str:
+        display_name = str(self.config.title or "").strip()
+        if not display_name or display_name.upper() == "CLIFF":
+            return html_body
+        replacements = {
+            "CLIFF Topos World Model": f"{display_name} Topos World Model",
+            "CLIFF Product Feedback Dashboard": f"{display_name} Product Feedback Dashboard",
+            "CLIFF Review Synthesis": f"{display_name} Review Synthesis",
+            "CLIFF Workflow Synthesis": f"{display_name} Workflow Synthesis",
+            "CLIFF Company Similarity": f"{display_name} Company Similarity",
+            "CLIFF Topos Synthesis": f"{display_name} Topos Synthesis",
+            "CLIFF Source View": f"{display_name} Source View",
+            "CLIFF Project Guide": f"{display_name} Project Guide",
+            "CLIFF Learning Guide": f"{display_name} Learning Guide",
+            "CLIFF Topic Guide": f"{display_name} Topic Guide",
+            "CLIFF Course Demo": f"{display_name} Course Demo",
+            "CLIFF is a research prototype": f"{display_name} is a research prototype",
+            "CLIFF resolved the query": f"{display_name} resolved the query",
+            "CLIFF is still assembling": f"{display_name} is still assembling",
+            "CLIFF is preparing": f"{display_name} is preparing",
+            "CLIFF is waiting": f"{display_name} is waiting",
+            "CLIFF will surface": f"{display_name} will surface",
+            "Live CLIFF artifact": f"Live {display_name} artifact",
+            "CLIFF/Prometheus repair probe": f"{display_name} repair probe",
+        }
+        branded = html_body
+        for old, new in replacements.items():
+            branded = branded.replace(old, new)
+        branded = re.sub(
+            r'\s*<section class="(?:panel|card)">\s*<p class="eyebrow">Read This in the Book</p>.*?</section>',
+            "",
+            branded,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        return branded
 
     def _render_run_file_response(self, run_id: str, requested_path: str) -> tuple[bytes, str, HTTPStatus]:
         file_path = self._resolve_run_file_path(run_id, requested_path)
         if file_path is None or not file_path.exists():
             body = self._render_text_file_as_html(
                 self.config.title,
-                "This linked artifact is not available from the current CLIFF session.",
+                f"This linked artifact is not available from the current {self.config.title} session.",
             )
             return body.encode("utf-8"), "text/html; charset=utf-8", HTTPStatus.NOT_FOUND
         suffix = file_path.suffix.lower()
@@ -3998,6 +4065,16 @@ class DashboardQueryLauncher:
             return body.encode("utf-8"), "text/html; charset=utf-8", HTTPStatus.OK
         content_type = mimetypes.guess_type(str(file_path.name))[0] or "application/octet-stream"
         return file_path.read_bytes(), content_type, HTTPStatus.OK
+
+    def _render_launcher_hero_image_response(self) -> tuple[bytes, str, HTTPStatus]:
+        image_path = self.config.hero_image_path
+        if image_path is None:
+            return b"", "text/plain; charset=utf-8", HTTPStatus.NOT_FOUND
+        resolved = image_path.expanduser().resolve()
+        if not resolved.exists() or not resolved.is_file():
+            return b"", "text/plain; charset=utf-8", HTTPStatus.NOT_FOUND
+        content_type = mimetypes.guess_type(str(resolved.name))[0] or "application/octet-stream"
+        return resolved.read_bytes(), content_type, HTTPStatus.OK
 
     def _render_launcher_page(self, *, error_message: str = "") -> str:
         with self._lock:
@@ -4019,6 +4096,14 @@ class DashboardQueryLauncher:
         placeholder = html.escape(self.config.query_placeholder)
         submit_label = html.escape(self.config.submit_label)
         waiting_message = html.escape(self.config.waiting_message)
+        hero_image_markup = ""
+        if self.config.hero_image_path and self.config.hero_image_path.expanduser().exists():
+            hero_image_alt = html.escape(str(self.config.hero_image_alt or self.config.title))
+            hero_image_markup = f"""
+          <figure class="hero-art">
+            <img src="/launcher-hero-image" alt="{hero_image_alt}" />
+          </figure>
+            """
         demo_queries = tuple(query for query in self.config.demo_queries if str(query).strip())
         session_mode = self.config.session_mode
         execution_mode_enabled = self.config.enable_execution_mode
@@ -4046,9 +4131,27 @@ class DashboardQueryLauncher:
                 <span><strong>Deep</strong> Run the fuller causal build from the start for maximum coverage.</span>
               </label>
               <p class="execution-mode-hint">
-                Latency guide: textbook and filing lookups are usually quickest, product evaluation can take longer,
+                Latency guide: filing lookups are usually quickest, product evaluation can take longer,
                 interactive mode pauses earlier for inspection, and deep research routes like Democritus or company similarity may still take several minutes even in quick mode.
               </p>
+            </fieldset>
+            """
+        analysis_mode_markup = ""
+        if self.config.enable_analysis_mode:
+            default_analysis_mode = self._normalize_analysis_mode(self.config.default_analysis_mode)
+            standard_checked = " checked" if default_analysis_mode == "standard" else ""
+            topos_checked = " checked" if default_analysis_mode == "topos_world_model" else ""
+            analysis_mode_markup = f"""
+            <fieldset class="execution-mode-fieldset">
+              <legend>Analysis model</legend>
+              <label class="execution-mode-option">
+                <input type="radio" name="analysis_mode" value="standard"{standard_checked} />
+                <span><strong>Standard</strong> Use the route's existing dashboard and synthesis flow.</span>
+              </label>
+              <label class="execution-mode-option">
+                <input type="radio" name="analysis_mode" value="topos_world_model"{topos_checked} />
+                <span><strong>Topos World Model</strong> Preserve the original answer and materialize a PSR/gluing world-model view when the route supports one.</span>
+              </label>
             </fieldset>
             """
         llm_budget_markup = """
@@ -4063,7 +4166,7 @@ class DashboardQueryLauncher:
                 step="1"
                 placeholder="Optional, e.g. 20000"
               />
-              <p class="execution-mode-hint">If set, CLIFF will stop once this run exhausts the shared OpenAI token budget.</p>
+              <p class="execution-mode-hint">If set, this run will stop once it exhausts the shared OpenAI token budget.</p>
             </fieldset>
         """
         form_or_status = f"""
@@ -4078,6 +4181,7 @@ class DashboardQueryLauncher:
               required
             ></textarea>
             {execution_mode_markup}
+            {analysis_mode_markup}
             {llm_budget_markup}
             {error_html}
             <button type="submit">{submit_label}</button>
@@ -4103,6 +4207,7 @@ class DashboardQueryLauncher:
                 required
               ></textarea>
               {execution_mode_markup}
+              {analysis_mode_markup}
               {llm_budget_markup}
               {error_html}
               <button type="submit">{submit_label}</button>
@@ -4118,9 +4223,9 @@ class DashboardQueryLauncher:
             <section class="session-runs">
               <div class="session-header">
                 <h2>Archived Runs</h2>
-                <p>Saved CLIFF runs discovered from archive roots can be reopened or rerun here.</p>
+                <p>Saved runs discovered from archive roots can be reopened or rerun here.</p>
               </div>
-              <div id="archived-runs">{self._render_session_runs_markup(archived_runs, empty_message="No archived CLIFF runs were discovered under the configured archive roots yet.")}</div>
+              <div id="archived-runs">{self._render_session_runs_markup(archived_runs, empty_message="No archived runs were discovered under the configured archive roots yet.")}</div>
             </section>
           </section>
           <script>
@@ -4273,7 +4378,7 @@ class DashboardQueryLauncher:
                   }}
                   var archived = document.getElementById('archived-runs');
                   if (archived) {{
-                    archived.innerHTML = renderRuns(payload.archived_runs || [], 'No archived CLIFF runs were discovered under the configured archive roots yet.');
+                    archived.innerHTML = renderRuns(payload.archived_runs || [], 'No archived runs were discovered under the configured archive roots yet.');
                   }}
                 }})
                 .catch(function () {{}});
@@ -4296,7 +4401,7 @@ class DashboardQueryLauncher:
                   }}
                   var archived = document.getElementById('archived-runs');
                   if (archived) {{
-                    archived.innerHTML = renderRuns(payload.archived_runs || [], 'No archived CLIFF runs were discovered under the configured archive roots yet.');
+                    archived.innerHTML = renderRuns(payload.archived_runs || [], 'No archived runs were discovered under the configured archive roots yet.');
                   }}
                 }})
                 .catch(function () {{}});
@@ -4312,7 +4417,7 @@ class DashboardQueryLauncher:
                   }}
                   var archived = document.getElementById('archived-runs');
                   if (archived) {{
-                    archived.innerHTML = renderRuns(payload.archived_runs || [], 'No archived CLIFF runs were discovered under the configured archive roots yet.');
+                    archived.innerHTML = renderRuns(payload.archived_runs || [], 'No archived runs were discovered under the configured archive roots yet.');
                   }}
                 }})
                 .catch(function () {{}});
@@ -4391,6 +4496,29 @@ class DashboardQueryLauncher:
         display: grid;
         gap: 22px;
       }}
+      .hero-panel {{
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(280px, 420px);
+        gap: 24px;
+        align-items: center;
+      }}
+      .hero-copy {{
+        min-width: 0;
+      }}
+      .hero-art {{
+        margin: 0;
+        overflow: hidden;
+        border-radius: 18px;
+        border: 1px solid rgba(208, 192, 160, 0.82);
+        background: #121817;
+        box-shadow: 0 18px 42px rgba(33, 26, 18, 0.22);
+      }}
+      .hero-art img {{
+        display: block;
+        width: 100%;
+        aspect-ratio: 1.25;
+        object-fit: cover;
+      }}
       .panel {{
         background: var(--card);
         border: 1px solid var(--line);
@@ -4450,8 +4578,9 @@ class DashboardQueryLauncher:
         min-height: 150px;
         box-shadow: inset 0 1px 2px rgba(40, 28, 11, 0.06);
       }}
-      .query-form input[type="number"] {{
-        width: min(280px, 100%);
+      .query-form input[type="number"],
+      .query-form input[type="text"] {{
+        width: min(560px, 100%);
         padding: 12px 14px;
         border-radius: 14px;
         border: 1px solid #baa77e;
@@ -4689,6 +4818,14 @@ class DashboardQueryLauncher:
         background: #eef4db;
         color: #556b17;
       }}
+      .llm-remote {{
+        background: #e8eff7;
+        color: #24527a;
+      }}
+      .llm-local {{
+        background: #e7f4e7;
+        color: #236b38;
+      }}
       .route-profile-quick-answer {{
         background: #e7f3eb;
         color: #2e6a47;
@@ -4804,6 +4941,12 @@ class DashboardQueryLauncher:
           padding: 20px;
           border-radius: 22px;
         }}
+        .hero-panel {{
+          grid-template-columns: 1fr;
+        }}
+        .hero-art img {{
+          aspect-ratio: 1.55;
+        }}
         .artifact-shell,
         .artifact-shell iframe {{
           min-height: 560px;
@@ -4817,11 +4960,14 @@ class DashboardQueryLauncher:
   <body>
     <main>
       <section class="hero">
-        <article class="panel">
-          <p class="eyebrow">{eyebrow}</p>
-          <h1>{title}</h1>
-          {cliff_expansion_markup}
-          <p class="subtitle">{subtitle}</p>
+        <article class="panel hero-panel">
+          <div class="hero-copy">
+            <p class="eyebrow">{eyebrow}</p>
+            <h1>{title}</h1>
+            {cliff_expansion_markup}
+            <p class="subtitle">{subtitle}</p>
+          </div>
+          {hero_image_markup}
         </article>
         <article class="panel">
           {form_or_status}
@@ -4865,7 +5011,7 @@ class DashboardQueryLauncher:
         return (
             "<section class=\"demo-tour\">"
             "<h3>Take the 2-minute tour</h3>"
-            "<p>Try these in order to see how CLIFF moves from book guidance to demos, code, and applied examples.</p>"
+            "<p>Try these examples to see how the router moves from a natural-language request to a runnable analysis.</p>"
             f"<ol class=\"demo-tour-list\">{''.join(steps)}</ol>"
             "</section>"
         )
@@ -4898,6 +5044,11 @@ class DashboardQueryLauncher:
             research_profile_markup = (
                 f'<span class="run-chip route-profile-{esc(run.get("research_profile_class") or "route-warming-up")}">{esc(run.get("research_profile_label"))}</span>'
                 if run.get("research_profile_label")
+                else ""
+            )
+            llm_backend_markup = (
+                f'<span class="run-chip {esc(run.get("llm_backend_class") or "llm-remote")}" title="{esc(run.get("llm_backend_detail") or "")}">{esc(run.get("llm_backend_label"))}</span>'
+                if run.get("llm_backend_label")
                 else ""
             )
             mode_markup = f'<span class="run-chip mode-{esc(run.get("execution_mode") or "quick")}">{esc(run.get("execution_mode") or "quick")}</span>'
@@ -4980,6 +5131,7 @@ class DashboardQueryLauncher:
                 f"{archived_markup}"
                 f"{route_markup}"
                 f"{research_profile_markup}"
+                f"{llm_backend_markup}"
                 f"{mode_markup}"
                 f"{eta_markup}"
                 "</div>"
