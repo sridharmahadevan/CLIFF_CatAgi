@@ -22,7 +22,7 @@ from .agentic_workflows import (
 from .product_feedback_counterfactuals import build_product_feedback_counterfactuals
 from .product_feedback_visualizations import bootstrap_product_feedback_dashboard, generate_product_feedback_dashboard
 from .prometheus_bridge import build_prometheus_world_model_from_feedback, prometheus_available
-from .topos_psr import build_topos_psr_bundle
+from .topos_psr import build_topos_psr_bundle, render_topos_psr_bundle_html
 
 _POSITIVE_TERMS = (
     "comfortable",
@@ -1005,12 +1005,18 @@ class ProductFeedbackAgenticRunner:
         )
         review_episodes_path = self.outdir / "review_episodes.jsonl"
         topos_psr_path = self.outdir / "topos_psr_hankel.json"
+        topos_psr_html_path = self.outdir / "topos_psr_bundle.html"
         _write_jsonl(review_episodes_path, list(bundle.get("episodes") or []))
         _write_json(topos_psr_path, bundle)
+        topos_psr_html_path.write_text(
+            render_topos_psr_bundle_html(bundle, raw_json_href=topos_psr_path.name),
+            encoding="utf-8",
+        )
         self._state["topos_psr"] = bundle
         paths = {
             "review_episodes_path": review_episodes_path,
             "topos_psr_path": topos_psr_path,
+            "topos_psr_html_path": topos_psr_html_path,
         }
         self._state["topos_psr_paths"] = paths
         return paths

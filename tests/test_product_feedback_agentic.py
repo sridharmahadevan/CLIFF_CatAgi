@@ -1161,6 +1161,8 @@ class ProductFeedbackAgenticTests(unittest.TestCase):
 
             topos_psr = json.loads(result.topos_psr_path.read_text(encoding="utf-8"))
             self.assertGreaterEqual(topos_psr["summary"]["n_contexts"], 1)
+            self.assertEqual(topos_psr["summary"]["n_review_records"], 5)
+            self.assertGreaterEqual(topos_psr["summary"]["n_context_projected_views"], 5)
             prometheus_twm = json.loads(result.prometheus_twm_path.read_text(encoding="utf-8"))
             self.assertGreaterEqual(prometheus_twm["summary"]["local_psr_count"], 1)
             self.assertIn("twm_objective_glue_term", prometheus_twm["summary"])
@@ -1173,6 +1175,8 @@ class ProductFeedbackAgenticTests(unittest.TestCase):
             self.assertIn("Causal Hypotheses", dashboard)
             self.assertIn("Usage Workflows", dashboard)
             self.assertIn("Topos PSR", dashboard)
+            self.assertIn("Reviews Used", dashboard)
+            self.assertIn("Context Views", dashboard)
             self.assertIn("Prometheus Counterfactuals", dashboard)
             self.assertIn("Prometheus Topos World Model", dashboard)
             self.assertIn("Learned Overlap Edges", dashboard)

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from html import escape
+import json
 from typing import Iterable
 
 try:
@@ -643,6 +645,289 @@ def _svd_summary(matrix: list[list[float]]) -> dict[str, object]:
     }
 
 
+def _format_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, float):
+        return f"{value:.3f}".rstrip("0").rstrip(".")
+    if value is None or value == "":
+        return "not available"
+    return str(value)
+
+
+def _metric(label: str, value: object) -> str:
+    return (
+        '<div class="metric">'
+        f'<span>{escape(label)}</span>'
+        f'<strong>{escape(_format_value(value))}</strong>'
+        "</div>"
+    )
+
+
+def _support_counts(bundle: dict[str, object]) -> tuple[int, int]:
+    summary = dict(bundle.get("summary") or {})
+    review_count = int(summary.get("n_review_records") or summary.get("n_episodes") or 0)
+    context_view_count = int(summary.get("n_context_projected_views") or 0)
+    if context_view_count <= 0:
+        context_view_count = sum(
+            int(dict(row).get("n_episode_views") or 0)
+            for row in list(bundle.get("local_hankel_family") or [])
+            if isinstance(row, dict)
+        )
+    return review_count, context_view_count
+
+
+def _render_context_cards(bundle: dict[str, object]) -> str:
+    contexts_by_id = {
+        str(row.get("context_id") or ""): dict(row)
+        for row in list(bundle.get("contexts") or [])
+        if isinstance(row, dict)
+    }
+    cards: list[str] = []
+    for row in list(bundle.get("local_hankel_family") or []):
+        if not isinstance(row, dict):
+            continue
+        context_id = str(row.get("context_id") or "context")
+        context = contexts_by_id.get(context_id, {})
+        svd = dict(row.get("svd") or {})
+        parents = ", ".join(str(parent) for parent in list(row.get("parents") or context.get("parents") or [])) or "root"
+        singular_values = ", ".join(_format_value(value) for value in list(svd.get("singular_values") or [])[:4])
+        singular_values_markup = (
+            f'<p class="fine">singular values: {escape(singular_values)}</p>'
+            if singular_values
+            else ""
+        )
+        cards.append(
+            '<article class="context-card">'
+            f'<div><p class="kicker">{escape(context_id)}</p><h3>{escape(str(row.get("context_label") or context.get("label") or context_id))}</h3></div>'
+            f'<p>{escape(str(row.get("description") or context.get("description") or "Local predictive-state context."))}</p>'
+            '<div class="mini-grid">'
+            f'<span>episode views <strong>{escape(_format_value(row.get("n_episode_views")))}</strong></span>'
+            f'<span>histories <strong>{escape(str(len(list(row.get("histories") or []))))}</strong></span>'
+            f'<span>tests <strong>{escape(str(len(list(row.get("tests") or []))))}</strong></span>'
+            f'<span>rank <strong>{escape(_format_value(svd.get("rank")))}</strong></span>'
+            "</div>"
+            f'<p class="fine">parents: {escape(parents)}</p>'
+            f"{singular_values_markup}"
+            "</article>"
+        )
+    if not cards:
+        return '<p class="empty">No local Hankel contexts were published in this bundle.</p>'
+    return "\n".join(cards)
+
+
+def _render_restriction_table(bundle: dict[str, object]) -> str:
+    rows = [dict(row) for row in list(bundle.get("restriction_diagnostics") or []) if isinstance(row, dict)]
+    if not rows:
+        return '<p class="empty">No restriction diagnostics were published in this bundle.</p>'
+    rendered_rows = []
+    for row in rows:
+        compatible = bool(row.get("compatible"))
+        rendered_rows.append(
+            "<tr>"
+            f'<td>{escape(str(row.get("source_context") or "source"))}</td>'
+            f'<td>{escape(str(row.get("target_context") or "target"))}</td>'
+            f'<td>{escape(str(len(list(row.get("shared_histories") or []))))}</td>'
+            f'<td>{escape(str(len(list(row.get("shared_tests") or []))))}</td>'
+            f'<td>{escape(_format_value(row.get("mean_abs_gap")))}</td>'
+            f'<td>{escape(_format_value(row.get("max_abs_gap")))}</td>'
+            f'<td><span class="status {"ok" if compatible else "warn"}>{escape("compatible" if compatible else "needs review")}</span></td>'
+            "</tr>"
+        )
+    return (
+        '<div class="table-wrap"><table>'
+        "<thead><tr><th>Source</th><th>Target</th><th>Histories</th><th>Tests</th><th>Mean gap</th><th>Max gap</th><th>Status</th></tr></thead>"
+        f"<tbody>{''.join(rendered_rows)}</tbody>"
+        "</table></div>"
+    )
+
+
+def _preferred_matrix_context_ids(bundle: dict[str, object]) -> tuple[str, ...]:
+    domain = str(dict(bundle.get("summary") or {}).get("domain") or "").strip().lower()
+    if domain in {"food", "beverage", "food_beverage", "snack", "chocolate"}:
+        return ("taste", "use", "review")
+    if domain in {"furniture", "home", "sofa"}:
+        return ("sit", "assemble", "use", "post_purchase", "review")
+    if domain in {"running", "shoe", "shoes", "footwear"}:
+        return ("fit", "run", "use", "decision", "review")
+    return ("use", "decision", "review")
+
+
+def _matrix_preview_row(bundle: dict[str, object]) -> dict[str, object] | None:
+    rows = [dict(row) for row in list(bundle.get("local_hankel_family") or []) if isinstance(row, dict)]
+    usable = [row for row in rows if list(row.get("matrix") or []) and list(row.get("tests") or [])]
+    if not usable:
+        return None
+    by_id = {str(row.get("context_id") or ""): row for row in usable}
+    for context_id in _preferred_matrix_context_ids(bundle):
+        if context_id in by_id:
+            return by_id[context_id]
+    specific = [row for row in usable if str(row.get("context_id") or "") != "review"]
+    return max(specific or usable, key=lambda row: int(row.get("n_episode_views") or 0))
+
+
+def _render_matrix_preview(bundle: dict[str, object]) -> str:
+    row = _matrix_preview_row(bundle)
+    if row is None:
+        return '<p class="empty">No matrix preview is available for this bundle.</p>'
+    matrix = list(row.get("matrix") or [])
+    histories = list(row.get("histories") or [])
+    tests = list(row.get("tests") or [])
+    preview_tests = [dict(test) for test in tests[:6] if isinstance(test, dict)]
+    header = "".join(
+        f'<th title="{escape(str(test.get("test_kind") or "test"))}; support {escape(_format_value(test.get("support")))}">{escape(str(test.get("signature") or ""))}</th>'
+        for test in preview_tests
+    )
+    body_rows = []
+    for index, values in enumerate(matrix[:6]):
+        history = histories[index] if index < len(histories) else {}
+        history_row = dict(history) if isinstance(history, dict) else {"signature": history}
+        signature = history_row.get("signature")
+        support = history_row.get("support")
+        cells = "".join(f"<td>{escape(_format_value(value))}</td>" for value in list(values)[: len(preview_tests)])
+        body_rows.append(
+            f'<tr><th title="history support {escape(_format_value(support))}">{escape(str(signature))}</th>{cells}</tr>'
+        )
+    legend_items = "".join(
+        "<li>"
+        f'<strong>{escape(str(test.get("signature") or ""))}</strong>'
+        f' <span>{escape(str(test.get("test_kind") or "test").replace("_", " "))}, support {escape(_format_value(test.get("support")))}</span>'
+        "</li>"
+        for test in preview_tests
+    )
+    context_label = str(row.get("context_label") or row.get("context_id") or "first")
+    context_id = str(row.get("context_id") or "")
+    return (
+        f'<p class="trace">Previewing the {escape(context_label)} local Hankel matrix. Rows are history prefixes; columns are finite tests. Test columns are support-ranked summaries of attributes, action motifs, or action-motif plus attribute events.</p>'
+        '<div class="table-wrap matrix"><table>'
+        f"<thead><tr><th>history rows / test columns</th>{header}</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody>"
+        "</table></div>"
+        f'<div class="matrix-note">context: {escape(context_id or context_label)}; showing up to 6 histories and 6 tests. Full matrix family remains in the raw JSON bundle.</div>'
+        f'<ul class="test-legend">{legend_items}</ul>'
+    )
+    return '<p class="empty">No matrix preview is available for this bundle.</p>'
+
+
+def render_topos_psr_bundle_html(bundle: dict[str, object], *, raw_json_href: str = "topos_psr_hankel.json") -> str:
+    """Render a readable HTML companion for a product-feedback Topos PSR bundle."""
+
+    summary = dict(bundle.get("summary") or {})
+    product = str(summary.get("product_name") or "Product feedback")
+    brand = str(summary.get("brand_name") or "").strip()
+    title = f"{brand} {product}".strip()
+    review_count, context_view_count = _support_counts(bundle)
+    compatibility = f"{int(summary.get('n_compatible_restrictions', 0))}/{int(summary.get('n_restriction_checks', 0))}"
+    metrics = "\n".join(
+        (
+            _metric("Reviews used", review_count),
+            _metric("Context views", context_view_count),
+            _metric("Local contexts", summary.get("n_contexts")),
+            _metric("Mean rank", summary.get("mean_rank")),
+            _metric("Max rank", summary.get("max_rank")),
+            _metric("Compatibility", compatibility),
+        )
+    )
+    config = dict(summary.get("config") or {})
+    config_text = ", ".join(f"{key.replace('_', ' ')}: {_format_value(value)}" for key, value in config.items())
+    raw_link = f'<a href="{escape(raw_json_href)}" target="_blank" rel="noreferrer">Raw JSON bundle</a>' if raw_json_href else ""
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{escape(title)} - Topos PSR Bundle</title>
+    <style>
+      :root {{
+        --ink:#162027;
+        --muted:#5b6870;
+        --paper:#f8f3ea;
+        --panel:#ffffff;
+        --line:#d9d1c5;
+        --green:#17634f;
+        --blue:#245c83;
+        --rust:#9a4b2c;
+        --soft:#edf4f1;
+      }}
+      * {{ box-sizing:border-box; }}
+      body {{ margin:0; font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:var(--paper); }}
+      main {{ width:min(1200px, calc(100vw - 32px)); margin:30px auto 48px; display:grid; gap:18px; }}
+      section {{ background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:24px; }}
+      h1,h2,h3,p {{ margin:0; }}
+      h1 {{ max-width:880px; font-size:clamp(30px, 4vw, 52px); line-height:1.02; }}
+      h2 {{ font-size:21px; }}
+      h3 {{ font-size:18px; }}
+      .eyebrow,.kicker {{ color:var(--rust); font-size:12px; font-weight:800; text-transform:uppercase; }}
+      .eyebrow {{ margin-bottom:10px; }}
+      .hero {{ min-height:300px; display:grid; align-content:end; gap:18px; background:linear-gradient(135deg,#fffdf9,#edf4f1 62%,#f6eee7); }}
+      .trace,.empty,.fine {{ color:var(--muted); line-height:1.58; }}
+      .links {{ display:flex; flex-wrap:wrap; gap:10px; }}
+      a {{ display:inline-flex; align-items:center; min-height:38px; border:1px solid #b9d0c7; border-radius:999px; padding:8px 12px; color:var(--green); background:var(--soft); font-weight:800; text-decoration:none; }}
+      .metrics {{ display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:12px; }}
+      .metric {{ min-height:100px; border:1px solid var(--line); border-radius:8px; padding:14px; display:grid; align-content:space-between; gap:10px; background:#fdfbf8; }}
+      .metric span {{ color:var(--muted); font-size:12px; font-weight:800; text-transform:uppercase; }}
+      .metric strong {{ font-size:23px; overflow-wrap:anywhere; }}
+      .context-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }}
+      .context-card {{ border:1px solid var(--line); border-radius:8px; padding:16px; display:grid; gap:12px; background:#fffdf9; }}
+      .mini-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }}
+      .mini-grid span {{ border:1px solid #e5ded3; border-radius:8px; padding:9px; color:var(--muted); font-size:12px; text-transform:uppercase; }}
+      .mini-grid strong {{ display:block; margin-top:4px; color:var(--ink); font-size:18px; text-transform:none; }}
+      .table-wrap {{ overflow:auto; border:1px solid var(--line); border-radius:8px; }}
+      table {{ width:100%; border-collapse:collapse; min-width:760px; }}
+      th,td {{ padding:10px 12px; border-bottom:1px solid #ece6dc; text-align:left; vertical-align:top; }}
+      th {{ color:#40505a; font-size:12px; text-transform:uppercase; background:#f7f3ec; }}
+      .matrix th {{ text-transform:none; overflow-wrap:anywhere; }}
+      .matrix td {{ font-variant-numeric:tabular-nums; }}
+      .matrix-note {{ margin-top:10px; color:var(--muted); font-size:13px; line-height:1.45; }}
+      .test-legend {{ margin:12px 0 0; padding-left:20px; display:grid; gap:6px; color:var(--muted); }}
+      .test-legend strong {{ color:var(--ink); }}
+      .status {{ font-size:12px; font-weight:800; text-transform:uppercase; }}
+      .status.ok {{ color:var(--green); }}
+      .status.warn {{ color:var(--rust); }}
+      details {{ border:1px solid var(--line); border-radius:8px; background:#fffdfa; }}
+      summary {{ cursor:pointer; padding:14px 16px; font-weight:800; }}
+      pre {{ margin:0; max-height:260px; overflow:auto; white-space:pre-wrap; border-top:1px solid var(--line); padding:14px; background:#f4f0e8; }}
+      @media (max-width:980px) {{ .metrics {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .context-grid {{ grid-template-columns:1fr; }} }}
+      @media (max-width:560px) {{ main {{ width:min(100vw - 22px,1200px); margin-top:12px; }} section {{ padding:18px; }} .metrics {{ grid-template-columns:1fr; }} }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <p class="eyebrow">Topos PSR Bundle</p>
+        <h1>{escape(title)}</h1>
+        <p class="trace">A readable companion for the presheaf-valued predictive-state bundle. This PSR was estimated from {escape(str(review_count))} normalized review record(s); those records project into {escape(str(context_view_count))} local context view(s) across the Hankel family.</p>
+        <div class="links">{raw_link}</div>
+      </section>
+      <section>
+        <p class="eyebrow">Bundle State</p>
+        <div class="metrics">{metrics}</div>
+        {f'<p class="trace" style="margin-top:14px;">Configuration: {escape(config_text)}</p>' if config_text else ""}
+      </section>
+      <section>
+        <p class="eyebrow">Local Contexts</p>
+        <div class="context-grid">{_render_context_cards(bundle)}</div>
+      </section>
+      <section>
+        <p class="eyebrow">Restriction Diagnostics</p>
+        {_render_restriction_table(bundle)}
+      </section>
+      <section>
+        <p class="eyebrow">Matrix Preview</p>
+        {_render_matrix_preview(bundle)}
+      </section>
+      <section>
+        <details>
+          <summary>Summary payload</summary>
+          <pre>{escape(json.dumps(summary, indent=2))}</pre>
+        </details>
+      </section>
+    </main>
+  </body>
+</html>
+"""
+
+
 def build_topos_psr_bundle(
     normalized_events: Iterable[dict[str, object]],
     usage_workflows: dict[str, object],
@@ -803,11 +1088,17 @@ def build_topos_psr_bundle(
             )
 
     ranks = [int(row["svd"]["rank"]) for row in local_hankel_family]
+    context_view_count = sum(int(row.get("n_episode_views", 0) or 0) for row in local_hankel_family)
+    context_supports = [int(row.get("n_episode_views", 0) or 0) for row in local_hankel_family]
     summary = {
         "product_name": product_name,
         "brand_name": brand_name,
         "domain": str(usage_workflows.get("usage_family") or "generic"),
         "n_episodes": len(episodes),
+        "n_review_records": len(episodes),
+        "n_context_projected_views": context_view_count,
+        "min_context_episode_views": min(context_supports) if context_supports else 0,
+        "max_context_episode_views": max(context_supports) if context_supports else 0,
         "n_contexts": len(local_hankel_family),
         "context_ids": [row["context_id"] for row in local_hankel_family],
         "n_restriction_checks": len(restriction_diagnostics),

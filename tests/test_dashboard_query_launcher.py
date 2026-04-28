@@ -20,6 +20,320 @@ except ModuleNotFoundError:
 
 
 class DashboardQueryLauncherTests(unittest.TestCase):
+    def test_stable_product_feedback_accept_answer_hides_go_deeper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            state_dir = root / "product_feedback" / "product_feedback_run" / "prometheus_state"
+            state_dir.mkdir(parents=True)
+            (state_dir / "product_feedback_world_state.json").write_text(
+                json.dumps(
+                    {
+                        "confidence": "stable",
+                        "diagnostics": {
+                            "query_context": "taste",
+                            "query_context_support": {"episode_views": 6},
+                        },
+                        "recommended_actions": [
+                            {
+                                "action": "accept_answer",
+                                "label": "Accept current answer",
+                                "rationale": "The taste local state has adequate support and compatible restrictions.",
+                                "config_patch": {},
+                            }
+                        ],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            launcher = DashboardQueryLauncher(
+                DashboardQueryLauncherConfig(
+                    title="Prometheus",
+                    subtitle="Session",
+                    query_label="Query",
+                    query_placeholder="How tasty are the Amedei chocolates?",
+                    submit_label="Run",
+                    waiting_message="Working.",
+                    session_mode=True,
+                    enable_execution_mode=True,
+                    auto_open_browser=False,
+                )
+            )
+            run_id = launcher.submit_query("How tasty are the Amedei chocolates?", execution_mode="quick")
+            launcher.update_session_run(
+                run_id,
+                status="complete",
+                route_name="product_feedback",
+                outdir=root,
+                artifact_path=root / "product_feedback" / "topos_world_model" / "topos_world_model.html",
+            )
+
+            enriched = launcher._enriched_run_state(dict(launcher._session_runs_by_id[run_id]))
+            self.assertFalse(enriched["world_state_can_deepen"])
+            markup = launcher._render_session_runs_markup([launcher._session_runs_by_id[run_id]])
+            self.assertNotIn("Go deeper", markup)
+            self.assertIsNone(launcher.request_session_run_deepen(run_id))
+
+    def test_session_run_uses_product_feedback_world_state_for_deeper_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            state_dir = root / "product_feedback" / "product_feedback_run" / "prometheus_state"
+            state_dir.mkdir(parents=True)
+            (state_dir / "product_feedback_world_state.json").write_text(
+                json.dumps(
+                    {
+                        "confidence": "thin",
+                        "diagnostics": {
+                            "query_context": "taste",
+                            "query_context_support": {"episode_views": 3},
+                        },
+                        "recommended_actions": [
+                            {
+                                "label": "Run deeper taste-focused probe",
+                                "rationale": "taste context has only 3 supporting views",
+                                "config_patch": {
+                                    "product_target_docs": 18,
+                                    "product_max_docs": 54,
+                                    "analysis_question": "Deepen taste evidence.",
+                                },
+                            }
+                        ],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            launcher = DashboardQueryLauncher(
+                DashboardQueryLauncherConfig(
+                    title="Prometheus",
+                    subtitle="Session",
+                    query_label="Query",
+                    query_placeholder="How tasty are the Amedei chocolates?",
+                    submit_label="Run",
+                    waiting_message="Working.",
+                    session_mode=True,
+                    enable_execution_mode=True,
+                    auto_open_browser=False,
+                )
+            )
+            run_id = launcher.submit_query("How tasty are the Amedei chocolates?", execution_mode="quick")
+            launcher.update_session_run(
+                run_id,
+                status="complete",
+                route_name="product_feedback",
+                outdir=root,
+                artifact_path=root / "product_feedback" / "topos_world_model" / "topos_world_model.html",
+            )
+
+            enriched = launcher._enriched_run_state(dict(launcher._session_runs_by_id[run_id]))
+            self.assertEqual(enriched["world_state_confidence"], "thin")
+            self.assertEqual(enriched["world_state_context"], "taste")
+            self.assertIn("3 context views", enriched["world_state_support_label"])
+            self.assertEqual(launcher.request_session_run_deepen(run_id), "run-0002")
+            overrides = launcher.submission_overrides_for_run("run-0002")
+            self.assertEqual(overrides["route"], "product_feedback")
+            self.assertEqual(overrides["product_target_docs"], 18)
+            self.assertEqual(overrides["product_max_docs"], 54)
+            self.assertTrue(str(overrides["parent_product_state_path"]).endswith("product_feedback_world_state.json"))
+
+    def test_deep_product_feedback_run_can_continue_from_transition_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            state_dir = root / "product_feedback" / "product_feedback_run" / "prometheus_state"
+            state_dir.mkdir(parents=True)
+            (state_dir / "product_feedback_world_state.json").write_text(
+                json.dumps(
+                    {
+                        "confidence": "provisional",
+                        "diagnostics": {
+                            "query_context": "sit",
+                            "query_context_support": {"episode_views": 8},
+                        },
+                        "recommended_actions": [
+                            {
+                                "label": "Run deeper sit-focused probe",
+                                "rationale": "sit context still has residual tension",
+                                "config_patch": {"product_target_docs": 24},
+                            }
+                        ],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            (state_dir / "product_feedback_state_transition.json").write_text(
+                json.dumps(
+                    {
+                        "assessment": "stable_with_residual_gluing_tension",
+                        "recommended_actions": [
+                            {
+                                "label": "Inspect incompatible restriction",
+                                "rationale": "restriction compatibility stayed at 6/7",
+                                "config_patch": {
+                                    "analysis_question": "Investigate the residual gluing tension between use and sit.",
+                                },
+                            }
+                        ],
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            launcher = DashboardQueryLauncher(
+                DashboardQueryLauncherConfig(
+                    title="Prometheus",
+                    subtitle="Session",
+                    query_label="Query",
+                    query_placeholder="How comfortable is the Lovesac sectional sofa?",
+                    submit_label="Run",
+                    waiting_message="Working.",
+                    session_mode=True,
+                    enable_execution_mode=True,
+                    auto_open_browser=False,
+                )
+            )
+            run_id = launcher.submit_query("How comfortable is the Lovesac sectional sofa?", execution_mode="deep")
+            launcher.update_session_run(
+                run_id,
+                status="complete",
+                route_name="product_feedback",
+                outdir=root,
+                artifact_path=root / "product_feedback" / "topos_world_model" / "topos_world_model.html",
+            )
+
+            markup = launcher._render_session_runs_markup([launcher._session_runs_by_id[run_id]])
+            self.assertIn("Go deeper", markup)
+            self.assertEqual(launcher.request_session_run_deepen(run_id), "run-0002")
+            overrides = launcher.submission_overrides_for_run("run-0002")
+            self.assertEqual(overrides["route"], "product_feedback")
+            self.assertEqual(
+                overrides["analysis_question"],
+                "Investigate the residual gluing tension between use and sit.",
+            )
+            self.assertTrue(str(overrides["parent_product_state_path"]).endswith("product_feedback_world_state.json"))
+
+    def test_stalled_counterfactual_transition_hides_go_deeper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            state_dir = root / "product_feedback" / "product_feedback_run" / "prometheus_state"
+            state_dir.mkdir(parents=True)
+            (state_dir / "product_feedback_world_state.json").write_text(
+                json.dumps(
+                    {
+                        "confidence": "provisional",
+                        "diagnostics": {
+                            "query_context": "taste",
+                            "query_context_support": {"episode_views": 6},
+                        },
+                        "recommended_actions": [{"action": "counterfactual_probe", "label": "Probe taste repair evidence"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (state_dir / "product_feedback_state_transition.json").write_text(
+                json.dumps(
+                    {
+                        "assessment": "counterfactual_probe_stalled",
+                        "recommended_actions": [
+                            {
+                                "action": "accept_descriptive_answer",
+                                "label": "Accept descriptive answer; stop repair probing",
+                                "rationale": "Repeated probes did not find strict j-do support.",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            launcher = DashboardQueryLauncher(
+                DashboardQueryLauncherConfig(
+                    title="Prometheus",
+                    subtitle="Session",
+                    query_label="Query",
+                    query_placeholder="How tasty are the Amedei chocolates?",
+                    submit_label="Run",
+                    waiting_message="Working.",
+                    session_mode=True,
+                    enable_execution_mode=True,
+                    auto_open_browser=False,
+                )
+            )
+            run_id = launcher.submit_query("How tasty are the Amedei chocolates?", execution_mode="deep")
+            launcher.update_session_run(
+                run_id,
+                status="complete",
+                route_name="product_feedback",
+                outdir=root,
+                artifact_path=root / "product_feedback" / "topos_world_model" / "topos_world_model.html",
+            )
+
+            enriched = launcher._enriched_run_state(dict(launcher._session_runs_by_id[run_id]))
+            self.assertFalse(enriched["world_state_can_deepen"])
+            markup = launcher._render_session_runs_markup([launcher._session_runs_by_id[run_id]])
+            self.assertNotIn("Go deeper", markup)
+            self.assertIsNone(launcher.request_session_run_deepen(run_id))
+
+    def test_stalled_gluing_transition_hides_go_deeper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            state_dir = root / "product_feedback" / "product_feedback_run" / "prometheus_state"
+            state_dir.mkdir(parents=True)
+            (state_dir / "product_feedback_world_state.json").write_text(
+                json.dumps(
+                    {
+                        "confidence": "provisional",
+                        "diagnostics": {
+                            "query_context": "use",
+                            "query_context_support": {"episode_views": 6},
+                        },
+                        "recommended_actions": [{"action": "product_feedback_deeper_probe"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (state_dir / "product_feedback_state_transition.json").write_text(
+                json.dumps(
+                    {
+                        "assessment": "gluing_probe_stalled",
+                        "recommended_actions": [
+                            {
+                                "action": "accept_with_gluing_caveat",
+                                "label": "Accept answer with gluing caveat",
+                                "rationale": "Repeated probes are not resolving the incompatible local restriction.",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            launcher = DashboardQueryLauncher(
+                DashboardQueryLauncherConfig(
+                    title="Prometheus",
+                    subtitle="Session",
+                    query_label="Query",
+                    query_placeholder="How comfortable are the Saucony Endorphin running shoes?",
+                    submit_label="Run",
+                    waiting_message="Working.",
+                    session_mode=True,
+                    enable_execution_mode=True,
+                    auto_open_browser=False,
+                )
+            )
+            run_id = launcher.submit_query("How comfortable are the Saucony Endorphin running shoes?", execution_mode="deep")
+            launcher.update_session_run(
+                run_id,
+                status="complete",
+                route_name="product_feedback",
+                outdir=root,
+                artifact_path=root / "product_feedback" / "topos_world_model" / "topos_world_model.html",
+            )
+
+            enriched = launcher._enriched_run_state(dict(launcher._session_runs_by_id[run_id]))
+            self.assertFalse(enriched["world_state_can_deepen"])
+            markup = launcher._render_session_runs_markup([launcher._session_runs_by_id[run_id]])
+            self.assertNotIn("Go deeper", markup)
+            self.assertIsNone(launcher.request_session_run_deepen(run_id))
+
     def test_launcher_form_exposes_topos_world_model_analysis_option(self) -> None:
         launcher = DashboardQueryLauncher(
             DashboardQueryLauncherConfig(

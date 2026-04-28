@@ -31,6 +31,7 @@ from .product_feedback_corpus_synthesis import (
     ProductFeedbackCorpusSynthesisResult,
     build_product_feedback_corpus_synthesis,
 )
+from .product_feedback_state import materialize_product_feedback_world_state
 from .product_feedback_visualizations import bootstrap_product_feedback_dashboard
 
 _STOPWORDS = {
@@ -578,6 +579,8 @@ class ProductFeedbackQueryRunResult:
     convergence_assessment: dict[str, object] | None = None
     product_feedback_result: ProductFeedbackRunResult | None = None
     corpus_synthesis_result: ProductFeedbackCorpusSynthesisResult | None = None
+    persistent_state_path: Path | None = None
+    persistent_state_dashboard_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -879,6 +882,26 @@ class ProductFeedbackQueryAgenticRunner:
                 )
             )
 
+        corpus_synthesis_result = (
+            build_product_feedback_corpus_synthesis(
+                query=self.config.query,
+                outdir=self.analysis_outdir,
+                feedback_result=feedback_result,
+            )
+            if feedback_result is not None and self.config.enable_corpus_synthesis
+            else None
+        )
+        state_paths = (
+            materialize_product_feedback_world_state(
+                query=self.config.query,
+                query_plan=plan,
+                summary_path=self.summary_path,
+                product_feedback_result=feedback_result,
+                outdir=self.analysis_outdir,
+            )
+            if feedback_result is not None
+            else {}
+        )
         result = ProductFeedbackQueryRunResult(
             query_plan=plan,
             selected_documents=selected,
@@ -889,15 +912,9 @@ class ProductFeedbackQueryAgenticRunner:
             consensus_reached=consensus_reached,
             convergence_assessment=convergence_assessment,
             product_feedback_result=feedback_result,
-            corpus_synthesis_result=(
-                build_product_feedback_corpus_synthesis(
-                    query=self.config.query,
-                    outdir=self.analysis_outdir,
-                    feedback_result=feedback_result,
-                )
-                if feedback_result is not None and self.config.enable_corpus_synthesis
-                else None
-            ),
+            corpus_synthesis_result=corpus_synthesis_result,
+            persistent_state_path=state_paths.get("json_path"),
+            persistent_state_dashboard_path=state_paths.get("html_path"),
         )
         self.summary_path.write_text(
             json.dumps(
@@ -921,6 +938,10 @@ class ProductFeedbackQueryAgenticRunner:
                     ),
                     "corpus_synthesis_dashboard_path": (
                         str(result.corpus_synthesis_result.dashboard_path) if result.corpus_synthesis_result else None
+                    ),
+                    "persistent_state_path": str(result.persistent_state_path) if result.persistent_state_path else None,
+                    "persistent_state_dashboard_path": (
+                        str(result.persistent_state_dashboard_path) if result.persistent_state_dashboard_path else None
                     ),
                 },
                 indent=2,

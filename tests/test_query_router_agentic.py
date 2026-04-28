@@ -325,6 +325,8 @@ class QueryRouterAgenticTests(unittest.TestCase):
             dashboard.write_text("<html>product</html>", encoding="utf-8")
             psr_path = route_outdir / "topos_psr_hankel.json"
             psr_path.write_text('{"summary": {"n_contexts": 1}}', encoding="utf-8")
+            psr_view_path = route_outdir / "topos_psr_bundle.html"
+            psr_view_path.write_text("<html>psr view</html>", encoding="utf-8")
             router = module.FF2QueryRouter(
                 module.FF2QueryRouterConfig(
                     query="How comfortable is the Lovesac sectional sofa?",
@@ -358,6 +360,13 @@ class QueryRouterAgenticTests(unittest.TestCase):
             payload = json.loads((wrapped.topos_world_model_path.parent / "topos_world_model.json").read_text(encoding="utf-8"))
             self.assertEqual(payload["route_name"], "product_feedback")
             self.assertEqual(payload["psr_path"], str(psr_path))
+            html = wrapped.topos_world_model_path.read_text(encoding="utf-8")
+            self.assertIn("World Model Construction", html)
+            self.assertIn("Restriction Diagnostics", html)
+            self.assertIn("Raw artifact payload", html)
+            self.assertNotIn("World Model Payload", html)
+            self.assertIn("topos_psr_bundle.html", html)
+            self.assertIn("topos_psr_hankel.json", html)
 
     def test_topos_world_model_mode_wraps_company_similarity_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

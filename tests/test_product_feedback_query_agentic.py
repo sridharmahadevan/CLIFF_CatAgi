@@ -22,6 +22,8 @@ try:
         ReviewQueryPlan,
         WebSearchReviewRetrievalBackend,
     )
+    from functorflow_v3.product_feedback_state import materialize_product_feedback_state_transition
+    from functorflow_v3.product_feedback_state import materialize_product_feedback_world_state
 except ModuleNotFoundError:
     from ..functorflow_v3 import (
         ProductFeedbackQueryAgenticConfig,
@@ -34,9 +36,280 @@ except ModuleNotFoundError:
         ReviewQueryPlan,
         WebSearchReviewRetrievalBackend,
     )
+    from ..functorflow_v3.product_feedback_state import materialize_product_feedback_state_transition
+    from ..functorflow_v3.product_feedback_state import materialize_product_feedback_world_state
 
 
 class ProductFeedbackQueryAgenticTests(unittest.TestCase):
+    def test_world_state_recommends_counterfactual_probe_when_only_exploratory_repairs_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            psr_path = root / "topos_psr_hankel.json"
+            scorecard_path = root / "scorecard.json"
+            counterfactual_path = root / "prometheus_counterfactuals.json"
+            psr_path.write_text(
+                json.dumps(
+                    {
+                        "summary": {
+                            "domain": "food",
+                            "context_ids": ["review", "taste"],
+                            "n_review_records": 6,
+                            "n_context_projected_views": 12,
+                            "n_contexts": 2,
+                            "n_compatible_restrictions": 1,
+                            "n_restriction_checks": 1,
+                        },
+                        "local_hankel_family": [
+                            {
+                                "context_id": "taste",
+                                "n_episode_views": 6,
+                                "histories": [{"signature": "epsilon"} for _ in range(4)],
+                                "tests": [{"signature": f"taste_test_{index}"} for index in range(4)],
+                                "svd": {"rank": 2},
+                            }
+                        ],
+                        "restriction_diagnostics": [
+                            {"source_context": "review", "target_context": "taste", "compatible": True, "max_abs_gap": 0.05}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            scorecard_path.write_text("{}", encoding="utf-8")
+            counterfactual_path.write_text(
+                json.dumps(
+                    {
+                        "summary": {"counterfactual_count": 0, "candidate_count": 0, "exploratory_count": 1},
+                        "counterfactuals": [],
+                        "exploratory_counterfactuals": [
+                            {
+                                "aspect": "taste",
+                                "evidence_status": "domain_plausible",
+                                "support_tier": "exploratory",
+                                "estimated_satisfaction_gain": 0.08,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            paths = materialize_product_feedback_world_state(
+                query="How tasty are the Amedei chocolates?",
+                query_plan=SimpleNamespace(target_documents=5),
+                summary_path=root / "summary.json",
+                product_feedback_result=SimpleNamespace(
+                    topos_psr_path=psr_path,
+                    success_scorecard_path=scorecard_path,
+                    prometheus_counterfactuals_path=counterfactual_path,
+                ),
+                outdir=root,
+            )
+
+            state = json.loads(paths["json_path"].read_text(encoding="utf-8"))
+            self.assertEqual(state["confidence"], "provisional")
+            self.assertEqual(state["recommended_actions"][0]["action"], "counterfactual_probe")
+            self.assertIn("j-do repair layer", state["reasons"][0])
+            self.assertEqual(state["diagnostics"]["counterfactual_support"]["exploratory_count"], 1)
+            html = paths["html_path"].read_text(encoding="utf-8")
+            self.assertIn("Counterfactual State", html)
+            self.assertIn("Probe taste repair evidence", html)
+
+    def test_product_feedback_state_transition_detects_stability_with_residual_gluing_tension(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parent_psr = root / "parent_psr.json"
+            current_psr = root / "current_psr.json"
+            parent_psr.write_text(
+                json.dumps(
+                    {
+                        "restriction_diagnostics": [
+                            {"source_context": "use", "target_context": "sit", "compatible": False, "max_abs_gap": 0.3}
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            current_psr.write_text(
+                json.dumps(
+                    {
+                        "restriction_diagnostics": [
+                            {"source_context": "use", "target_context": "sit", "compatible": False, "max_abs_gap": 0.28}
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            parent_state = {
+                "query": "How comfortable is the Lovesac sectional sofa?",
+                "diagnostics": {
+                    "query_context": "sit",
+                    "topos_summary": {
+                        "n_review_records": 6,
+                        "n_context_projected_views": 48,
+                        "n_contexts": 8,
+                        "mean_rank": 5.5,
+                        "n_compatible_restrictions": 6,
+                        "n_restriction_checks": 7,
+                    },
+                },
+                "source_artifacts": {"topos_psr_path": str(parent_psr)},
+            }
+            current_state = {
+                "query": "How comfortable is the Lovesac sectional sofa?",
+                "diagnostics": {
+                    "query_context": "sit",
+                    "topos_summary": {
+                        "n_review_records": 8,
+                        "n_context_projected_views": 64,
+                        "n_contexts": 8,
+                        "mean_rank": 5.625,
+                        "n_compatible_restrictions": 6,
+                        "n_restriction_checks": 7,
+                    },
+                },
+                "source_artifacts": {"topos_psr_path": str(current_psr)},
+            }
+            parent_path = root / "parent_state.json"
+            current_path = root / "current_state.json"
+            parent_path.write_text(json.dumps(parent_state), encoding="utf-8")
+            current_path.write_text(json.dumps(current_state), encoding="utf-8")
+
+            paths = materialize_product_feedback_state_transition(
+                parent_state_path=parent_path,
+                current_state_path=current_path,
+                outdir=root,
+            )
+
+            transition = json.loads(paths["json_path"].read_text(encoding="utf-8"))
+            self.assertEqual(transition["assessment"], "stable_with_residual_gluing_tension")
+            self.assertEqual(transition["recommended_actions"][0]["action"], "inspect_residual_restriction")
+            self.assertEqual(transition["recommended_actions"][0]["target"]["source_context"], "use")
+            html = paths["html_path"].read_text(encoding="utf-8")
+            self.assertIn("World State Transition", html)
+            self.assertIn("stable_with_residual_gluing_tension", html)
+
+    def test_product_feedback_state_transition_detects_stalled_counterfactual_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parent_state = {
+                "query": "How tasty are the Amedei chocolates?",
+                "diagnostics": {
+                    "query_context": "taste",
+                    "query_context_support": {"episode_views": 6},
+                    "counterfactual_support": {
+                        "supported_count": 0,
+                        "strict_candidate_count": 0,
+                        "exploratory_count": 1,
+                        "query_context_supported_count": 0,
+                        "query_context_exploratory_count": 1,
+                    },
+                    "topos_summary": {
+                        "n_review_records": 8,
+                        "n_context_projected_views": 48,
+                        "n_contexts": 8,
+                        "mean_rank": 5.0,
+                        "n_compatible_restrictions": 7,
+                        "n_restriction_checks": 7,
+                    },
+                },
+                "recommended_actions": [{"action": "counterfactual_probe"}],
+                "source_artifacts": {},
+            }
+            current_state = {
+                "query": "How tasty are the Amedei chocolates?",
+                "diagnostics": {
+                    "query_context": "taste",
+                    "query_context_support": {"episode_views": 6},
+                    "counterfactual_support": {
+                        "supported_count": 0,
+                        "strict_candidate_count": 0,
+                        "exploratory_count": 1,
+                        "query_context_supported_count": 0,
+                        "query_context_exploratory_count": 1,
+                    },
+                    "topos_summary": {
+                        "n_review_records": 8,
+                        "n_context_projected_views": 48,
+                        "n_contexts": 8,
+                        "mean_rank": 5.0,
+                        "n_compatible_restrictions": 7,
+                        "n_restriction_checks": 7,
+                    },
+                },
+                "recommended_actions": [{"action": "counterfactual_probe"}],
+                "source_artifacts": {},
+            }
+            parent_path = root / "parent_state.json"
+            current_path = root / "current_state.json"
+            parent_path.write_text(json.dumps(parent_state), encoding="utf-8")
+            current_path.write_text(json.dumps(current_state), encoding="utf-8")
+
+            paths = materialize_product_feedback_state_transition(
+                parent_state_path=parent_path,
+                current_state_path=current_path,
+                outdir=root,
+            )
+
+            transition = json.loads(paths["json_path"].read_text(encoding="utf-8"))
+            self.assertEqual(transition["assessment"], "counterfactual_probe_stalled")
+            self.assertEqual(transition["recommended_actions"][0]["action"], "accept_descriptive_answer")
+            self.assertIn("did not produce strict j-do repair candidates", transition["reasons"][0])
+
+    def test_product_feedback_state_transition_detects_stalled_gluing_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parent_state = {
+                "query": "How comfortable are the Saucony Endorphin running shoes?",
+                "diagnostics": {
+                    "query_context": "use",
+                    "query_context_support": {"episode_views": 10},
+                    "query_context_restrictions": {"checks": 4, "compatible": 2, "max_gap": 0.9},
+                    "counterfactual_support": {"supported_count": 1, "strict_candidate_count": 1, "exploratory_count": 0},
+                    "topos_summary": {
+                        "n_review_records": 10,
+                        "n_context_projected_views": 80,
+                        "n_contexts": 8,
+                        "mean_rank": 5.0,
+                        "n_compatible_restrictions": 5,
+                        "n_restriction_checks": 7,
+                    },
+                },
+                "source_artifacts": {},
+            }
+            current_state = {
+                "query": "How comfortable are the Saucony Endorphin running shoes?",
+                "diagnostics": {
+                    "query_context": "use",
+                    "query_context_support": {"episode_views": 6},
+                    "query_context_restrictions": {"checks": 4, "compatible": 2, "max_gap": 0.833},
+                    "counterfactual_support": {"supported_count": 1, "strict_candidate_count": 1, "exploratory_count": 0},
+                    "topos_summary": {
+                        "n_review_records": 10,
+                        "n_context_projected_views": 64,
+                        "n_contexts": 8,
+                        "mean_rank": 5.0,
+                        "n_compatible_restrictions": 5,
+                        "n_restriction_checks": 7,
+                    },
+                },
+                "source_artifacts": {},
+            }
+            parent_path = root / "parent_state.json"
+            current_path = root / "current_state.json"
+            parent_path.write_text(json.dumps(parent_state), encoding="utf-8")
+            current_path.write_text(json.dumps(current_state), encoding="utf-8")
+
+            paths = materialize_product_feedback_state_transition(
+                parent_state_path=parent_path,
+                current_state_path=current_path,
+                outdir=root,
+            )
+
+            transition = json.loads(paths["json_path"].read_text(encoding="utf-8"))
+            self.assertEqual(transition["assessment"], "gluing_probe_stalled")
+            self.assertEqual(transition["recommended_actions"][0]["action"], "accept_with_gluing_caveat")
+            self.assertIn("did not improve query-context support", transition["reasons"][0])
+
     def test_query_runner_falls_back_to_example_manifest_after_search_timeout(self) -> None:
         class DiscoveryTimeoutRunner(ProductFeedbackQueryAgenticRunner):
             def _resolve_backend(self):
@@ -564,10 +837,35 @@ class ProductFeedbackQueryAgenticTests(unittest.TestCase):
             self.assertIsNotNone(result.product_feedback_result.review_episodes_path)
             self.assertTrue(result.product_feedback_result.topos_psr_path.exists())
             self.assertTrue(result.product_feedback_result.review_episodes_path.exists())
+            topos_psr_view_path = result.product_feedback_result.topos_psr_path.with_name("topos_psr_bundle.html")
+            self.assertTrue(topos_psr_view_path.exists())
+            topos_psr_view_html = topos_psr_view_path.read_text(encoding="utf-8")
+            self.assertIn("Topos PSR Bundle", topos_psr_view_html)
+            self.assertIn("Reviews used", topos_psr_view_html)
+            self.assertIn("Context views", topos_psr_view_html)
+            self.assertIn("Rows are history prefixes; columns are finite tests", topos_psr_view_html)
+            self.assertIn("history rows / test columns", topos_psr_view_html)
+            self.assertIn("test-legend", topos_psr_view_html)
+            self.assertIn("Raw JSON bundle", topos_psr_view_html)
+            self.assertIsNotNone(result.persistent_state_path)
+            self.assertIsNotNone(result.persistent_state_dashboard_path)
+            self.assertTrue(result.persistent_state_path.exists())
+            self.assertTrue(result.persistent_state_dashboard_path.exists())
+            persistent_state = json.loads(result.persistent_state_path.read_text(encoding="utf-8"))
+            self.assertEqual(persistent_state["state_kind"], "product_feedback_world_state")
+            self.assertEqual(persistent_state["diagnostics"]["query_context"], "sit")
+            self.assertIn("recommended_actions", persistent_state)
+            persistent_state_html = result.persistent_state_dashboard_path.read_text(encoding="utf-8")
+            self.assertIn("Persistent Product Feedback State", persistent_state_html)
+            self.assertIn("Recommended Actions", persistent_state_html)
 
             corpus_synthesis_html = result.corpus_synthesis_result.dashboard_path.read_text(encoding="utf-8")
             self.assertIn("Topos PSR", corpus_synthesis_html)
+            self.assertIn("reviews used", corpus_synthesis_html)
+            self.assertIn("context views", corpus_synthesis_html)
             self.assertIn("Open topos PSR bundle", corpus_synthesis_html)
+            self.assertIn("topos_psr_bundle.html", corpus_synthesis_html)
+            self.assertIn("Raw PSR JSON", corpus_synthesis_html)
 
     def test_query_runner_bootstraps_dashboard_before_search_and_stops_after_consensus(self) -> None:
         class ConsensusRunner(ProductFeedbackQueryAgenticRunner):

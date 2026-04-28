@@ -1113,7 +1113,8 @@ def _dashboard_html(
       <div class="panel span-12">
         <h2>Topos PSR</h2>
         <div class="metrics">
-          {_metric_card("Episode Views", int(topos_summary.get("n_episodes", 0)))}
+          {_metric_card("Reviews Used", int(topos_summary.get("n_review_records") or topos_summary.get("n_episodes") or 0))}
+          {_metric_card("Context Views", int(topos_summary.get("n_context_projected_views") or 0))}
           {_metric_card("Contexts", int(topos_summary.get("n_contexts", 0)))}
           {_metric_card("Mean Local Rank", topos_summary.get("mean_rank", "n/a"), tone="mixed")}
           {_metric_card("Restriction Compatibility", f"{int(topos_summary.get('n_compatible_restrictions', 0))}/{int(topos_summary.get('n_restriction_checks', 0))}", tone="success")}
@@ -1155,7 +1156,7 @@ def _dashboard_html(
           </div>
         </div>
         <div class="footnote">
-          This panel summarizes the presheaf-valued predictive state construction over review contexts. Each local Hankel slice is built fiberwise over a review context, and the restriction table checks compatibility across context projections.
+          This panel summarizes the presheaf-valued predictive state construction over review contexts. Reviews used counts normalized feedback records; context views counts the projections of those reviews into local Hankel slices, so one review can contribute to several contexts.
         </div>
       </div>
 

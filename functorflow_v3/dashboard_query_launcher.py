@@ -857,13 +857,16 @@ class DashboardQueryLauncher:
                 return None
             if str(run_state.get("status") or "") != "complete":
                 return None
-            if self._normalize_execution_mode(run_state.get("execution_mode")) not in {"quick", "interactive"}:
-                return None
             route_name = str(run_state.get("route_name") or "")
-            if route_name not in {"democritus", "company_similarity"}:
+            if route_name not in {"democritus", "company_similarity", "product_feedback"}:
+                return None
+            execution_mode = self._normalize_execution_mode(run_state.get("execution_mode"))
+            if execution_mode not in {"quick", "interactive"} and route_name != "product_feedback":
                 return None
             query = " ".join(str(query_override or run_state.get("query") or "").split()).strip()
             llm_token_budget = self._run_llm_token_budget(dict(run_state))
+            product_state = self._product_feedback_world_state(dict(run_state)) if route_name == "product_feedback" else {}
+            product_transition = self._product_feedback_state_transition(dict(run_state)) if route_name == "product_feedback" else {}
         if not query:
             return None
         submission_overrides: dict[str, object] = {"route": route_name}
@@ -890,11 +893,31 @@ class DashboardQueryLauncher:
             submission_overrides["company_similarity_year_start"] = int(company_similarity_year_start)
         if company_similarity_year_end is not None:
             submission_overrides["company_similarity_year_end"] = int(company_similarity_year_end)
-        queued_note = (
-            f"Queued as a deep follow-up to {run_id}."
-            if not submission_overrides
-            else f"Queued as a deep follow-up to {run_id} using the curated checkpoint selection."
-        )
+        if route_name == "product_feedback":
+            state_path = self._product_feedback_world_state_path(dict(run_state))
+            if state_path is not None:
+                submission_overrides["parent_product_state_path"] = str(state_path)
+            transition_actions = [
+                dict(item) for item in list(product_transition.get("recommended_actions") or []) if isinstance(item, dict)
+            ]
+            state_actions = [dict(item) for item in list(product_state.get("recommended_actions") or []) if isinstance(item, dict)]
+            actions = transition_actions or state_actions
+            action = actions[0] if actions else {}
+            action_name = str(action.get("action") or "")
+            if action_name in {"accept_answer", "accept_descriptive_answer", "accept_with_gluing_caveat"}:
+                return None
+            config_patch = dict(action.get("config_patch") or {})
+            for key in ("product_target_docs", "product_max_docs", "analysis_question"):
+                if key in config_patch and config_patch[key] not in (None, ""):
+                    submission_overrides[key] = config_patch[key]
+        if route_name == "product_feedback":
+            queued_note = f"Queued as a deeper product-feedback probe from the persisted world state for {run_id}."
+        else:
+            queued_note = (
+                f"Queued as a deep follow-up to {run_id}."
+                if not submission_overrides
+                else f"Queued as a deep follow-up to {run_id} using the curated checkpoint selection."
+            )
         return self.submit_query(
             query,
             execution_mode="deep",
@@ -902,6 +925,56 @@ class DashboardQueryLauncher:
             submission_overrides=submission_overrides or None,
             queued_note=queued_note,
         )
+
+    @staticmethod
+    def _product_feedback_action_allows_deeper(action: dict[str, object]) -> bool:
+        action_name = str(action.get("action") or "").strip()
+        if not action_name:
+            return bool(action.get("config_patch"))
+        return action_name not in {"accept_answer", "accept_descriptive_answer", "accept_with_gluing_caveat"}
+
+    def _product_feedback_deepen_policy(self, run_state: dict[str, object]) -> dict[str, object]:
+        transition = self._product_feedback_state_transition(run_state)
+        transition_actions = [dict(item) for item in list(transition.get("recommended_actions") or []) if isinstance(item, dict)]
+        for action in transition_actions:
+            if self._product_feedback_action_allows_deeper(action):
+                return {"allow": True, "source": "transition", "action": action}
+            if str(action.get("action") or "") in {"accept_answer", "accept_descriptive_answer", "accept_with_gluing_caveat"}:
+                return {"allow": False, "source": "transition", "action": action}
+        product_state = self._product_feedback_world_state(run_state)
+        state_actions = [dict(item) for item in list(product_state.get("recommended_actions") or []) if isinstance(item, dict)]
+        for action in state_actions:
+            return {"allow": self._product_feedback_action_allows_deeper(action), "source": "state", "action": action}
+        return {"allow": False, "source": "", "action": {}}
+
+    def _product_feedback_world_state_path(self, run_state: dict[str, object]) -> Path | None:
+        outdir_value = str(run_state.get("outdir") or "").strip()
+        if not outdir_value:
+            return None
+        candidates = (
+            Path(outdir_value) / "product_feedback" / "product_feedback_run" / "prometheus_state" / "product_feedback_world_state.json",
+            Path(outdir_value) / "product_feedback_run" / "prometheus_state" / "product_feedback_world_state.json",
+            Path(outdir_value) / "prometheus_state" / "product_feedback_world_state.json",
+        )
+        for path in candidates:
+            if path.exists():
+                return path
+        return None
+
+    def _product_feedback_world_state(self, run_state: dict[str, object]) -> dict[str, object]:
+        path = self._product_feedback_world_state_path(run_state)
+        return self._read_json_dict(path) if path is not None else {}
+
+    def _product_feedback_state_transition_path(self, run_state: dict[str, object]) -> Path | None:
+        state_path = self._product_feedback_world_state_path(run_state)
+        if state_path is None:
+            return None
+        transition_path = state_path.with_name("product_feedback_state_transition.json")
+        return transition_path if transition_path.exists() else None
+
+    def _product_feedback_state_transition(self, run_state: dict[str, object]) -> dict[str, object]:
+        path = self._product_feedback_state_transition_path(run_state)
+        return self._read_json_dict(path) if path is not None else {}
 
     def request_session_run_retrieve_more(
         self,
@@ -2799,6 +2872,29 @@ class DashboardQueryLauncher:
         run_state["research_profile_class"] = research_profile.get("class_name")
         run_state["research_profile_label"] = research_profile.get("label")
         run_state["research_profile_note"] = research_profile.get("note")
+        if str(run_state.get("route_name") or "") == "product_feedback":
+            product_state = self._product_feedback_world_state(run_state)
+            if product_state:
+                diagnostics = dict(product_state.get("diagnostics") or {})
+                support = dict(diagnostics.get("query_context_support") or {})
+                actions = [dict(item) for item in list(product_state.get("recommended_actions") or []) if isinstance(item, dict)]
+                run_state["world_state_confidence"] = str(product_state.get("confidence") or "")
+                run_state["world_state_context"] = str(diagnostics.get("query_context") or "")
+                run_state["world_state_support_label"] = (
+                    f"{int(support.get('episode_views') or 0)} context view"
+                    f"{'s' if int(support.get('episode_views') or 0) != 1 else ''}"
+                )
+                if actions:
+                    run_state["world_state_action_label"] = str(actions[0].get("label") or "")
+                    run_state["world_state_action_rationale"] = str(actions[0].get("rationale") or "")
+            transition = self._product_feedback_state_transition(run_state)
+            if transition:
+                actions = [dict(item) for item in list(transition.get("recommended_actions") or []) if isinstance(item, dict)]
+                run_state["world_state_transition_label"] = str(transition.get("assessment") or "")
+                if actions:
+                    run_state["world_state_transition_action"] = str(actions[0].get("label") or "")
+                    run_state["world_state_transition_rationale"] = str(actions[0].get("rationale") or "")
+            run_state["world_state_can_deepen"] = bool(self._product_feedback_deepen_policy(run_state).get("allow"))
         return run_state
 
     def _render_artifact_page(self) -> str:
@@ -4115,7 +4211,12 @@ class DashboardQueryLauncher:
         demo_tour_markup = self._render_demo_tour_markup(demo_queries)
         execution_mode_markup = ""
         if execution_mode_enabled:
-            execution_mode_markup = """
+            deep_route_hint = (
+                "deep research routes may still take several minutes even in quick mode."
+                if title_raw.lower() == "prometheus"
+                else "deep research routes like Democritus or company similarity may still take several minutes even in quick mode."
+            )
+            execution_mode_markup = f"""
             <fieldset class="execution-mode-fieldset">
               <legend>Execution depth</legend>
               <label class="execution-mode-option">
@@ -4132,7 +4233,7 @@ class DashboardQueryLauncher:
               </label>
               <p class="execution-mode-hint">
                 Latency guide: filing lookups are usually quickest, product evaluation can take longer,
-                interactive mode pauses earlier for inspection, and deep research routes like Democritus or company similarity may still take several minutes even in quick mode.
+                interactive mode pauses earlier for inspection, and {deep_route_hint}
               </p>
             </fieldset>
             """
@@ -4189,12 +4290,21 @@ class DashboardQueryLauncher:
           {demo_tour_markup}
         """
         if session_mode:
+            if title_raw.lower() == "prometheus":
+                session_intro_heading = "Ready for a research question."
+                session_intro_body = waiting_message
+            else:
+                session_intro_heading = "The prompt window stays open for your next question."
+                session_intro_body = (
+                    f"{waiting_message} Longer runs can keep working in the background, "
+                    "and you can open completed results from the session run list whenever they are ready."
+                )
             form_or_status = f"""
           <section class="session-shell">
             <div class="session-intro">
               <p class="status-kicker">Persistent Session</p>
-              <h2>The prompt window stays open for your next question.</h2>
-              <p>{waiting_message} Longer runs can keep working in the background, and you can open completed results from the session run list whenever they are ready.</p>
+              <h2>{session_intro_heading}</h2>
+              <p>{session_intro_body}</p>
             </div>
             <form method="post" action="/submit" class="query-form">
               <label for="query">{query_label}</label>
@@ -4261,7 +4371,7 @@ class DashboardQueryLauncher:
                 var stopAction = (!archived && ((run.status || '') === 'queued' || (run.status || '') === 'routing' || (run.status || '') === 'running'))
                   ? '<div class="run-actions"><button type="button" class="run-stop-button" onclick="requestStopRun(\\'' + escapeHtml(run.run_id || '') + '\\')">Stop query</button></div>'
                   : '';
-                var deepenAction = (!archived && (run.status || '') === 'complete' && (executionMode === 'quick' || executionMode === 'interactive') && ((run.route_name || '') === 'democritus' || (run.route_name || '') === 'company_similarity'))
+                var deepenAction = (!archived && (run.status || '') === 'complete' && ((((run.route_name || '') === 'product_feedback') && !!run.world_state_can_deepen) || ((executionMode === 'quick' || executionMode === 'interactive') && ((run.route_name || '') === 'democritus' || (run.route_name || '') === 'company_similarity'))))
                   ? '<div class="run-actions"><button type="button" class="run-deepen-button" onclick="requestDeepRun(\\'' + escapeHtml(run.run_id || '') + '\\')">Go deeper</button></div>'
                   : '';
                 var rerunAction = archived
@@ -4297,6 +4407,17 @@ class DashboardQueryLauncher:
                     + (run.current_stage_label ? ' · ' + escapeHtml(run.current_stage_label) : '')
                     + '</div>'
                   : '';
+                var worldState = run.world_state_confidence
+                  ? '<div class="run-meta"><strong>World state:</strong> '
+                    + escapeHtml(run.world_state_confidence)
+                    + (run.world_state_context ? ' · context ' + escapeHtml(run.world_state_context) : '')
+                    + (run.world_state_support_label ? ' · ' + escapeHtml(run.world_state_support_label) : '')
+                    + (run.world_state_action_label ? '<br><strong>Next:</strong> ' + escapeHtml(run.world_state_action_label) : '')
+                    + (run.world_state_action_rationale ? ' · ' + escapeHtml(run.world_state_action_rationale) : '')
+                    + (run.world_state_transition_label ? '<br><strong>Transition:</strong> ' + escapeHtml(run.world_state_transition_label) : '')
+                    + (run.world_state_transition_action ? ' · ' + escapeHtml(run.world_state_transition_action) : '')
+                    + '</div>'
+                  : '';
                 return ''
                   + '<article class="' + cardClass + '">'
                   + '<div class="run-topline">'
@@ -4315,6 +4436,7 @@ class DashboardQueryLauncher:
                   + llmUsage
                   + llmEstimatedCost
                   + unconscious
+                  + worldState
                   + outdir
                   + artifact
                   + '</article>';
@@ -5065,8 +5187,13 @@ class DashboardQueryLauncher:
             deepen_action_markup = (
                 f'<div class="run-actions"><button type="button" class="run-deepen-button" onclick="requestDeepRun(\'{esc(run.get("run_id") or "")}\')">Go deeper</button></div>'
                 if (not archived and run.get("status") == "complete")
-                and run.get("execution_mode") in {"quick", "interactive"}
-                and run.get("route_name") in {"democritus", "company_similarity"}
+                and (
+                    (run.get("route_name") == "product_feedback" and bool(run.get("world_state_can_deepen")))
+                    or (
+                        run.get("execution_mode") in {"quick", "interactive"}
+                        and run.get("route_name") in {"democritus", "company_similarity"}
+                    )
+                )
                 else ""
             )
             rerun_action_markup = (
@@ -5100,6 +5227,35 @@ class DashboardQueryLauncher:
                 + (f' · {esc(run.get("current_stage_label"))}' if run.get("current_stage_label") else "")
                 + "</div>"
                 if run.get("eta_label") or run.get("parallelism_label") or run.get("current_stage_label")
+                else ""
+            )
+            world_state_markup = (
+                '<div class="run-meta"><strong>World state:</strong> '
+                f'{esc(run.get("world_state_confidence") or "")}'
+                + (f' · context {esc(run.get("world_state_context") or "")}' if run.get("world_state_context") else "")
+                + (f' · {esc(run.get("world_state_support_label") or "")}' if run.get("world_state_support_label") else "")
+                + (
+                    f'<br><strong>Next:</strong> {esc(run.get("world_state_action_label") or "")}'
+                    if run.get("world_state_action_label")
+                    else ""
+                )
+                + (
+                    f' · {esc(run.get("world_state_action_rationale") or "")}'
+                    if run.get("world_state_action_rationale")
+                    else ""
+                )
+                + (
+                    f'<br><strong>Transition:</strong> {esc(run.get("world_state_transition_label") or "")}'
+                    if run.get("world_state_transition_label")
+                    else ""
+                )
+                + (
+                    f' · {esc(run.get("world_state_transition_action") or "")}'
+                    if run.get("world_state_transition_action")
+                    else ""
+                )
+                + "</div>"
+                if run.get("world_state_confidence")
                 else ""
             )
             research_note_markup = (
@@ -5148,6 +5304,7 @@ class DashboardQueryLauncher:
                 f"{llm_usage_markup}"
                 f"{llm_estimated_cost_markup}"
                 f"{unconscious_markup}"
+                f"{world_state_markup}"
                 f"{outdir_markup}"
                 f"{artifact_markup}"
                 "</article>"
