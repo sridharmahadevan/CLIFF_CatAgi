@@ -264,6 +264,7 @@ class FF2QueryRouterConfig:
     sec_retrieval_user_agent: str = ""
     company_similarity_year_start: int | None = None
     company_similarity_year_end: int | None = None
+    company_similarity_layer: str = "temporal_diffusion"
     sec_form_types: tuple[str, ...] = ("10-K", "10-Q")
     sec_company_limit: int = 3
     sec_discovery_only: bool = False
@@ -353,6 +354,7 @@ class FF2QueryRouterConfig:
                 if self.company_similarity_year_end is not None
                 else None
             ),
+            company_similarity_layer=str(self.company_similarity_layer or "temporal_diffusion"),
             sec_form_types=tuple(self.sec_form_types),
             sec_company_limit=self.sec_company_limit,
             sec_discovery_only=self.sec_discovery_only,
@@ -749,6 +751,7 @@ class FF2QueryRouter:
             execution_mode=self.config.execution_mode,
             year_start=self.config.company_similarity_year_start,
             year_end=self.config.company_similarity_year_end,
+            similarity_layer=self.config.company_similarity_layer,
         ).run()
         return FF2QueryRouterRunResult(
             route_decision=decision,
@@ -1138,6 +1141,7 @@ def _build_router_from_args_with_outdir(
             sec_retrieval_user_agent=args.sec_retrieval_user_agent,
             company_similarity_year_start=getattr(args, "company_similarity_year_start", None),
             company_similarity_year_end=getattr(args, "company_similarity_year_end", None),
+            company_similarity_layer=getattr(args, "company_similarity_layer", "temporal_diffusion"),
             sec_form_types=tuple(args.sec_form) if args.sec_form else ("10-K", "10-Q"),
             sec_company_limit=args.sec_company_limit,
             sec_discovery_only=args.sec_discovery_only,
@@ -1291,6 +1295,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--product-discovery-only", action="store_true")
     parser.add_argument("--company-similarity-year-start", type=int, default=None)
     parser.add_argument("--company-similarity-year-end", type=int, default=None)
+    parser.add_argument(
+        "--company-similarity-layer",
+        choices=("temporal_diffusion", "prometheus_topos", "both"),
+        default="temporal_diffusion",
+        help="Similarity layer for company comparison.",
+    )
     parser.add_argument("--sec-target-filings", type=int, default=None)
     parser.add_argument(
         "--sec-retrieval-user-agent",

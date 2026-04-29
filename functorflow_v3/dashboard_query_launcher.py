@@ -76,6 +76,7 @@ class DashboardQueryLauncherConfig:
     auto_open_browser: bool = True
     hero_image_path: Path | None = None
     hero_image_alt: str = ""
+    native_routes: tuple[str, ...] = ()
 
 
 class DashboardQueryLauncher:
@@ -850,6 +851,7 @@ class DashboardQueryLauncher:
         democritus_retrieval_refinement: str = "",
         company_similarity_year_start: int | None = None,
         company_similarity_year_end: int | None = None,
+        company_similarity_layer: str | None = None,
     ) -> str | None:
         with self._lock:
             run_state = self._session_runs_by_id.get(run_id)
@@ -893,6 +895,8 @@ class DashboardQueryLauncher:
             submission_overrides["company_similarity_year_start"] = int(company_similarity_year_start)
         if company_similarity_year_end is not None:
             submission_overrides["company_similarity_year_end"] = int(company_similarity_year_end)
+        if company_similarity_layer:
+            submission_overrides["company_similarity_layer"] = str(company_similarity_layer)
         if route_name == "product_feedback":
             state_path = self._product_feedback_world_state_path(dict(run_state))
             if state_path is not None:
@@ -1142,21 +1146,23 @@ class DashboardQueryLauncher:
             return None
         return Path(manifest_path_raw).resolve().with_name(_COMPANY_SIMILARITY_CURATION_STATE)
 
-    def _load_company_similarity_checkpoint_curation(self, payload: dict[str, object]) -> dict[str, int]:
+    def _load_company_similarity_checkpoint_curation(self, payload: dict[str, object]) -> dict[str, object]:
         suggested = dict(payload.get("suggested_year_window") or {})
         default_start = int(suggested.get("start") or dict(payload.get("year_window") or {}).get("start") or 2002)
         default_end = int(suggested.get("end") or dict(payload.get("year_window") or {}).get("end") or default_start)
+        default_layer = str(payload.get("similarity_layer") or "temporal_diffusion")
         curation_path = self._company_similarity_checkpoint_curation_path(payload)
         if curation_path is None or not curation_path.exists():
-            return {"year_start": default_start, "year_end": default_end}
+            return {"year_start": default_start, "year_end": default_end, "similarity_layer": default_layer}
         curation = self._read_json_dict(curation_path)
         try:
             return {
                 "year_start": int(curation.get("year_start") or default_start),
                 "year_end": int(curation.get("year_end") or default_end),
+                "similarity_layer": str(curation.get("similarity_layer") or default_layer),
             }
         except (TypeError, ValueError):
-            return {"year_start": default_start, "year_end": default_end}
+            return {"year_start": default_start, "year_end": default_end, "similarity_layer": default_layer}
 
     def _save_company_similarity_checkpoint_curation(
         self,
@@ -1164,6 +1170,7 @@ class DashboardQueryLauncher:
         *,
         year_start: int,
         year_end: int,
+        similarity_layer: str = "temporal_diffusion",
     ) -> Path | None:
         curation_path = self._company_similarity_checkpoint_curation_path(payload)
         if curation_path is None:
@@ -1173,6 +1180,7 @@ class DashboardQueryLauncher:
             {
                 "year_start": int(year_start),
                 "year_end": int(year_end),
+                "similarity_layer": str(similarity_layer or "temporal_diffusion"),
                 "updated_at": time.time(),
             },
         )
@@ -1846,8 +1854,9 @@ class DashboardQueryLauncher:
   <body>
     <main>
       {banner_markup}
-      <form method="post" action="/checkpoint-action">
+      <form method="post" action="checkpoint-action">
         <input type="hidden" name="run_id" value="{html.escape(run_id)}" />
+        <input type="hidden" name="checkpoint_artifact_path" value="{html.escape(str(artifact_path.resolve()))}" />
         <section class="panel hero-grid">
           <div>
             <p class="eyebrow">Democritus Interactive Mode</p>
@@ -1987,6 +1996,22 @@ class DashboardQueryLauncher:
         curation = self._load_company_similarity_checkpoint_curation(payload)
         year_start = int(curation.get("year_start") or 2002)
         year_end = int(curation.get("year_end") or year_start)
+        similarity_layer = str(curation.get("similarity_layer") or "temporal_diffusion")
+        layer_options = {
+            "temporal_diffusion": "Temporal diffusion",
+            "prometheus_topos": "Prometheus topos",
+            "both": "Both layers",
+        }
+        layer_options_markup = "".join(
+            '<option value="'
+            + html.escape(value)
+            + '"'
+            + (" selected" if value == similarity_layer else "")
+            + ">"
+            + html.escape(label)
+            + "</option>"
+            for value, label in layer_options.items()
+        )
         suggested = dict(payload.get("suggested_year_window") or {})
         default_window = dict(payload.get("year_window") or {})
         overlap_years = [
@@ -2069,7 +2094,7 @@ class DashboardQueryLauncher:
       .control-card {{ border: 1px solid var(--line); border-radius: 20px; padding: 18px; background: #fffdf9; display: grid; gap: 12px; }}
       .field-grid {{ display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       label {{ display: grid; gap: 8px; color: var(--muted); font-size: 0.92rem; }}
-      input {{
+      input, select {{
         width: 100%;
         border: 1px solid var(--line);
         border-radius: 14px;
@@ -2107,8 +2132,9 @@ class DashboardQueryLauncher:
   <body>
     <main>
       {banner_markup}
-      <form method="post" action="/checkpoint-action">
+      <form method="post" action="checkpoint-action">
         <input type="hidden" name="run_id" value="{html.escape(run_id)}" />
+        <input type="hidden" name="checkpoint_artifact_path" value="{html.escape(str(artifact_path.resolve()))}" />
         <section class="panel">
           <p class="eyebrow">Company Similarity Interactive Mode</p>
           <div class="hero-grid">
@@ -2140,6 +2166,9 @@ class DashboardQueryLauncher:
                   <input type="number" name="company_similarity_year_end" min="2002" max="2100" value="{year_end}" />
                 </label>
               </div>
+              <label>Similarity layer
+                <select name="company_similarity_layer">{layer_options_markup}</select>
+              </label>
               <p class="trace">If the deeper run needs more years than the current cached branches cover, CLIFF will rebuild the missing range before the final comparison.</p>
               <div class="form-actions">
                 <button type="submit" class="secondary-button" name="action_kind" value="save">Save year window</button>
@@ -2170,6 +2199,7 @@ class DashboardQueryLauncher:
         action_kind: str,
         year_start: int,
         year_end: int,
+        similarity_layer: str = "temporal_diffusion",
     ) -> tuple[str, HTTPStatus]:
         payload = self._load_company_similarity_checkpoint_payload(artifact_path)
         if not payload:
@@ -2181,16 +2211,20 @@ class DashboardQueryLauncher:
         year_end = max(2002, int(year_end))
         if year_start > year_end:
             year_start, year_end = year_end, year_start
+        similarity_layer = str(similarity_layer or "temporal_diffusion").strip()
+        if similarity_layer not in {"temporal_diffusion", "prometheus_topos", "both"}:
+            similarity_layer = "temporal_diffusion"
         self._save_company_similarity_checkpoint_curation(
             payload,
             year_start=year_start,
             year_end=year_end,
+            similarity_layer=similarity_layer,
         )
         if action_kind == "save":
             return self._render_company_similarity_checkpoint_page(
                 run_id,
                 artifact_path=artifact_path,
-                banner_message=f"Saved the year window {year_start} to {year_end} for this checkpoint.",
+                banner_message=f"Saved {similarity_layer.replace('_', ' ')} with year window {year_start} to {year_end} for this checkpoint.",
                 banner_tone="success",
             ), HTTPStatus.OK
         if action_kind == "deepen":
@@ -2198,10 +2232,11 @@ class DashboardQueryLauncher:
                 run_id,
                 company_similarity_year_start=year_start,
                 company_similarity_year_end=year_end,
+                company_similarity_layer=similarity_layer,
             )
             return self._render_checkpoint_followup_queued_page(
                 heading="Deep Company-Similarity Run Queued",
-                message=f"Queued a deep company comparison for fiscal years {year_start} through {year_end}.",
+                message=f"Queued a deep company comparison using {similarity_layer.replace('_', ' ')} for fiscal years {year_start} through {year_end}.",
                 run_id=run_id,
                 new_run_id=new_run_id,
             ), HTTPStatus.OK
@@ -2226,7 +2261,7 @@ class DashboardQueryLauncher:
             else ""
         )
         artifact_link = (
-            f'<p><a href="/run-artifact?run_id={html.escape(new_run_id)}" target="_blank" rel="noopener noreferrer">Open the new run</a></p>'
+            f'<p><a href="run-artifact?run_id={html.escape(new_run_id)}" target="_blank" rel="noopener noreferrer">Open the new run</a></p>'
             if new_run_id
             else ""
         )
@@ -2234,7 +2269,6 @@ class DashboardQueryLauncher:
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta http-equiv="refresh" content="1; url=/" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{html.escape(self.config.title)}</title>
     <style>
@@ -2253,8 +2287,8 @@ class DashboardQueryLauncher:
         <p>{html.escape(message)}</p>
         {new_run_markup}
         {artifact_link}
-        <p><a href="/">Return to the CLIFF session</a></p>
-        <p><a href="/run-artifact?run_id={html.escape(run_id)}">Back to the checkpoint</a></p>
+        <p><a href="./">Return to the CLIFF session</a></p>
+        <p><a href="run-artifact?run_id={html.escape(run_id)}">Back to the checkpoint</a></p>
       </section>
     </main>
   </body>
@@ -2272,11 +2306,15 @@ class DashboardQueryLauncher:
         retrieval_refinement: str,
         company_similarity_year_start: int | None = None,
         company_similarity_year_end: int | None = None,
+        company_similarity_layer: str | None = None,
+        checkpoint_artifact_path: str = "",
     ) -> tuple[str, HTTPStatus]:
         with self._lock:
             run_state = dict(self._session_runs_by_id.get(run_id) or {})
-        artifact_path_value = str(run_state.get("artifact_path") or "").strip()
-        artifact_path = Path(artifact_path_value).resolve() if artifact_path_value else None
+        artifact_path = self._resolve_run_file_path(run_id, checkpoint_artifact_path) if checkpoint_artifact_path else None
+        if artifact_path is None:
+            artifact_path_value = str(run_state.get("artifact_path") or "").strip()
+            artifact_path = Path(artifact_path_value).resolve() if artifact_path_value else None
         if artifact_path is None or not artifact_path.exists():
             body = self._render_text_file_as_html(
                 self.config.title,
@@ -2290,6 +2328,7 @@ class DashboardQueryLauncher:
                 action_kind=action_kind,
                 year_start=int(company_similarity_year_start or 2002),
                 year_end=int(company_similarity_year_end or company_similarity_year_start or 2002),
+                similarity_layer=company_similarity_layer or "temporal_diffusion",
             )
         payload = self._load_democritus_checkpoint_payload(artifact_path)
         documents = list(payload.get("documents") or [])
@@ -2554,6 +2593,9 @@ class DashboardQueryLauncher:
                     payload = self.rfile.read(content_length).decode("utf-8", errors="replace")
                     parsed_payload = parse_qs(payload)
                     run_id = " ".join(parsed_payload.get("run_id", [""])[0].split()).strip()
+                    checkpoint_artifact_path = " ".join(
+                        parsed_payload.get("checkpoint_artifact_path", [""])[0].split()
+                    ).strip()
                     action_kind = " ".join(parsed_payload.get("action_kind", [""])[0].split()).strip().lower()
                     selected_pdf_paths = tuple(
                         " ".join(item.split()).strip()
@@ -2586,6 +2628,9 @@ class DashboardQueryLauncher:
                         company_similarity_year_end = int(year_end_raw) if year_end_raw else None
                     except ValueError:
                         company_similarity_year_end = None
+                    company_similarity_layer = " ".join(
+                        parsed_payload.get("company_similarity_layer", ["temporal_diffusion"])[0].split()
+                    ).strip()
                     body, status = launcher._handle_checkpoint_action(
                         run_id=run_id,
                         action_kind=action_kind,
@@ -2596,6 +2641,8 @@ class DashboardQueryLauncher:
                         retrieval_refinement=retrieval_refinement,
                         company_similarity_year_start=company_similarity_year_start,
                         company_similarity_year_end=company_similarity_year_end,
+                        company_similarity_layer=company_similarity_layer,
+                        checkpoint_artifact_path=checkpoint_artifact_path,
                     )
                     self._send_html(body, status=status)
                     return
@@ -2869,6 +2916,14 @@ class DashboardQueryLauncher:
             run_state["llm_estimated_cost_usd"] = llm_usage_summary.get("estimated_cost_usd")
             run_state["llm_estimated_cost_label"] = llm_usage_summary.get("estimated_cost_label")
         research_profile = self._route_research_profile(run_state.get("route_name"))
+        if str(run_state.get("route_name") or "").strip().lower() in {
+            str(item).strip().lower() for item in self.config.native_routes
+        }:
+            research_profile = {
+                "class_name": "quick-answer",
+                "label": "Native build",
+                "note": "Deterministic Prometheus builder; routing is already resolved.",
+            }
         run_state["research_profile_class"] = research_profile.get("class_name")
         run_state["research_profile_label"] = research_profile.get("label")
         run_state["research_profile_note"] = research_profile.get("note")
@@ -4003,7 +4058,7 @@ class DashboardQueryLauncher:
         return None
 
     def _launcher_href_for_run_file(self, run_id: str, file_path: Path) -> str:
-        return "/run-file?run_id=" + quote(run_id, safe="") + "&path=" + quote(str(file_path.resolve()), safe="")
+        return "run-file?run_id=" + quote(run_id, safe="") + "&path=" + quote(str(file_path.resolve()), safe="")
 
     def _rewrite_artifact_links(self, html_body: str, *, run_id: str, source_path: Path) -> str:
         pattern = re.compile(r'(?P<attr>href|src)=(?P<quote>["\'])(?P<target>.+?)(?P=quote)', flags=re.IGNORECASE)
@@ -4022,6 +4077,9 @@ class DashboardQueryLauncher:
                 or lowered.startswith("javascript:")
                 or lowered.startswith("data:")
                 or target.startswith("/run-file?")
+                or target.startswith("run-file?")
+                or target.startswith("/run-artifact?")
+                or target.startswith("run-artifact?")
             ):
                 return match.group(0)
             resolved: Path | None = None
@@ -4377,14 +4435,16 @@ class DashboardQueryLauncher:
                 var rerunAction = archived
                   ? '<div class="run-actions"><button type="button" class="run-deepen-button" onclick="requestArchivedRerun(\\'' + escapeHtml(run.run_id || '') + '\\')">Re-run query</button></div>'
                   : '';
-                var wrongRouteAction = ((run.status || '') === 'complete' && (run.route_name || ''))
+                var nativeRoutes = {json.dumps(list(self.config.native_routes))};
+                var isNativeRoute = nativeRoutes.indexOf(String(run.route_name || '').toLowerCase()) >= 0;
+                var wrongRouteAction = ((run.status || '') === 'complete' && (run.route_name || '') && !isNativeRoute)
                   ? '<div class="run-actions"><button type="button" class="run-deepen-button" onclick="requestWrongRoute(\\'' + escapeHtml(run.run_id || '') + '\\')">Wrong route</button></div>'
                   : '';
                 var inspectLabel = ((run.status || '') === 'queued' || (run.status || '') === 'routing' || (run.status || '') === 'running' || (run.status || '') === 'stopping')
                   ? 'Inspect run'
                   : 'Open result';
                 var openAction = run.artifact_path
-                  ? '<div class="run-actions"><a class="run-link" href="/run-artifact?run_id=' + encodeURIComponent(run.run_id || '') + '" target="_blank" rel="noopener noreferrer">' + inspectLabel + '</a></div>'
+                  ? '<div class="run-actions"><a class="run-link" href="run-artifact?run_id=' + encodeURIComponent(run.run_id || '') + '" target="_blank" rel="noopener noreferrer">' + inspectLabel + '</a></div>'
                   : '';
                 var outdir = run.outdir ? '<div class="run-meta"><strong>Output:</strong> <code>' + escapeHtml(run.outdir) + '</code></div>' : '';
                 var artifact = run.artifact_path ? '<div class="run-meta"><strong>Artifact:</strong> <code>' + escapeHtml(run.artifact_path) + '</code></div>' : '';
@@ -5201,13 +5261,15 @@ class DashboardQueryLauncher:
                 if archived
                 else ""
             )
+            native_route_names = {str(item).strip().lower() for item in self.config.native_routes}
+            is_native_route = str(run.get("route_name") or "").strip().lower() in native_route_names
             wrong_route_action_markup = (
                 f'<div class="run-actions"><button type="button" class="run-deepen-button" onclick="requestWrongRoute(\'{esc(run.get("run_id") or "")}\')">Wrong route</button></div>'
-                if run.get("status") == "complete" and run.get("route_name")
+                if run.get("status") == "complete" and run.get("route_name") and not is_native_route
                 else ""
             )
             open_action_markup = (
-                f'<div class="run-actions"><a class="run-link" href="/run-artifact?run_id={esc(run.get("run_id") or "")}" target="_blank" rel="noopener noreferrer">{"Inspect run" if run.get("status") in {"queued", "routing", "running", "stopping"} else "Open result"}</a></div>'
+                f'<div class="run-actions"><a class="run-link" href="run-artifact?run_id={esc(run.get("run_id") or "")}" target="_blank" rel="noopener noreferrer">{"Inspect run" if run.get("status") in {"queued", "routing", "running", "stopping"} else "Open result"}</a></div>'
                 if run.get("artifact_path")
                 else ""
             )

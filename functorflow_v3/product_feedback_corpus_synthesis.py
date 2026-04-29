@@ -97,6 +97,79 @@ def _render_list(items: list[object], *, empty: str) -> str:
     return "".join(f'<li>{html.escape(str(item))}</li>' for item in items[:8])
 
 
+def _short_action(action: object) -> str:
+    text = " ".join(str(action or "").strip().split())
+    return text[:1].upper() + text[1:] if text else ""
+
+
+def _primary_repair(payload: dict[str, object]) -> dict[str, object]:
+    hypotheses = [
+        dict(item)
+        for item in list(payload.get("causal_hypotheses") or [])
+        if isinstance(item, dict)
+    ]
+    risk_aspects = [str(item) for item in list(payload.get("top_return_risk_aspects") or [])]
+    negative_aspects = [str(item) for item in list(payload.get("top_negative_aspects") or [])]
+    positive_aspects = [str(item) for item in list(payload.get("top_positive_aspects") or [])]
+    topos_summary = dict(payload.get("topos_summary") or {})
+    restriction_total = int(topos_summary.get("n_restriction_checks") or 0)
+    restriction_ok = int(topos_summary.get("n_compatible_restrictions") or 0)
+    restriction_tense = max(0, restriction_total - restriction_ok)
+
+    reducing = [
+        item
+        for item in hypotheses
+        if str(item.get("relation") or "").upper() == "REDUCES"
+    ]
+    candidates = reducing or hypotheses
+    candidates.sort(
+        key=lambda item: (
+            -float(item.get("confidence") or 0.0),
+            -int(item.get("support_count") or 0),
+            str(item.get("src") or ""),
+        )
+    )
+    best = candidates[0] if candidates else {}
+    best_action = _short_action(best.get("recommended_action"))
+    if not best_action:
+        if bool(payload.get("return_warning_recommended")) or risk_aspects:
+            best_action = "Offer a return-safe correction path and collect the missing reason before refunding."
+        elif positive_aspects:
+            best_action = f"Preserve the satisfied local state around {positive_aspects[0]} and monitor weaker contexts."
+        else:
+            best_action = "Collect a clearer return reason before choosing refund, replacement, or product-page correction."
+
+    if reducing:
+        problem = str(best.get("src") or (negative_aspects[0] if negative_aspects else "local experience friction"))
+        explanation = (
+            f"The strongest repair signal is {problem}. Prometheus treats it like a return-reason state: "
+            "find the local obstruction, then recommend the correction that should move that state toward satisfaction."
+        )
+    elif negative_aspects:
+        problem = f"{negative_aspects[0]} concern"
+        explanation = (
+            f"The corpus is mostly successful, but {negative_aspects[0]} is the clearest local weakness. "
+            "The correction should preserve the positive experience while tightening that local state."
+        )
+    else:
+        problem = "mostly satisfied experience"
+        explanation = (
+            "The retrieved corpus glues into a mostly satisfied product experience. "
+            "The best correction is conservative: reinforce the conditions under which the product works."
+        )
+
+    return {
+        "problem": problem,
+        "action": best_action,
+        "confidence": float(best.get("confidence") or payload.get("overall_score") or 0.0),
+        "support": int(best.get("support_count") or payload.get("feedback_count") or 0),
+        "tense_restrictions": restriction_tense,
+        "top_positive": positive_aspects[0] if positive_aspects else "",
+        "top_negative": negative_aspects[0] if negative_aspects else "",
+        "explanation": explanation,
+    }
+
+
 def _render_dashboard_html(
     payload: dict[str, object],
     *,
@@ -112,10 +185,25 @@ def _render_dashboard_html(
     raw_topos_href = _relative_href(Path(str(payload.get("topos_path") or "")), start=dashboard_path.parent) if payload.get("topos_path") else ""
     review_episodes_href = _relative_href(Path(str(payload.get("review_episodes_path") or "")), start=dashboard_path.parent) if payload.get("review_episodes_path") else ""
     workflows = [item.get("summary") if isinstance(item, dict) else item for item in payload.get("usage_workflows") or []]
-    hypotheses = [item.get("statement") if isinstance(item, dict) else item for item in payload.get("causal_hypotheses") or []]
+    hypotheses = []
+    for item in payload.get("causal_hypotheses") or []:
+        if isinstance(item, dict):
+            statement = item.get("statement")
+            if not statement:
+                src = str(item.get("src") or "local state")
+                relation = str(item.get("relation") or "AFFECTS").lower()
+                dst = str(item.get("dst") or "satisfaction")
+                action = _short_action(item.get("recommended_action"))
+                statement = f"{src} {relation} {dst}"
+                if action:
+                    statement = f"{statement}; correction: {action}"
+            hypotheses.append(statement)
+        else:
+            hypotheses.append(item)
     topos_summary = dict(payload.get("topos_summary") or {})
     topos_review_count = int(topos_summary.get("n_review_records") or topos_summary.get("n_episodes") or 0)
     topos_context_views = int(topos_summary.get("n_context_projected_views") or 0)
+    repair = _primary_repair(payload)
     textbook_html = render_textbook_backstop_html(
         recommend_textbook_backstop(str(payload.get("query") or ""), route_name="product_feedback"),
     )
@@ -126,38 +214,81 @@ def _render_dashboard_html(
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Product Feedback Corpus Synthesis</title>
     <style>
-      :root {{ --ink:#16211f; --muted:#5a6661; --paper:#f3ead7; --card:#fffdf8; --line:#d0c0a0; --accent:#0f6d63; }}
+      :root {{ --ink:#172026; --muted:#5f6b73; --paper:#f4f6f1; --card:#fff; --line:#dce1dc; --accent:#226b5f; --good:#1f7a52; --warn:#a46416; }}
       * {{ box-sizing:border-box; }}
-      body {{ margin:0; font-family:Georgia,"Iowan Old Style",serif; color:var(--ink); background:linear-gradient(180deg,#faf6ef 0%,var(--paper) 100%); }}
+      body {{ margin:0; font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:var(--paper); }}
       main {{ width:min(1180px, calc(100vw - 32px)); margin:28px auto 48px; display:grid; gap:18px; }}
-      .panel {{ background:rgba(255,252,246,0.96); border:1px solid var(--line); border-radius:26px; padding:24px; }}
+      .panel {{ background:var(--card); border:1px solid var(--line); border-radius:8px; padding:24px; }}
+      .hero {{ display:grid; grid-template-columns:minmax(0,1fr) 380px; gap:18px; align-items:stretch; }}
+      .decision {{ background:#17322e; color:#fff; border-color:#17322e; display:grid; gap:12px; align-content:start; }}
+      .decision .trace,.decision .eyebrow {{ color:#d8eee7; }}
+      .decision strong {{ font-size:28px; line-height:1.15; }}
+      .story {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }}
+      .story-card {{ border:1px solid #e3e8e2; border-radius:8px; padding:16px; background:#fbfcf8; display:grid; gap:10px; align-content:start; }}
+      .story-card strong {{ font-size:20px; line-height:1.2; }}
       .grid {{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }}
       h1,h2,p,ul {{ margin:0; }}
-      .eyebrow {{ text-transform:uppercase; letter-spacing:0.14em; font-size:12px; margin-bottom:10px; color:var(--accent); }}
+      h1 {{ max-width:850px; font-size:clamp(32px,4vw,56px); line-height:1.03; letter-spacing:0; }}
+      .eyebrow {{ text-transform:uppercase; font-size:12px; font-weight:800; margin-bottom:10px; color:var(--accent); }}
       .trace,.empty {{ color:var(--muted); line-height:1.6; }}
       .chips {{ display:flex; flex-wrap:wrap; gap:10px; margin-top:16px; }}
-      .chip {{ border-radius:999px; padding:8px 12px; background:#edf3f1; color:#184a43; }}
+      .chip {{ border:1px solid #ccd5d0; border-radius:999px; padding:8px 12px; background:#f7faf6; color:#3d4b45; font-weight:700; }}
+      .chip.good {{ border-color:#b7d9c4; background:#eaf6ee; color:var(--good); }}
+      .chip.warn {{ border-color:#ead1aa; background:#fff6e9; color:var(--warn); }}
       ul {{ padding-left:20px; display:grid; gap:8px; }}
       .textbook-list {{ padding-left:20px; display:grid; gap:10px; }}
       .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; }}
       a {{ color:var(--accent); text-decoration:none; font-weight:700; }}
       a:hover {{ text-decoration:underline; }}
       .links {{ margin-top:14px; display:flex; flex-wrap:wrap; gap:12px; }}
-      @media (max-width:920px) {{ .grid {{ grid-template-columns:1fr; }} }}
+      .drilldown {{ border-style:dashed; }}
+      @media (max-width:920px) {{ .hero,.story,.grid {{ grid-template-columns:1fr; }} }}
     </style>
   </head>
   <body>
     <main>
-      <section class="panel">
-        <p class="eyebrow">CLIFF Review Synthesis</p>
+      <section class="panel hero">
+        <div>
+        <p class="eyebrow">Product Experience Repair</p>
         <h1>{esc(payload.get("product_name") or payload.get("query") or "Product feedback synthesis")}</h1>
-        <p class="trace">The conscious layer triggered a second pass that treats the retrieved reviews as one evidence corpus. This page summarizes the glued verdict, major strengths, risk factors, and usage patterns across the analyzed review set.</p>
+        <p class="trace">Prometheus treats the retrieved reviews as a customer-experience corpus. Instead of opening with every PSR diagnostic, it first asks what local experience state the customer is in and what correction would repair it.</p>
         <div class="chips">
           <span class="chip">verdict: {esc(payload.get("verdict"))}</span>
           <span class="chip">overall score: {esc(payload.get("overall_score"))}</span>
           <span class="chip">{esc(payload.get("feedback_count") or 0)} reviews synthesized</span>
-          <span class="chip">return warning: {esc(payload.get("return_warning_recommended"))}</span>
+          <span class="chip {'warn' if payload.get("return_warning_recommended") else 'good'}">return warning: {esc(payload.get("return_warning_recommended"))}</span>
         </div>
+        </div>
+        <section class="panel decision">
+          <p class="eyebrow">Recommended Correction</p>
+          <strong>{esc(repair.get("action"))}</strong>
+          <p class="trace"><strong>{esc(repair.get("problem"))}.</strong> {esc(repair.get("explanation"))}</p>
+          <p class="trace">Confidence {esc(f"{float(repair.get('confidence') or 0.0):.2f}")}; support {esc(repair.get("support"))} review signals.</p>
+        </section>
+      </section>
+      <section class="panel">
+        <p class="eyebrow">Experience Repair Model</p>
+        <div class="story">
+          <article class="story-card">
+            <span class="chip">1. Local experience</span>
+            <strong>{esc(repair.get("problem"))}</strong>
+            <p class="trace">Return reasons and review snippets become local states such as comfort, assembly, fit, durability, use, and decision.</p>
+          </article>
+          <article class="story-card">
+            <span class="chip">2. Topos check</span>
+            <strong>{esc(repair.get("tense_restrictions"))} tense restriction(s)</strong>
+            <p class="trace">The system checks whether those local states glue into one stable product experience or expose a useful obstruction.</p>
+          </article>
+          <article class="story-card">
+            <span class="chip">3. Correction</span>
+            <strong>{esc(repair.get("action"))}</strong>
+            <p class="trace">Counterfactual reasoning asks which correction would turn the negative local state into a better-supported satisfaction state.</p>
+          </article>
+        </div>
+      </section>
+      <section class="panel drilldown">
+        <p class="eyebrow">Technical Drill-Downs</p>
+        <p class="trace">Detailed dashboards and raw data remain available for inspection, but they are no longer the first thing the viewer has to parse.</p>
         <div class="links">
           {f'<a href="{esc(dashboard_href)}" target="_blank" rel="noreferrer">Open product feedback dashboard</a>' if dashboard_href else ''}
           {f'<a href="{esc(report_href)}" target="_blank" rel="noreferrer">Open product feedback report</a>' if report_href else ''}
@@ -167,8 +298,8 @@ def _render_dashboard_html(
         </div>
       </section>
       <section class="panel">
-        <p class="eyebrow">Topos PSR</p>
-        <p class="trace">The presheaf-valued predictive state layer was computed from the normalized review corpus and induced usage workflows.</p>
+        <p class="eyebrow">Topos PSR Summary</p>
+        <p class="trace">The presheaf-valued predictive state layer is retained as supporting machinery underneath the correction recommendation.</p>
         <div class="chips">
           <span class="chip">reviews used: {esc(topos_review_count)}</span>
           <span class="chip">context views: {esc(topos_context_views)}</span>

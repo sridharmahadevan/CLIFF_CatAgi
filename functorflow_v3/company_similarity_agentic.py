@@ -200,6 +200,21 @@ def _normalize_company_similarity_execution_mode(execution_mode: object) -> str:
     return "quick"
 
 
+def _normalize_company_similarity_layer(value: object) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "diffusion": "temporal_diffusion",
+        "temporal": "temporal_diffusion",
+        "temporal_diffusion": "temporal_diffusion",
+        "topos": "prometheus_topos",
+        "prometheus": "prometheus_topos",
+        "prometheus_topos": "prometheus_topos",
+        "both": "both",
+        "all": "both",
+    }
+    return aliases.get(normalized, "temporal_diffusion")
+
+
 def _sanitize_company_similarity_year_window(
     year_start: int | None,
     year_end: int | None,
@@ -215,6 +230,10 @@ def _sanitize_company_similarity_year_window(
     return start, end
 
 
+def _latest_completed_company_similarity_year(*, current_year: int) -> int:
+    return max(2002, int(current_year) - 1)
+
+
 def _company_similarity_mode_profile(
     execution_mode: str,
     *,
@@ -223,6 +242,7 @@ def _company_similarity_mode_profile(
 ) -> dict[str, int | str]:
     normalized_mode = _normalize_company_similarity_execution_mode(execution_mode)
     current_year = time.localtime().tm_year
+    latest_completed_year = _latest_completed_company_similarity_year(current_year=current_year)
     if normalized_mode == "deep":
         profile: dict[str, int | str] = {
             "execution_mode": normalized_mode,
@@ -233,7 +253,7 @@ def _company_similarity_mode_profile(
             "batch_size": 4,
         }
         default_start = 2002
-        default_end = current_year
+        default_end = latest_completed_year
     else:
         profile = {
             "execution_mode": normalized_mode,
@@ -245,8 +265,8 @@ def _company_similarity_mode_profile(
             "skip_visualization": 1,
             "skip_branch_visuals": 1,
         }
-        default_start = max(2002, current_year - 2)
-        default_end = current_year
+        default_start = max(2002, latest_completed_year - 1)
+        default_end = latest_completed_year
     resolved_year_start, resolved_year_end = _sanitize_company_similarity_year_window(
         year_start if year_start is not None else default_start,
         year_end if year_end is not None else default_end,
@@ -255,6 +275,245 @@ def _company_similarity_mode_profile(
     profile["year_start"] = resolved_year_start
     profile["year_end"] = resolved_year_end
     return profile
+
+
+def _cosine_from_counters(left: dict[str, object], right: dict[str, object]) -> float:
+    keys = sorted(set(left) | set(right))
+    if not keys:
+        return 0.0
+    a = [float(left.get(key) or 0.0) for key in keys]
+    b = [float(right.get(key) or 0.0) for key in keys]
+    denom = math.sqrt(sum(value * value for value in a)) * math.sqrt(sum(value * value for value in b))
+    if denom <= 0.0:
+        return 0.0
+    return round(sum(x * y for x, y in zip(a, b)) / denom, 4)
+
+
+def _cosine_from_vectors(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    denom = math.sqrt(sum(value * value for value in left)) * math.sqrt(sum(value * value for value in right))
+    if denom <= 0.0:
+        return 0.0
+    return round(sum(x * y for x, y in zip(left, right)) / denom, 4)
+
+
+def _psr_matrix_value(psr: dict[str, object], history_index: int, test_index: int) -> float:
+    matrix = list(psr.get("matrix") or [])
+    if history_index < 0 or history_index >= len(matrix):
+        return 0.0
+    row = list(matrix[history_index] or [])
+    if test_index < 0 or test_index >= len(row):
+        return 0.0
+    try:
+        return float(row[test_index])
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _compare_local_psr_objects(context_id: str, left: dict[str, object], right: dict[str, object]) -> dict[str, object]:
+    left_histories = [str(item) for item in list(left.get("histories") or [])]
+    right_histories = [str(item) for item in list(right.get("histories") or [])]
+    left_tests = [str(item) for item in list(left.get("tests") or [])]
+    right_tests = [str(item) for item in list(right.get("tests") or [])]
+    left_history_index = {value: index for index, value in enumerate(left_histories)}
+    right_history_index = {value: index for index, value in enumerate(right_histories)}
+    left_test_index = {value: index for index, value in enumerate(left_tests)}
+    right_test_index = {value: index for index, value in enumerate(right_tests)}
+    shared_histories = sorted(set(left_history_index) & set(right_history_index))
+    shared_tests = sorted(set(left_test_index) & set(right_test_index))
+    left_vector: list[float] = []
+    right_vector: list[float] = []
+    for history in shared_histories:
+        for test in shared_tests:
+            left_vector.append(_psr_matrix_value(left, left_history_index[history], left_test_index[test]))
+            right_vector.append(_psr_matrix_value(right, right_history_index[history], right_test_index[test]))
+    rank_left = int(left.get("rank") or 0)
+    rank_right = int(right.get("rank") or 0)
+    return {
+        "context_id": context_id,
+        "psr_cosine_similarity": _cosine_from_vectors(left_vector, right_vector),
+        "shared_histories": len(shared_histories),
+        "shared_tests": len(shared_tests),
+        "shared_cells": len(left_vector),
+        "left_history_count": len(left_histories),
+        "right_history_count": len(right_histories),
+        "left_test_count": len(left_tests),
+        "right_test_count": len(right_tests),
+        "left_rank": rank_left,
+        "right_rank": rank_right,
+        "rank_gap": abs(rank_left - rank_right),
+        "history_overlap_jaccard": (
+            round(len(shared_histories) / len(set(left_histories) | set(right_histories)), 4)
+            if (set(left_histories) | set(right_histories))
+            else 0.0
+        ),
+        "test_overlap_jaccard": (
+            round(len(shared_tests) / len(set(left_tests) | set(right_tests)), 4)
+            if (set(left_tests) | set(right_tests))
+            else 0.0
+        ),
+    }
+
+
+def _compare_local_psr_families(
+    left: dict[str, dict[str, object]],
+    right: dict[str, dict[str, object]],
+) -> dict[str, object]:
+    rows = [
+        _compare_local_psr_objects(context_id, left[context_id], right[context_id])
+        for context_id in sorted(set(left) & set(right))
+    ]
+    supported_rows = [row for row in rows if int(row.get("shared_cells") or 0) > 0]
+    total_cells = sum(int(row.get("shared_cells") or 0) for row in supported_rows)
+    if total_cells > 0:
+        weighted_mean = sum(
+            float(row.get("psr_cosine_similarity") or 0.0) * int(row.get("shared_cells") or 0)
+            for row in supported_rows
+        ) / total_cells
+    else:
+        weighted_mean = 0.0
+    mean_cosine = (
+        sum(float(row.get("psr_cosine_similarity") or 0.0) for row in supported_rows) / len(supported_rows)
+        if supported_rows
+        else 0.0
+    )
+    rows.sort(
+        key=lambda item: (
+            -int(item.get("shared_cells") or 0),
+            -float(item.get("psr_cosine_similarity") or 0.0),
+            str(item.get("context_id") or ""),
+        )
+    )
+    rank_gaps = [int(row.get("rank_gap") or 0) for row in supported_rows]
+    return {
+        "shared_psr_context_count": len(rows),
+        "supported_psr_context_count": len(supported_rows),
+        "total_shared_psr_cells": total_cells,
+        "mean_local_psr_cosine_similarity": round(mean_cosine, 4),
+        "weighted_local_psr_cosine_similarity": round(weighted_mean, 4),
+        "mean_shared_psr_rank_gap": round(sum(rank_gaps) / len(rank_gaps), 4) if rank_gaps else 0.0,
+        "local_psr_similarities": rows[:24],
+    }
+
+
+def _company_slug_from_world_model(path: Path) -> str:
+    payload = _safe_read_json(path)
+    label = str(payload.get("corpus_label") or "").lower()
+    episodes = [item for item in list(payload.get("episodes") or []) if isinstance(item, dict)]
+    companies = {
+        str(dict(item.get("metadata") or {}).get("company") or "").strip().lower()
+        for item in episodes
+        if str(dict(item.get("metadata") or {}).get("company") or "").strip()
+    }
+    if len(companies) == 1:
+        company = next(iter(companies))
+        aliases = {
+            "adbe": "adobe",
+            "nke": "nike",
+            "msft": "microsoft",
+            "amzn": "amazon",
+            "aapl": "apple",
+            "v": "visa",
+            "csco": "cisco",
+        }
+        if company in aliases:
+            return aliases[company]
+        if company.endswith("_inc"):
+            return company.removesuffix("_inc")
+        return company
+    for token in ("adobe", "nike", "apple", "microsoft", "amazon", "visa", "cisco"):
+        if token in label:
+            return token
+    return ""
+
+
+def _find_prometheus_tenk_world_model(company_slug: str, *, workspace_root: Path) -> Path | None:
+    runs_root = workspace_root / "Prometheus_v1" / "runs"
+    if not runs_root.exists():
+        return None
+    candidates: list[Path] = []
+    for path in runs_root.rglob("prometheus_world_model.json"):
+        if "tenk" not in str(path).lower() and "10-k" not in str(path).lower() and "10k" not in str(path).lower():
+            continue
+        if _company_slug_from_world_model(path) == company_slug:
+            candidates.append(path)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return candidates[0]
+
+
+def _prometheus_topos_similarity(
+    *,
+    plan: CompanySimilarityQueryPlan,
+    workspace_root: Path,
+) -> dict[str, object]:
+    path_a = _find_prometheus_tenk_world_model(plan.company_a_slug, workspace_root=workspace_root)
+    path_b = _find_prometheus_tenk_world_model(plan.company_b_slug, workspace_root=workspace_root)
+    if path_a is None or path_b is None:
+        return {
+            "status": "missing",
+            "company_a_world_model_path": str(path_a) if path_a else "",
+            "company_b_world_model_path": str(path_b) if path_b else "",
+            "note": "Prometheus 10-K world-model artifacts were not found for both companies.",
+        }
+    model_a = _safe_read_json(path_a)
+    model_b = _safe_read_json(path_b)
+    summary_a = dict(model_a.get("summary") or {})
+    summary_b = dict(model_b.get("summary") or {})
+    contexts_a = set(dict(summary_a.get("context_event_counts") or {}).keys())
+    contexts_b = set(dict(summary_b.get("context_event_counts") or {}).keys())
+    shared_contexts = sorted(contexts_a & contexts_b)
+    union_contexts = contexts_a | contexts_b
+    jaccard = round(len(shared_contexts) / len(union_contexts), 4) if union_contexts else 0.0
+    psrs_a = {str(row.get("context_id") or ""): dict(row) for row in list(model_a.get("local_psrs") or []) if isinstance(row, dict)}
+    psrs_b = {str(row.get("context_id") or ""): dict(row) for row in list(model_b.get("local_psrs") or []) if isinstance(row, dict)}
+    psr_family_similarity = _compare_local_psr_families(psrs_a, psrs_b)
+    return {
+        "status": "ok",
+        "layer": "prometheus_topos",
+        "company_a_world_model_path": str(path_a),
+        "company_b_world_model_path": str(path_b),
+        "company_a_summary": {
+            "episode_count": int(summary_a.get("episode_count") or 0),
+            "event_count": int(summary_a.get("event_count") or 0),
+            "local_psr_count": int(summary_a.get("local_psr_count") or 0),
+            "mean_glue_loss": float(summary_a.get("mean_glue_loss") or 0.0),
+        },
+        "company_b_summary": {
+            "episode_count": int(summary_b.get("episode_count") or 0),
+            "event_count": int(summary_b.get("event_count") or 0),
+            "local_psr_count": int(summary_b.get("local_psr_count") or 0),
+            "mean_glue_loss": float(summary_b.get("mean_glue_loss") or 0.0),
+        },
+        "action_cosine_similarity": _cosine_from_counters(
+            dict(summary_a.get("sentiment_counts") or {}),
+            dict(summary_b.get("sentiment_counts") or {}),
+        ),
+        "context_cosine_similarity": _cosine_from_counters(
+            dict(summary_a.get("context_event_counts") or {}),
+            dict(summary_b.get("context_event_counts") or {}),
+        ),
+        "workflow_relation_cosine_similarity": _cosine_from_counters(
+            dict(summary_a.get("top_aspects") or {}),
+            dict(summary_b.get("top_aspects") or {}),
+        ),
+        "context_jaccard_similarity": jaccard,
+        "shared_context_count": len(shared_contexts),
+        "shared_psr_context_count": psr_family_similarity["shared_psr_context_count"],
+        "supported_psr_context_count": psr_family_similarity["supported_psr_context_count"],
+        "total_shared_psr_cells": psr_family_similarity["total_shared_psr_cells"],
+        "mean_local_psr_cosine_similarity": psr_family_similarity["mean_local_psr_cosine_similarity"],
+        "weighted_local_psr_cosine_similarity": psr_family_similarity["weighted_local_psr_cosine_similarity"],
+        "mean_shared_psr_rank_gap": psr_family_similarity["mean_shared_psr_rank_gap"],
+        "local_psr_similarities": psr_family_similarity["local_psr_similarities"],
+        "shared_contexts": shared_contexts[:24],
+        "note": (
+            "Prometheus Topos layer compares cached multi-year 10-K workflow world models by aligning "
+            "their local PSR Hankel tables on shared history/test cells."
+        ),
+    }
 
 
 def looks_like_company_similarity_query(query: str) -> bool:
@@ -1014,6 +1273,24 @@ def _render_company_similarity_performance_html(payload: dict[str, object]) -> s
 """
 
 
+def _render_local_psr_similarity_rows(prometheus_topos: dict[str, object], *, limit: int = 8) -> str:
+    rows = []
+    for row in list(prometheus_topos.get("local_psr_similarities") or [])[:limit]:
+        if not isinstance(row, dict):
+            continue
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(row.get('context_id') or ''))}</td>"
+            f"<td>{html.escape(str(row.get('psr_cosine_similarity') or 0.0))}</td>"
+            f"<td>{html.escape(str(row.get('shared_cells') or 0))}</td>"
+            f"<td>{html.escape(str(row.get('shared_histories') or 0))}</td>"
+            f"<td>{html.escape(str(row.get('shared_tests') or 0))}</td>"
+            f"<td>{html.escape(str(row.get('rank_gap') or 0))}</td>"
+            "</tr>"
+        )
+    return "".join(rows) or '<tr><td colspan="6">No aligned local PSR cells were available.</td></tr>'
+
+
 def _write_html_report(
     *,
     output_path: Path,
@@ -1022,6 +1299,7 @@ def _write_html_report(
     summary_markdown: str,
     manifest: dict[str, object],
     performance_payload: dict[str, object] | None = None,
+    prometheus_topos: dict[str, object] | None = None,
 ) -> Path:
     artifact_path = output_path
     textbook_html = render_textbook_backstop_html(
@@ -1038,6 +1316,47 @@ def _write_html_report(
     mean_cosine = manifest.get("mean_yearly_cosine_similarity", "n/a")
     mean_js = manifest.get("mean_yearly_js_divergence", "n/a")
     mean_defect = manifest.get("mean_relative_naturality_defect", "n/a")
+    topos_markup = ""
+    if prometheus_topos:
+        status = str(prometheus_topos.get("status") or "missing")
+        if status == "ok":
+            a_summary = dict(prometheus_topos.get("company_a_summary") or {})
+            b_summary = dict(prometheus_topos.get("company_b_summary") or {})
+            shared_contexts = ", ".join(str(item) for item in list(prometheus_topos.get("shared_contexts") or [])[:12])
+            psr_rows = _render_local_psr_similarity_rows(prometheus_topos, limit=6)
+            topos_markup = f"""
+      <section class="card">
+        <p class="eyebrow">Prometheus Topos Layer</p>
+        <h2>Multi-year 10-K workflow world-model similarity</h2>
+        <p class="muted">This optional layer compares cached Prometheus 10-K causal PSR/topos objects by aligning local PSR Hankel tables on shared history/test cells.</p>
+        <div class="metrics">
+          <div class="metric"><span class="muted">Weighted local PSR cosine</span><strong>{html.escape(str(prometheus_topos.get("weighted_local_psr_cosine_similarity")))}</strong></div>
+          <div class="metric"><span class="muted">Mean local PSR cosine</span><strong>{html.escape(str(prometheus_topos.get("mean_local_psr_cosine_similarity")))}</strong></div>
+          <div class="metric"><span class="muted">Aligned PSR cells</span><strong>{html.escape(str(prometheus_topos.get("total_shared_psr_cells")))}</strong></div>
+          <div class="metric"><span class="muted">Action cosine</span><strong>{html.escape(str(prometheus_topos.get("action_cosine_similarity")))}</strong></div>
+          <div class="metric"><span class="muted">Context cosine</span><strong>{html.escape(str(prometheus_topos.get("context_cosine_similarity")))}</strong></div>
+          <div class="metric"><span class="muted">Relation cosine</span><strong>{html.escape(str(prometheus_topos.get("workflow_relation_cosine_similarity")))}</strong></div>
+          <div class="metric"><span class="muted">Context Jaccard</span><strong>{html.escape(str(prometheus_topos.get("context_jaccard_similarity")))}</strong></div>
+          <div class="metric"><span class="muted">{html.escape(plan.company_a)} TWM</span><strong>{int(a_summary.get("episode_count") or 0):,}</strong><span class="muted">{int(a_summary.get("event_count") or 0):,} events</span></div>
+          <div class="metric"><span class="muted">{html.escape(plan.company_b)} TWM</span><strong>{int(b_summary.get("episode_count") or 0):,}</strong><span class="muted">{int(b_summary.get("event_count") or 0):,} events</span></div>
+        </div>
+        <p class="muted">Shared PSR contexts: {html.escape(str(prometheus_topos.get("shared_psr_context_count")))}; supported PSR contexts: {html.escape(str(prometheus_topos.get("supported_psr_context_count")))}; mean shared-rank gap: {html.escape(str(prometheus_topos.get("mean_shared_psr_rank_gap")))}.</p>
+        <table>
+          <thead><tr><th>Local PSR</th><th>Cosine</th><th>Cells</th><th>Histories</th><th>Tests</th><th>Rank gap</th></tr></thead>
+          <tbody>{psr_rows}</tbody>
+        </table>
+        <p class="muted">Shared contexts: {html.escape(shared_contexts or "none")}</p>
+        <p class="muted mono">World models: {html.escape(str(prometheus_topos.get("company_a_world_model_path") or ""))}<br />{html.escape(str(prometheus_topos.get("company_b_world_model_path") or ""))}</p>
+      </section>
+"""
+        else:
+            topos_markup = f"""
+      <section class="card">
+        <p class="eyebrow">Prometheus Topos Layer</p>
+        <h2>Prometheus 10-K world models not available yet</h2>
+        <p class="muted">{html.escape(str(prometheus_topos.get("note") or "Build both company 10-K Topos World Models to enable this layer."))}</p>
+      </section>
+"""
     performance_markup = ""
     if performance_payload:
         timing = dict(performance_payload.get("timing") or {})
@@ -1171,6 +1490,7 @@ def _write_html_report(
         {image_markup}
       </section>
       {performance_markup}
+      {topos_markup}
       <section class="card">
         <p class="eyebrow">Summary</p>
         <pre>{summary_html}</pre>
@@ -1188,6 +1508,150 @@ def _write_html_report(
         encoding="utf-8",
     )
     return artifact_path
+
+
+def _write_prometheus_topos_similarity_report(
+    *,
+    output_path: Path,
+    plan: CompanySimilarityQueryPlan,
+    prometheus_topos: dict[str, object],
+) -> Path:
+    a_summary = dict(prometheus_topos.get("company_a_summary") or {})
+    b_summary = dict(prometheus_topos.get("company_b_summary") or {})
+    shared_context_items = [str(item) for item in list(prometheus_topos.get("shared_contexts") or [])[:18]]
+    shared_contexts = ", ".join(shared_context_items)
+    shared_context_chips = "".join(
+        f'<span class="chip">{html.escape(context.replace("_", " "))}</span>'
+        for context in shared_context_items
+    )
+    status = str(prometheus_topos.get("status") or "missing")
+    if status != "ok":
+        body = f"""
+      <section class="card">
+        <p class="eyebrow">Prometheus Topos Layer</p>
+        <h1>{html.escape(plan.company_a)} vs {html.escape(plan.company_b)}</h1>
+        <p class="muted">{html.escape(str(prometheus_topos.get("note") or "Prometheus 10-K world models were not found for both companies."))}</p>
+      </section>
+"""
+    else:
+        action_cosine = float(prometheus_topos.get("action_cosine_similarity") or 0.0)
+        context_cosine = float(prometheus_topos.get("context_cosine_similarity") or 0.0)
+        relation_cosine = float(prometheus_topos.get("workflow_relation_cosine_similarity") or 0.0)
+        weighted_psr_cosine = float(prometheus_topos.get("weighted_local_psr_cosine_similarity") or 0.0)
+        mean_psr_cosine = float(prometheus_topos.get("mean_local_psr_cosine_similarity") or 0.0)
+        rank_gap = float(prometheus_topos.get("mean_shared_psr_rank_gap") or 0.0)
+        psr_rows = _render_local_psr_similarity_rows(prometheus_topos, limit=10)
+        interpretation = (
+            "The aligned local PSR Hankel tables are strongly similar; the companies preserve comparable predictive behavior inside the shared local contexts."
+            if weighted_psr_cosine >= 0.75
+            else "The aligned local PSR Hankel tables are moderately similar; the companies share some local predictive dynamics but diverge in important histories/tests."
+            if weighted_psr_cosine >= 0.45
+            else "The aligned local PSR Hankel tables are weakly similar; the companies overlap in named contexts but their predictive-state objects differ substantially."
+        )
+        coverage_note = (
+            f"{plan.company_a} currently has {int(a_summary.get('episode_count') or 0):,} filing-year episode"
+            f"{'s' if int(a_summary.get('episode_count') or 0) != 1 else ''}, while {plan.company_b} has "
+            f"{int(b_summary.get('episode_count') or 0):,}. Treat this as a cached-artifact comparison until both companies use comparable extraction coverage."
+        )
+        body = f"""
+      <section class="card">
+        <p class="eyebrow">Prometheus Topos Layer</p>
+        <h1>{html.escape(plan.company_a)} vs {html.escape(plan.company_b)}</h1>
+        <p class="muted">Prometheus compares multi-year 10-K workflow world models as causal PSR/topos objects by aligning local PSR Hankel tables on shared history/test cells.</p>
+        <div class="metrics">
+          <div class="metric"><span class="muted">Weighted local PSR cosine</span><strong>{weighted_psr_cosine:.4f}</strong></div>
+          <div class="metric"><span class="muted">Mean local PSR cosine</span><strong>{mean_psr_cosine:.4f}</strong></div>
+          <div class="metric"><span class="muted">Aligned PSR cells</span><strong>{int(prometheus_topos.get("total_shared_psr_cells") or 0):,}</strong></div>
+          <div class="metric"><span class="muted">Supported PSR contexts</span><strong>{int(prometheus_topos.get("supported_psr_context_count") or 0):,}</strong></div>
+          <div class="metric"><span class="muted">Action proxy cosine</span><strong>{html.escape(str(prometheus_topos.get("action_cosine_similarity")))}</strong></div>
+          <div class="metric"><span class="muted">Context proxy cosine</span><strong>{html.escape(str(prometheus_topos.get("context_cosine_similarity")))}</strong></div>
+          <div class="metric"><span class="muted">Relation proxy cosine</span><strong>{html.escape(str(prometheus_topos.get("workflow_relation_cosine_similarity")))}</strong></div>
+          <div class="metric"><span class="muted">{html.escape(plan.company_a)} filing-years</span><strong>{int(a_summary.get("episode_count") or 0):,}</strong><span class="muted">{int(a_summary.get("event_count") or 0):,} events</span></div>
+          <div class="metric"><span class="muted">{html.escape(plan.company_b)} filing-years</span><strong>{int(b_summary.get("episode_count") or 0):,}</strong><span class="muted">{int(b_summary.get("event_count") or 0):,} events</span></div>
+        </div>
+      </section>
+      <section class="card">
+        <p class="eyebrow">Shared Local Structure</p>
+        <h2>What the local topos comparison says</h2>
+        <p class="muted">{html.escape(interpretation)}</p>
+        <div class="structure-grid">
+          <div class="structure-card">
+            <span class="label">Shared contexts</span>
+            <strong>{int(prometheus_topos.get("shared_context_count") or 0):,}</strong>
+            <div class="chip-row">{shared_context_chips or '<span class="chip">none</span>'}</div>
+          </div>
+          <div class="structure-card">
+            <span class="label">Shared PSR contexts</span>
+            <strong>{int(prometheus_topos.get("shared_psr_context_count") or 0):,}</strong>
+            <p class="muted">Supported contexts: {int(prometheus_topos.get("supported_psr_context_count") or 0):,}; mean rank gap: {rank_gap:.2f}</p>
+          </div>
+          <div class="structure-card">
+            <span class="label">Coverage note</span>
+            <p class="muted">{html.escape(coverage_note)}</p>
+          </div>
+        </div>
+      </section>
+      <section class="card">
+        <p class="eyebrow">Aligned Local PSR Objects</p>
+        <h2>Cosine on shared history/test cells</h2>
+        <p class="muted">Each row compares one matched local PSR object after restricting both Hankel tables to their common histories and tests.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Local PSR</th><th>Cosine</th><th>Cells</th><th>Histories</th><th>Tests</th><th>Rank gap</th></tr></thead>
+            <tbody>{psr_rows}</tbody>
+          </table>
+        </div>
+      </section>
+      <section class="card">
+        <p class="eyebrow">Source World Models</p>
+        <p class="muted">These links point to the cached Prometheus 10-K world-model JSON artifacts used for this comparison.</p>
+        <div class="source-list">
+          <div><strong>{html.escape(plan.company_a)}</strong><code>{html.escape(str(prometheus_topos.get("company_a_world_model_path") or ""))}</code></div>
+          <div><strong>{html.escape(plan.company_b)}</strong><code>{html.escape(str(prometheus_topos.get("company_b_world_model_path") or ""))}</code></div>
+        </div>
+      </section>
+"""
+    output_path.write_text(
+        f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{html.escape(plan.company_a)} vs {html.escape(plan.company_b)} Prometheus Topos Similarity</title>
+    <style>
+      :root {{ --ink:#18212a; --muted:#65717c; --line:#dce1dc; --panel:#ffffff; --paper:#f4f6f1; --accent:#226b5f; }}
+      body {{ margin:0; font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:var(--paper); }}
+      main {{ width:min(1120px, calc(100vw - 32px)); margin:34px auto 52px; display:grid; gap:16px; }}
+      .card {{ background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:24px; }}
+      .eyebrow {{ color:var(--accent); font-size:12px; font-weight:800; text-transform:uppercase; margin:0 0 10px; }}
+      h1 {{ margin:0 0 12px; font-size:clamp(32px,4vw,52px); line-height:1.03; }}
+      .muted {{ color:var(--muted); line-height:1.55; }}
+      .metrics {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-top:18px; }}
+      .metric {{ border:1px solid var(--line); border-radius:8px; padding:14px; display:grid; gap:8px; }}
+      .metric strong {{ font-size:28px; }}
+      h2 {{ margin:0 0 10px; font-size:22px; }}
+      .chip-row {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }}
+      .chip {{ border:1px solid #cbdad1; border-radius:999px; padding:6px 10px; background:#edf6f1; color:#226b5f; font-weight:700; font-size:13px; }}
+      .structure-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-top:16px; }}
+      .structure-card {{ border:1px solid var(--line); border-radius:8px; padding:14px; display:grid; gap:8px; align-content:start; }}
+      .structure-card .label {{ color:var(--muted); font-size:12px; font-weight:800; text-transform:uppercase; }}
+      .structure-card strong {{ font-size:28px; }}
+      .source-list {{ display:grid; gap:10px; margin-top:14px; }}
+      .source-list div {{ border:1px solid var(--line); border-radius:8px; padding:12px; display:grid; gap:6px; }}
+      .table-wrap {{ overflow:auto; border:1px solid var(--line); border-radius:8px; margin-top:14px; }}
+      table {{ width:100%; border-collapse:collapse; min-width:760px; background:#fff; }}
+      th, td {{ border-bottom:1px solid var(--line); padding:10px 12px; text-align:left; font-size:14px; }}
+      th {{ color:var(--muted); font-size:12px; text-transform:uppercase; }}
+      code {{ overflow-wrap:anywhere; color:var(--muted); font-size:13px; }}
+      @media (max-width: 860px) {{ .structure-grid {{ grid-template-columns:1fr; }} }}
+    </style>
+  </head>
+  <body><main>{body}</main></body>
+</html>
+""",
+        encoding="utf-8",
+    )
+    return output_path
 
 
 def _render_company_similarity_checkpoint_html(payload: dict[str, object]) -> str:
@@ -1291,6 +1755,7 @@ def _build_company_similarity_checkpoint(
     record_b: _CompanyRecord,
     mode_profile: dict[str, int | str],
     partial_preview: dict[str, object],
+    similarity_layer: str = "temporal_diffusion",
 ) -> tuple[Path, Path]:
     checkpoint_dir = outdir / "interactive_checkpoint"
     manifest_path = checkpoint_dir / "company_similarity_checkpoint.json"
@@ -1330,6 +1795,7 @@ def _build_company_similarity_checkpoint(
         "available_overlap_years": overlap_years,
         "summary_text": summary_text,
         "partial_preview": dict(partial_preview),
+        "similarity_layer": str(similarity_layer or "temporal_diffusion"),
         "recommended_next_action": "continue_deeper",
     }
     manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -1349,11 +1815,13 @@ class CompanySimilarityAgenticRunner:
         execution_mode: str = "quick",
         year_start: int | None = None,
         year_end: int | None = None,
+        similarity_layer: str = "temporal_diffusion",
     ) -> None:
         self.query = " ".join(query.split())
         self.outdir = outdir.resolve()
         self.sec_user_agent = sec_user_agent
         self.execution_mode = _normalize_company_similarity_execution_mode(execution_mode)
+        self.similarity_layer = _normalize_company_similarity_layer(similarity_layer)
         self.year_start = int(year_start) if year_start is not None else None
         self.year_end = int(year_end) if year_end is not None else None
         if not self.query:
@@ -1695,6 +2163,30 @@ class CompanySimilarityAgenticRunner:
         analysis_dir = self.outdir / f"{plan.company_a_slug}_vs_{plan.company_b_slug}_functors"
         analysis_dir.mkdir(parents=True, exist_ok=True)
         summary_path = self.outdir / "company_similarity_summary.json"
+        if self.similarity_layer == "prometheus_topos":
+            prometheus_topos = _prometheus_topos_similarity(plan=plan, workspace_root=workspace_root)
+            artifact_path = _write_prometheus_topos_similarity_report(
+                output_path=self.outdir / "company_similarity_prometheus_topos.html",
+                plan=plan,
+                prometheus_topos=prometheus_topos,
+            )
+            payload = {
+                "query_plan": asdict(plan),
+                "similarity_layer": self.similarity_layer,
+                "analysis_dir": str(analysis_dir),
+                "artifact_path": str(artifact_path),
+                "prometheus_topos_similarity": prometheus_topos,
+            }
+            summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            return CompanySimilarityRunResult(
+                query_plan=plan,
+                route_outdir=self.outdir,
+                analysis_dir=analysis_dir,
+                summary_path=summary_path,
+                artifact_path=artifact_path,
+                company_a_manifest_path=None,
+                company_b_manifest_path=None,
+            )
         stage_state: dict[str, dict[str, object]] = {
             "query": {"label": "Resolve query", "status": "complete", "started_at_epoch": started_at, "ended_at_epoch": started_at},
             "company_a_analysis": {"label": f"{plan.company_a} build", "status": "pending", "started_at_epoch": 0.0, "ended_at_epoch": 0.0},
@@ -1830,6 +2322,7 @@ class CompanySimilarityAgenticRunner:
                     record_b=record_b,
                     mode_profile=mode_profile,
                     partial_preview=partial_preview_state,
+                    similarity_layer=self.similarity_layer,
                 )
                 performance_payload = self._write_telemetry(
                     telemetry_path=telemetry_path,
@@ -1987,6 +2480,11 @@ class CompanySimilarityAgenticRunner:
                 note=heartbeat_state["note"],
                 partial_preview=partial_preview_state,
             )
+            prometheus_topos = (
+                _prometheus_topos_similarity(plan=plan, workspace_root=workspace_root)
+                if self.similarity_layer == "both"
+                else None
+            )
             artifact_path = _write_html_report(
                 output_path=self.outdir / "company_similarity_dashboard.html",
                 analysis_dir=analysis_dir,
@@ -1994,10 +2492,12 @@ class CompanySimilarityAgenticRunner:
                 summary_markdown=summary_markdown,
                 manifest=manifest,
                 performance_payload=performance_payload,
+                prometheus_topos=prometheus_topos,
             )
             payload = {
                 "query_plan": asdict(plan),
                 "execution_mode": self.execution_mode,
+                "similarity_layer": self.similarity_layer,
                 "year_window": {
                     "start": mode_profile["year_start"],
                     "end": mode_profile["year_end"],
@@ -2012,6 +2512,8 @@ class CompanySimilarityAgenticRunner:
                 "performance_dashboard_path": str(performance_dashboard_path),
                 "telemetry_path": str(telemetry_path),
             }
+            if prometheus_topos is not None:
+                payload["prometheus_topos_similarity"] = prometheus_topos
             summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             self._log(f"company similarity dashboard ready: {artifact_path}")
             return CompanySimilarityRunResult(

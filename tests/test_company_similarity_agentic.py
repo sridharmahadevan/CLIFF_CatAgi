@@ -44,17 +44,26 @@ class CompanySimilarityAgenticTests(unittest.TestCase):
         self.assertEqual(company_b.brand, "3M")
 
     def test_quick_mode_profile_uses_recent_year_window(self) -> None:
-        profile = module._company_similarity_mode_profile("quick")
+        with mock.patch.object(module.time, "localtime", return_value=time.struct_time((2026, 4, 28, 12, 0, 0, 1, 118, -1))):
+            profile = module._company_similarity_mode_profile("quick")
 
         self.assertEqual(profile["execution_mode"], "quick")
-        self.assertGreaterEqual(int(profile["year_end"]) - int(profile["year_start"]), 0)
-        self.assertLessEqual(int(profile["year_end"]) - int(profile["year_start"]), 3)
+        self.assertEqual(profile["year_start"], 2024)
+        self.assertEqual(profile["year_end"], 2025)
         self.assertEqual(profile["jobs"], 3)
         self.assertEqual(profile["llm_jobs"], 3)
         self.assertEqual(profile["epochs"], 1)
         self.assertEqual(profile["batch_size"], 6)
         self.assertEqual(profile["skip_visualization"], 1)
         self.assertEqual(profile["skip_branch_visuals"], 1)
+
+    def test_deep_mode_profile_defaults_to_latest_completed_year(self) -> None:
+        with mock.patch.object(module.time, "localtime", return_value=time.struct_time((2026, 4, 28, 12, 0, 0, 1, 118, -1))):
+            profile = module._company_similarity_mode_profile("deep")
+
+        self.assertEqual(profile["execution_mode"], "deep")
+        self.assertEqual(profile["year_start"], 2002)
+        self.assertEqual(profile["year_end"], 2025)
 
     def test_interactive_mode_profile_preserves_explicit_year_window(self) -> None:
         profile = module._company_similarity_mode_profile("interactive", year_start=2011, year_end=2014)
@@ -63,6 +72,81 @@ class CompanySimilarityAgenticTests(unittest.TestCase):
         self.assertEqual(profile["year_start"], 2011)
         self.assertEqual(profile["year_end"], 2014)
         self.assertEqual(profile["jobs"], 3)
+
+    def test_compare_local_psr_objects_aligns_shared_history_test_cells(self) -> None:
+        left = {
+            "context_id": "finance",
+            "histories": ["h1", "h2"],
+            "tests": ["t1", "t2"],
+            "matrix": [[1.0, 0.0], [0.0, 1.0]],
+            "rank": 2,
+        }
+        right = {
+            "context_id": "finance",
+            "histories": ["h2", "h3", "h1"],
+            "tests": ["t3", "t2", "t1"],
+            "matrix": [[0.2, 0.8, 0.0], [0.1, 0.1, 0.8], [0.3, 0.0, 1.0]],
+            "rank": 3,
+        }
+
+        result = module._compare_local_psr_objects("finance", left, right)
+
+        self.assertEqual(result["shared_histories"], 2)
+        self.assertEqual(result["shared_tests"], 2)
+        self.assertEqual(result["shared_cells"], 4)
+        self.assertEqual(result["rank_gap"], 1)
+        self.assertGreater(float(result["psr_cosine_similarity"]), 0.9)
+
+    def test_prometheus_topos_similarity_includes_local_psr_cosines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            adobe_path = root / "adobe_world_model.json"
+            nike_path = root / "nike_world_model.json"
+            base_model = {
+                "summary": {
+                    "episode_count": 1,
+                    "event_count": 2,
+                    "local_psr_count": 1,
+                    "mean_glue_loss": 0.0,
+                    "context_event_counts": {"finance": 2},
+                    "sentiment_counts": {"invest": 2},
+                    "top_aspects": {"capital_allocation": 2},
+                },
+                "local_psrs": [
+                    {
+                        "context_id": "finance",
+                        "histories": ["h1", "h2"],
+                        "tests": ["t1", "t2"],
+                        "matrix": [[1.0, 0.0], [0.0, 1.0]],
+                        "rank": 2,
+                    }
+                ],
+            }
+            adobe_path.write_text(json.dumps(base_model), encoding="utf-8")
+            nike_model = json.loads(json.dumps(base_model))
+            nike_model["local_psrs"][0]["matrix"] = [[0.8, 0.2], [0.1, 0.9]]
+            nike_path.write_text(json.dumps(nike_model), encoding="utf-8")
+            plan = module.CompanySimilarityQueryPlan(
+                query="How similar is Adobe to Nike?",
+                company_a="Adobe",
+                company_b="Nike",
+                company_a_slug="adobe",
+                company_b_slug="nike",
+            )
+
+            def fake_find(slug: str, *, workspace_root: Path) -> Path | None:
+                del workspace_root
+                return adobe_path if slug == "adobe" else nike_path if slug == "nike" else None
+
+            with mock.patch.object(module, "_find_prometheus_tenk_world_model", side_effect=fake_find):
+                result = module._prometheus_topos_similarity(plan=plan, workspace_root=root)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["shared_psr_context_count"], 1)
+        self.assertEqual(result["supported_psr_context_count"], 1)
+        self.assertEqual(result["total_shared_psr_cells"], 4)
+        self.assertGreater(float(result["weighted_local_psr_cosine_similarity"]), 0.9)
+        self.assertEqual(result["local_psr_similarities"][0]["context_id"], "finance")
 
     def test_format_duration_preserves_subsecond_work(self) -> None:
         self.assertEqual(module._format_duration(0.25), "<1s")

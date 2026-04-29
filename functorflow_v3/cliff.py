@@ -346,6 +346,8 @@ def _build_worker_command(
         command.extend(["--company-similarity-year-start", str(args.company_similarity_year_start)])
     if getattr(args, "company_similarity_year_end", None) is not None:
         command.extend(["--company-similarity-year-end", str(args.company_similarity_year_end)])
+    if getattr(args, "company_similarity_layer", None):
+        command.extend(["--company-similarity-layer", str(args.company_similarity_layer)])
     if args.sec_target_filings is not None:
         command.extend(["--sec-target-filings", str(args.sec_target_filings)])
     if args.sec_retrieval_user_agent:
@@ -874,6 +876,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--product-discovery-only", action="store_true")
     parser.add_argument("--company-similarity-year-start", type=int, default=None)
     parser.add_argument("--company-similarity-year-end", type=int, default=None)
+    parser.add_argument(
+        "--company-similarity-layer",
+        choices=("temporal_diffusion", "prometheus_topos", "both"),
+        default="temporal_diffusion",
+    )
     parser.add_argument("--sec-target-filings", type=int, default=None)
     parser.add_argument(
         "--sec-retrieval-user-agent",
