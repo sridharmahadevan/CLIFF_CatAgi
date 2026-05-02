@@ -36,6 +36,23 @@ class ProductFeedbackAgenticTests(unittest.TestCase):
 
         self.assertEqual(family, "vehicle")
 
+    def test_product_usage_family_keeps_tesla_vehicle_despite_interior_camera_text(self) -> None:
+        try:
+            from functorflow_v3 import product_feedback_agentic as module
+        except ImportError:
+            from ..functorflow_v3 import product_feedback_agentic as module
+
+        family = module._product_usage_family(
+            "Tesla Model 3",
+            "Tesla",
+            [
+                "The interior camera watches the driver for inattention, but the steering and ride are what matter.",
+                "It is comfortable to drive on long commutes.",
+            ],
+        )
+
+        self.assertEqual(family, "vehicle")
+
     def test_product_usage_family_detects_food_queries(self) -> None:
         try:
             from functorflow_v3 import product_feedback_agentic as module
@@ -83,6 +100,74 @@ class ProductFeedbackAgenticTests(unittest.TestCase):
         self.assertTrue(all("If the product had been redesigned" in row["counterfactual"] for row in payload["counterfactuals"]))
         self.assertTrue(all("heel slips" in row["observed_evidence"] or "harsh" in row["observed_evidence"] for row in payload["counterfactuals"]))
         self.assertGreaterEqual(payload["summary"]["counterfactual_count"], 2)
+
+    def test_counterfactuals_specialize_vehicle_autopilot_comfort_repairs(self) -> None:
+        try:
+            from functorflow_v3.product_feedback_counterfactuals import build_product_feedback_counterfactuals
+        except ImportError:
+            from ..functorflow_v3.product_feedback_counterfactuals import build_product_feedback_counterfactuals
+
+        payload = build_product_feedback_counterfactuals(
+            [
+                {
+                    "feedback_id": "tesla-autopilot",
+                    "title": "Four-year review of the Tesla Model 3: It's as good as new",
+                    "text": (
+                        "On a long journey, the experience is much improved. With earlier models, it was essential "
+                        "to apply pressure to the steering wheel every 30 seconds to prove you were still in control. "
+                        "This was an uncomfortable sensation and, frankly, more stressful than steering yourself. "
+                        "The interior camera now watches the driver and detects inattention."
+                    ),
+                    "rating": 3,
+                    "sentiment": "mixed",
+                    "sentiment_score": -0.4,
+                    "aspects": ["comfort"],
+                    "aspect_polarities": {"comfort": "negative"},
+                    "return_risk_signal": False,
+                }
+            ],
+            product_name="Tesla Model 3",
+            brand_name="Tesla",
+        )
+
+        comfort = next(row for row in payload["counterfactuals"] if row["aspect"] == "comfort")
+        self.assertIn("driver-attention", comfort["repair"])
+        self.assertIn("steering-wheel pressure prompts", comfort["repair"])
+        self.assertNotIn("softer pressure points", comfort["repair"])
+
+    def test_counterfactuals_specialize_vehicle_rear_seat_space_repairs(self) -> None:
+        try:
+            from functorflow_v3.product_feedback_counterfactuals import build_product_feedback_counterfactuals
+        except ImportError:
+            from ..functorflow_v3.product_feedback_counterfactuals import build_product_feedback_counterfactuals
+
+        payload = build_product_feedback_counterfactuals(
+            [
+                {
+                    "feedback_id": "tesla-rear-seat",
+                    "title": "2025 Tesla Model 3 Road Test Report - Consumer Reports",
+                    "text": (
+                        "The front seats provide a good balance of comfort and support, but the rear seat remains "
+                        "a sore point. It is a pretty tight space for average-sized adults and up. Taller passengers "
+                        "will likely bump their knees into the front seats, and there is not much headroom to spare."
+                    ),
+                    "rating": 3,
+                    "sentiment": "mixed",
+                    "sentiment_score": -0.2,
+                    "aspects": ["comfort"],
+                    "aspect_polarities": {"comfort": "negative"},
+                    "return_risk_signal": False,
+                }
+            ],
+            product_name="Tesla Model 3",
+            brand_name="Tesla",
+        )
+
+        comfort = next(row for row in payload["counterfactuals"] if row["aspect"] == "comfort")
+        self.assertIn("knee room", comfort["repair"])
+        self.assertIn("headroom", comfort["repair"])
+        self.assertIn("adult passenger comfort", comfort["repair"])
+        self.assertNotIn("softer pressure points", comfort["repair"])
 
     def test_counterfactuals_ignore_positive_or_filter_contexts(self) -> None:
         try:

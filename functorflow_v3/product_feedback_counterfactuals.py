@@ -6,7 +6,7 @@ from collections import Counter
 import re
 
 
-COUNTERFACTUAL_BUILDER_VERSION = 16
+COUNTERFACTUAL_BUILDER_VERSION = 17
 
 
 NEGATIVE_ASPECT_CUES: dict[str, tuple[str, ...]] = {
@@ -52,6 +52,11 @@ NEGATIVE_ASPECT_CUES: dict[str, tuple[str, ...]] = {
         "numb",
         "no support",
         "not supportive",
+        "tight space",
+        "not much headroom",
+        "headroom",
+        "legroom",
+        "bump their knees",
     ),
     "traction": (
         "slippery",
@@ -233,6 +238,9 @@ EXPLICIT_NEGATIVE_CUES = (
     "not cushioned",
     "no support",
     "not supportive",
+    "tight space",
+    "not much headroom",
+    "bump their knees",
     "slippery",
     "no grip",
     "poor grip",
@@ -298,6 +306,9 @@ NEGATIVE_STANCE_TERMS = (
     "slippery",
     "wore out",
     "not worth",
+    "tight space",
+    "not much headroom",
+    "bump their knees",
 )
 
 
@@ -352,6 +363,7 @@ DOMAIN_ALLOWED_ASPECTS = {
     "food": {"taste", "value", "durability"},
     "shoe": {"fit", "comfort", "durability", "style", "traction", "value"},
     "sofa": {"comfort", "durability", "style", "value", "seat_depth", "cushion_stability", "assembly", "ease_of_use"},
+    "vehicle": {"comfort", "ease_of_use", "durability", "value"},
     "generic": set(REPAIR_RULES),
 }
 
@@ -375,6 +387,24 @@ FOOD_TERMS = (
 
 SHOE_TERMS = ("shoe", "shoes", "runner", "running", "sneaker", "sneakers", "saucony", "endorphin")
 SOFA_TERMS = ("sofa", "couch", "sectional", "sactional", "seat", "lovesac")
+VEHICLE_TERMS = (
+    "tesla",
+    "telsa",
+    "model 3",
+    "car",
+    "cars",
+    "vehicle",
+    "vehicles",
+    "sedan",
+    "drive",
+    "driving",
+    "driver",
+    "steering",
+    "autopilot",
+    "charging",
+    "charger",
+    "battery",
+)
 
 ASPECT_TWM_CONTEXTS: dict[str, tuple[str, ...]] = {
     "fit": ("chart:fit", "sizing/fit", "fit"),
@@ -436,7 +466,84 @@ def _product_domain(product_name: str, brand_name: str) -> str:
         return "shoe"
     if any(term in lowered for term in SOFA_TERMS):
         return "sofa"
+    if any(term in lowered for term in VEHICLE_TERMS):
+        return "vehicle"
     return "generic"
+
+
+def _vehicle_comfort_repair_rule(
+    *,
+    aspect: str,
+    evidence: str,
+    event: dict[str, object],
+    product_domain: str,
+    base_rule: dict[str, str],
+) -> dict[str, str]:
+    if product_domain != "vehicle" or aspect != "comfort":
+        return base_rule
+
+    text = " ".join(
+        str(part or "")
+        for part in (
+            event.get("title"),
+            evidence,
+            event.get("text"),
+        )
+    ).lower()
+    if any(
+        term in text
+        for term in (
+            "steering wheel",
+            "apply pressure",
+            "every 30 seconds",
+            "interior camera",
+            "driver attention",
+            "detecting inattention",
+            "autopilot",
+            "prove you were still in control",
+        )
+    ):
+        return {
+            "repair": (
+                "a less intrusive driver-attention check that uses camera monitoring cleanly, "
+                "reduces steering-wheel pressure prompts, and keeps assisted-driving supervision predictable on long journeys"
+            ),
+            "rationale": (
+                "The local comfort complaint is stress from the assisted-driving attention-confirmation loop, "
+                "not seat padding or contact materials."
+            ),
+        }
+    if any(
+        term in text
+        for term in (
+            "rear seat",
+            "back seat",
+            "taller passengers",
+            "bump their knees",
+            "not much headroom",
+            "headroom",
+            "legroom",
+            "tight space",
+            "knee room",
+        )
+    ):
+        return {
+            "repair": (
+                "rear-seat packaging with more knee room and headroom, a less knees-up seating posture, "
+                "and clearer expectations for adult passenger comfort"
+            ),
+            "rationale": (
+                "The local comfort complaint is passenger-space geometry in the rear cabin rather than cushion softness."
+            ),
+        }
+    if any(term in text for term in ("ride", "suspension", "road noise", "wind noise", "cabin noise", "rattles")):
+        return {
+            "repair": (
+                "more compliant suspension tuning, better cabin noise isolation, and vibration damping tuned for rough roads"
+            ),
+            "rationale": "The local comfort complaint is ride harshness or cabin disturbance during driving.",
+        }
+    return base_rule
 
 
 def _event_negative_aspects(event: dict[str, object]) -> list[str]:
@@ -644,6 +751,8 @@ def _aspect_has_local_negative_support(text: str, aspect: str, event: dict[str, 
     lowered = text.lower()
     if _looks_like_filter_context(lowered):
         return False
+    if aspect == "comfort" and _has_vehicle_comfort_complaint(lowered):
+        return True
     if aspect == "taste" and _has_taste_disappointment_support(lowered):
         return True
     if _looks_like_mixed_positive_limitation(lowered):
@@ -762,6 +871,8 @@ def _repair_evidence_is_supported(snippet: str, aspect: str) -> bool:
         return False
     if _looks_like_comparative_aside(lowered):
         return False
+    if aspect == "comfort" and _has_vehicle_comfort_complaint(lowered):
+        return True
     if aspect == "taste" and _has_taste_disappointment_support(lowered):
         return True
     if _looks_like_mixed_positive_limitation(lowered):
@@ -769,6 +880,37 @@ def _repair_evidence_is_supported(snippet: str, aspect: str) -> bool:
     if _looks_like_positive_section(lowered) and not any(term in lowered for term in ("cons :", "cons:", "what we don't like", "what we do not like")):
         return False
     return any(_has_negative_cue_context(snippet, cue, window=130) for cue in NEGATIVE_ASPECT_CUES.get(aspect, ()))
+
+
+def _has_vehicle_comfort_complaint(lowered_text: str) -> bool:
+    attention_terms = (
+        "apply pressure",
+        "steering wheel",
+        "every 30 seconds",
+        "interior camera",
+        "driver attention",
+        "detecting inattention",
+        "prove you were still in control",
+    )
+    if any(term in lowered_text for term in attention_terms) and any(
+        term in lowered_text for term in ("uncomfortable", "stressful", "stress", "annoying", "intrusive")
+    ):
+        return True
+    rear_space_terms = (
+        "rear seat",
+        "back seat",
+        "taller passengers",
+        "bump their knees",
+        "not much headroom",
+        "tight space",
+        "legroom",
+        "headroom",
+    )
+    if any(term in lowered_text for term in rear_space_terms) and any(
+        term in lowered_text for term in ("sore point", "tight", "not much", "bump", "cramped", "limited")
+    ):
+        return True
+    return False
 
 
 def _evidence_support_tier(snippet: str, aspect: str) -> str:
@@ -1160,6 +1302,13 @@ def build_product_feedback_counterfactuals(
             evidence = _focused_evidence(str(event.get("text") or ""), aspect)
             if not _repair_evidence_is_supported(evidence, aspect):
                 continue
+            rule = _vehicle_comfort_repair_rule(
+                aspect=aspect,
+                evidence=evidence,
+                event=event,
+                product_domain=product_domain,
+                base_rule=rule,
+            )
             support_tier = _evidence_support_tier(evidence, aspect)
             candidates.append(
                 _repair_candidate(
@@ -1235,6 +1384,13 @@ def build_product_feedback_counterfactuals(
                 continue
             polarity_pressure = max(0.0, -sentiment_score)
             score = min(0.95, 0.08 + 0.25 * polarity_pressure + 0.15 * rating_pressure + return_pressure)
+            rule = _vehicle_comfort_repair_rule(
+                aspect=aspect,
+                evidence=evidence,
+                event=event,
+                product_domain=product_domain,
+                base_rule=rule,
+            )
             exploratory_candidates.append(
                 _repair_candidate(
                     event,

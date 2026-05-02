@@ -68,6 +68,12 @@ class QueryRouterAgenticTests(unittest.TestCase):
         self.assertEqual(decision.route_name, "product_feedback")
         self.assertIn("product", decision.rationale.lower())
 
+    def test_route_ff2_query_selects_product_feedback_for_camera_usability_question(self) -> None:
+        decision = module.route_ff2_query("How easy is to shoot photographs with a Leica M10 camera?")
+
+        self.assertEqual(decision.route_name, "product_feedback")
+        self.assertIn("product", decision.rationale.lower())
+
     def test_route_ff2_query_selects_product_feedback_for_running_shoe_comfort_question(self) -> None:
         decision = module.route_ff2_query("How comfortable is it to run with the Nike Pegasus 41 running shoes?")
 

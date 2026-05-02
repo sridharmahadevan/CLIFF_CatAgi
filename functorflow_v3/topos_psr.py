@@ -37,6 +37,7 @@ _ALL_ACTIONS = frozenset(
         "configure",
         "wear",
         "run",
+        "photograph",
         "drive",
         "charge",
         "sit",
@@ -74,6 +75,7 @@ _ROOT_CONTEXT_SPECS: tuple[ReviewContextSpec, ...] = (
                 "configure",
                 "wear",
                 "run",
+                "photograph",
                 "drive",
                 "charge",
                 "sit",
@@ -114,7 +116,7 @@ _ROOT_CONTEXT_SPECS: tuple[ReviewContextSpec, ...] = (
     ReviewContextSpec(
         context_id="use",
         label="Use",
-        action_set=frozenset({"configure", "wear", "run", "drive", "sit", "open", "taste", "eat", "share", "store", "clean", "wash", "reconfigure"}),
+        action_set=frozenset({"configure", "wear", "run", "photograph", "drive", "sit", "open", "taste", "eat", "share", "store", "clean", "wash", "reconfigure"}),
         predicate_roots=frozenset(
             {
                 "comfort",
@@ -165,6 +167,22 @@ _ROOT_CONTEXT_SPECS: tuple[ReviewContextSpec, ...] = (
         description="Running and daily-trainer context for shoes and related products.",
     ),
     ReviewContextSpec(
+        context_id="drive",
+        label="Drive",
+        action_set=frozenset({"configure", "drive", "charge", "clean", "return", "recommend"}),
+        predicate_roots=frozenset({"comfort", "ease_of_use", "durability", "quality", "value", "recommend", "return_risk", "returned"}),
+        parents=("use",),
+        description="Driving, ride comfort, charging, and road-use context for vehicles.",
+    ),
+    ReviewContextSpec(
+        context_id="photograph",
+        label="Photograph",
+        action_set=frozenset({"configure", "photograph", "clean", "return", "recommend"}),
+        predicate_roots=frozenset({"ease_of_use", "comfort", "quality", "durability", "value", "recommend", "return_risk", "returned"}),
+        parents=("use",),
+        description="Shooting photographs, focusing, handling, and image-making context for cameras.",
+    ),
+    ReviewContextSpec(
         context_id="assemble",
         label="Assemble",
         action_set=frozenset({"deliver", "unbox", "assemble", "configure", "sit", "recommend", "return"}),
@@ -197,6 +215,32 @@ _ROOT_CONTEXT_SPECS: tuple[ReviewContextSpec, ...] = (
         description="Recommendation and return decision context.",
     ),
 )
+
+_DOMAIN_ACTIONS: dict[str, frozenset[str]] = {
+    "vehicle": frozenset({"research", "order", "deliver", "configure", "drive", "charge", "clean", "return", "recommend"}),
+    "camera": frozenset({"research", "order", "deliver", "configure", "photograph", "clean", "return", "recommend"}),
+    "food": frozenset({"research", "order", "deliver", "unbox", "open", "taste", "eat", "share", "store", "return", "recommend"}),
+    "sofa": frozenset({"research", "order", "deliver", "unbox", "assemble", "configure", "sit", "clean", "wash", "reconfigure", "return", "recommend"}),
+    "shoe": frozenset({"research", "order", "deliver", "unbox", "configure", "wear", "run", "clean", "return", "recommend"}),
+}
+
+_DOMAIN_CONTEXTS: dict[str, frozenset[str]] = {
+    "vehicle": frozenset({"review", "post_purchase", "use", "drive", "durability", "decision"}),
+    "camera": frozenset({"review", "post_purchase", "use", "photograph", "durability", "decision"}),
+    "food": frozenset({"review", "post_purchase", "use", "taste", "durability", "decision"}),
+    "sofa": frozenset({"review", "post_purchase", "use", "assemble", "sit", "durability", "decision"}),
+    "shoe": frozenset({"review", "post_purchase", "use", "fit", "run", "durability", "decision"}),
+}
+
+_FOOD_PREDICATE_ROOTS = frozenset({"taste", "flavor", "texture", "sweetness", "aroma"})
+
+
+def _domain_actions(domain: str) -> frozenset[str]:
+    return _DOMAIN_ACTIONS.get(domain, _ALL_ACTIONS)
+
+
+def _domain_contexts(domain: str) -> frozenset[str] | None:
+    return _DOMAIN_CONTEXTS.get(domain)
 
 
 def _clean_actions(actions: Iterable[object]) -> tuple[str, ...]:
@@ -362,20 +406,26 @@ def build_review_episodes(
         if str(row.get("feedback_id") or "").strip()
     }
     domain = str(usage_workflows.get("usage_family") or "generic").strip().lower() or "generic"
+    allowed_actions = _domain_actions(domain)
     episodes: list[dict[str, object]] = []
     for index, event in enumerate(normalized_events, start=1):
         feedback_id = str(event.get("feedback_id") or f"feedback_{index:04d}")
         workflow_row = workflow_rows.get(feedback_id, {})
         selected_workflow = dict(workflow_row.get("selected_workflow") or {})
         actions = _clean_actions(selected_workflow.get("workflow_stages") or workflow_row.get("base_workflow_stages") or ())
+        actions = tuple(action for action in actions if action in allowed_actions)
         predicates = _canonical_predicates(event)
         contexts = {"review"}
         if any(action in {"order", "deliver", "unbox", "open", "assemble", "configure"} for action in actions):
             contexts.add("post_purchase")
-        if any(action in {"configure", "wear", "run", "drive", "sit", "open", "taste", "eat", "share", "store", "clean", "wash", "reconfigure"} for action in actions):
+        if any(action in {"configure", "wear", "run", "photograph", "drive", "sit", "open", "taste", "eat", "share", "store", "clean", "wash", "reconfigure"} for action in actions):
             contexts.add("use")
         if "run" in actions:
             contexts.add("run")
+        if "photograph" in actions:
+            contexts.add("photograph")
+        if "drive" in actions:
+            contexts.add("drive")
         if "assemble" in actions:
             contexts.add("assemble")
         if "sit" in actions:
@@ -387,9 +437,16 @@ def build_review_episodes(
         ):
             contexts.add("decision")
         predicate_roots = {_predicate_root(predicate) for predicate in predicates}
+        if domain != "food":
+            predicate_roots -= _FOOD_PREDICATE_ROOTS
+            predicates = tuple(
+                predicate
+                for predicate in predicates
+                if _predicate_root(predicate) not in _FOOD_PREDICATE_ROOTS
+            )
         if predicate_roots & {"fit", "heel_slip", "stability", "ease_of_use"}:
             contexts.add("fit")
-        if predicate_roots & {"taste", "flavor", "texture", "sweetness", "aroma"}:
+        if domain == "food" and predicate_roots & _FOOD_PREDICATE_ROOTS:
             contexts.add("taste")
         if predicate_roots & {"durability", "quality", "washable", "cleanability"}:
             contexts.add("durability")
@@ -433,13 +490,22 @@ def _episode_view_for_context(
 
 
 def _contexts_for_bundle(episodes: Iterable[dict[str, object]]) -> tuple[ReviewContextSpec, ...]:
+    episode_rows = list(episodes)
     observed_contexts = {
         str(context_id)
-        for episode in episodes
+        for episode in episode_rows
         for context_id in list(episode.get("contexts") or [])
         if str(context_id).strip()
     }
+    domains = {
+        str(episode.get("domain") or "").strip().lower()
+        for episode in episode_rows
+        if str(episode.get("domain") or "").strip()
+    }
+    allowed_contexts = _domain_contexts(next(iter(domains))) if len(domains) == 1 else None
     specs = [spec for spec in _ROOT_CONTEXT_SPECS if spec.context_id in observed_contexts or spec.context_id == "review"]
+    if allowed_contexts is not None:
+        specs = [spec for spec in specs if spec.context_id in allowed_contexts]
     return tuple(specs)
 
 
@@ -750,6 +816,10 @@ def _preferred_matrix_context_ids(bundle: dict[str, object]) -> tuple[str, ...]:
         return ("sit", "assemble", "use", "post_purchase", "review")
     if domain in {"running", "shoe", "shoes", "footwear"}:
         return ("fit", "run", "use", "decision", "review")
+    if domain in {"vehicle", "car", "auto", "automotive"}:
+        return ("drive", "use", "post_purchase", "decision", "review")
+    if domain in {"camera", "photography", "photo"}:
+        return ("photograph", "use", "post_purchase", "decision", "review")
     return ("use", "decision", "review")
 
 

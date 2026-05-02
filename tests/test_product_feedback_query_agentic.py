@@ -15,7 +15,7 @@ try:
         ProductFeedbackQueryAgenticConfig,
         ProductFeedbackQueryAgenticRunner,
     )
-    from functorflow_v3.product_feedback_agentic import ProductFeedbackRunResult
+    from functorflow_v3.product_feedback_agentic import ProductFeedbackRunResult, _product_usage_family
     from functorflow_v3.product_feedback_query_agentic import (
         DiscoveredReviewDocument,
         ReviewConsensusSnapshot,
@@ -24,12 +24,13 @@ try:
     )
     from functorflow_v3.product_feedback_state import materialize_product_feedback_state_transition
     from functorflow_v3.product_feedback_state import materialize_product_feedback_world_state
+    from functorflow_v3.topos_psr import build_topos_psr_bundle
 except ModuleNotFoundError:
     from ..functorflow_v3 import (
         ProductFeedbackQueryAgenticConfig,
         ProductFeedbackQueryAgenticRunner,
     )
-    from ..functorflow_v3.product_feedback_agentic import ProductFeedbackRunResult
+    from ..functorflow_v3.product_feedback_agentic import ProductFeedbackRunResult, _product_usage_family
     from ..functorflow_v3.product_feedback_query_agentic import (
         DiscoveredReviewDocument,
         ReviewConsensusSnapshot,
@@ -38,6 +39,7 @@ except ModuleNotFoundError:
     )
     from ..functorflow_v3.product_feedback_state import materialize_product_feedback_state_transition
     from ..functorflow_v3.product_feedback_state import materialize_product_feedback_world_state
+    from ..functorflow_v3.topos_psr import build_topos_psr_bundle
 
 
 class ProductFeedbackQueryAgenticTests(unittest.TestCase):
@@ -502,6 +504,124 @@ class ProductFeedbackQueryAgenticTests(unittest.TestCase):
             self.assertEqual(plan.retrieval_query, "Amedei Porcelana Chocolate Bars taste reviews")
             self.assertIn("amedei", plan.keyword_tokens)
             self.assertIn("chocolate", plan.keyword_tokens)
+
+    def test_query_interpretation_rewrites_vehicle_driving_comfort_question(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = ProductFeedbackQueryAgenticRunner(
+                ProductFeedbackQueryAgenticConfig(
+                    query="How comfortable is it to drive the Telsa Model 3?",
+                    outdir=Path(tmpdir) / "out",
+                )
+            )
+
+            plan = runner._run_query_interpretation_agent()
+
+            self.assertEqual(plan.product_name, "Telsa Model 3")
+            self.assertEqual(plan.retrieval_query, "Telsa Model 3 driving comfort reviews")
+            self.assertIn("telsa", plan.keyword_tokens)
+            self.assertIn("driving", plan.keyword_tokens)
+
+    def test_query_interpretation_rewrites_camera_photography_question(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = ProductFeedbackQueryAgenticRunner(
+                ProductFeedbackQueryAgenticConfig(
+                    query="How easy is to shoot photographs with a Leica M10 camera?",
+                    outdir=Path(tmpdir) / "out",
+                )
+            )
+
+            plan = runner._run_query_interpretation_agent()
+
+            self.assertEqual(plan.product_name, "Leica M10 camera")
+            self.assertEqual(plan.retrieval_query, "Leica M10 camera photography ease of use reviews")
+            self.assertIn("leica", plan.keyword_tokens)
+            self.assertIn("photography", plan.keyword_tokens)
+
+    def test_vehicle_topos_psr_does_not_publish_taste_context_from_noisy_reviews(self) -> None:
+        self.assertEqual(
+            _product_usage_family(
+                "Tesla Model 3",
+                "Tesla",
+                ["The interior camera watches the driver, and the car is comfortable to drive."],
+            ),
+            "vehicle",
+        )
+
+        bundle = build_topos_psr_bundle(
+            [
+                {
+                    "feedback_id": "tesla_001",
+                    "title": "Tesla Model 3 review",
+                    "text": "The ride is comfortable, but an interior camera and an unrelated scraped snippet mentioned taste.",
+                    "aspect_polarities": {"comfort": "positive", "taste": "positive"},
+                    "sentiment": "positive",
+                    "recommendation_signal": True,
+                }
+            ],
+            {
+                "usage_family": "vehicle",
+                "workflows": [
+                    {
+                        "feedback_id": "tesla_001",
+                        "selected_workflow": {
+                            "workflow_stages": ["research", "taste", "eat", "photograph", "drive", "charge", "recommend"]
+                        },
+                    }
+                ],
+            },
+            product_name="Telsa Model 3",
+            brand_name="Tesla",
+        )
+
+        context_ids = set(bundle["summary"]["context_ids"])
+        self.assertIn("drive", context_ids)
+        self.assertNotIn("taste", context_ids)
+        self.assertNotIn("photograph", context_ids)
+        episodes = list(bundle["episodes"])
+        self.assertEqual(episodes[0]["domain"], "vehicle")
+        self.assertNotIn("taste", episodes[0]["events"])
+        self.assertNotIn("photograph", episodes[0]["events"])
+        self.assertNotIn("taste_positive", episodes[0]["attributes"])
+
+    def test_camera_usage_family_and_psr_publish_photograph_not_drive_context(self) -> None:
+        self.assertEqual(
+            _product_usage_family("Leica M10 camera", "", ["Manual focus makes it easy to shoot photographs."]),
+            "camera",
+        )
+
+        bundle = build_topos_psr_bundle(
+            [
+                {
+                    "feedback_id": "leica_001",
+                    "title": "Leica M10 camera review",
+                    "text": "The Leica M10 is easy to shoot photographs with, and the manual focus experience is rewarding.",
+                    "aspect_polarities": {"ease_of_use": "positive", "quality": "positive"},
+                    "sentiment": "positive",
+                    "recommendation_signal": True,
+                }
+            ],
+            {
+                "usage_family": "camera",
+                "workflows": [
+                    {
+                        "feedback_id": "leica_001",
+                        "selected_workflow": {
+                            "workflow_stages": ["research", "drive", "configure", "photograph", "recommend"]
+                        },
+                    }
+                ],
+            },
+            product_name="Leica M10 camera",
+            brand_name="Leica",
+        )
+
+        context_ids = set(bundle["summary"]["context_ids"])
+        self.assertIn("photograph", context_ids)
+        self.assertNotIn("drive", context_ids)
+        episodes = list(bundle["episodes"])
+        self.assertEqual(episodes[0]["domain"], "camera")
+        self.assertIn("photograph", episodes[0]["events"])
+        self.assertNotIn("drive", episodes[0]["events"])
 
     def test_web_search_query_prefers_retrieval_query_when_available(self) -> None:
         backend = WebSearchReviewRetrievalBackend(user_agent="test-agent", timeout_seconds=5.0)

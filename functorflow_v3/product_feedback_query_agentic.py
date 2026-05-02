@@ -80,6 +80,14 @@ _QUERY_PREFIXES = (
     "how easy is to put together ",
     "how easy is it to drive ",
     "how easy is to drive ",
+    "how easy is it to shoot photographs with ",
+    "how easy is to shoot photographs with ",
+    "how easy is it to take photographs with ",
+    "how easy is to take photographs with ",
+    "how easy is it to take photos with ",
+    "how easy is to take photos with ",
+    "how comfortable is it to drive ",
+    "how comfortable is to drive ",
     "how tasty is it to eat ",
     "how tasty is to eat ",
     "how tasty is ",
@@ -99,6 +107,7 @@ _ASPECT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("assembly", ("assemble", "assembly", "set up", "setup", "put together", "installation")),
     ("comfort", ("comfortable", "comfort", "seat comfort", "long term comfort")),
     ("driving", ("drive", "driving", "handle", "handling")),
+    ("photography", ("shoot photographs", "take photographs", "take photos", "photography", "camera", "lens")),
     ("running", ("run with", "running", "run")),
     ("taste", ("tasty", "taste", "flavor", "flavour", "eat", "eating", "delicious")),
     ("durability", ("durability", "long term durability", "longevity", "holds up")),
@@ -216,6 +225,10 @@ def _normalize_spaces(text: str) -> str:
 
 def _detect_query_aspect(query: str) -> str:
     lowered = _normalize_spaces(query).lower()
+    if any(token in lowered for token in ("drive", "driving", "steering", "handling")) and any(
+        token in lowered for token in ("comfort", "comfortable", "seat", "ride")
+    ):
+        return "driving_comfort"
     for label, patterns in _ASPECT_PATTERNS:
         if any(pattern in lowered for pattern in patterns):
             return label
@@ -249,8 +262,12 @@ def _build_retrieval_query(query: str, *, configured_product_name: str = "", con
         retrieval_query = f"{product_phrase} assembly reviews"
     elif aspect == "comfort":
         retrieval_query = f"{product_phrase} comfort reviews"
+    elif aspect == "driving_comfort":
+        retrieval_query = f"{product_phrase} driving comfort reviews"
     elif aspect == "driving":
         retrieval_query = f"{product_phrase} driving reviews"
+    elif aspect == "photography":
+        retrieval_query = f"{product_phrase} photography ease of use reviews"
     elif aspect == "running":
         retrieval_query = f"{product_phrase} running reviews"
     elif aspect == "taste":
@@ -834,6 +851,7 @@ class ProductFeedbackQueryAgenticRunner:
         self.materialization_failures: list[dict[str, str]] = []
         self.analysis_outdir = self.config.outdir / "product_feedback_run"
         self.product_visual_asset_path = self.analysis_outdir / "product_visual_asset.json"
+        self._query_plan: ReviewQueryPlan | None = None
 
     def run(self) -> ProductFeedbackQueryRunResult:
         self.config.outdir.mkdir(parents=True, exist_ok=True)
@@ -848,6 +866,7 @@ class ProductFeedbackQueryAgenticRunner:
             analysis_question=analysis_question,
         )
         plan = self._run_query_interpretation_agent()
+        self._query_plan = plan
         selected = self._run_review_discovery_agent(plan)
         materialized: tuple[MaterializedReviewDocument, ...] = ()
         feedback_result = None
@@ -1220,6 +1239,9 @@ class ProductFeedbackQueryAgenticRunner:
         label = self.config.product_name.strip()
         if label:
             return label
+        plan = self._query_plan
+        if plan is not None and plan.product_name.strip():
+            return plan.product_name.strip()
         query = " ".join(self.config.query.split()).strip()
         return query or "product"
 

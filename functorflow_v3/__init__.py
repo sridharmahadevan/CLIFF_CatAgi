@@ -183,10 +183,14 @@ __all__ = [
     "build_democritus_counterfactuals_from_triples",
     "build_democritus_workflow",
     "build_product_feedback_agentic_workflow",
+    "build_topos_oom_bundle",
+    "evaluate_topos_oom_perplexity",
     "generate_basket_rocket_visualizations",
     "generate_product_feedback_dashboard",
+    "render_topos_oom_bundle_html",
     "route_ff2_query",
     "route_ff3_query",
+    "write_topos_oom_bundle",
     "write_democritus_counterfactual_artifacts",
     "report_to_cliff_consciousness",
     "route_cliff_query",
@@ -251,6 +255,10 @@ def __getattr__(name: str):
         "route_ff3_query",
         "report_to_cliff_consciousness",
         "route_cliff_query",
+        "build_topos_oom_bundle",
+        "evaluate_topos_oom_perplexity",
+        "render_topos_oom_bundle_html",
+        "write_topos_oom_bundle",
     }:
         from .basket_rocket_sec_agentic import (
             BasketRocketBatchAgenticRunner,
@@ -325,6 +333,12 @@ def __getattr__(name: str):
             report_to_cliff_consciousness,
             route_cliff_query,
         )
+        from .topos_oom import (
+            build_topos_oom_bundle,
+            evaluate_topos_oom_perplexity,
+            render_topos_oom_bundle_html,
+            write_topos_oom_bundle,
+        )
 
         exported = {
             "BasketRocketBatchAgenticRunner": BasketRocketBatchAgenticRunner,
@@ -384,6 +398,10 @@ def __getattr__(name: str):
             "route_ff3_query": route_ff3_query,
             "report_to_cliff_consciousness": report_to_cliff_consciousness,
             "route_cliff_query": route_cliff_query,
+            "build_topos_oom_bundle": build_topos_oom_bundle,
+            "evaluate_topos_oom_perplexity": evaluate_topos_oom_perplexity,
+            "render_topos_oom_bundle_html": render_topos_oom_bundle_html,
+            "write_topos_oom_bundle": write_topos_oom_bundle,
         }
         return exported[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

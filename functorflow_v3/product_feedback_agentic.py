@@ -167,6 +167,7 @@ _USAGE_ACTION_ORDER = (
     "configure",
     "wear",
     "run",
+    "photograph",
     "drive",
     "charge",
     "sit",
@@ -191,6 +192,7 @@ _USAGE_ACTION_KEYWORDS: dict[str, tuple[str, ...]] = {
     "configure": ("configuration", "arrangement", "layout", "orientation", "deep seats", "fit"),
     "wear": ("wear", "wore", "upper comfort", "true to size", "slip on", "midfoot"),
     "run": ("run", "miles", "training", "long run", "tempo", "daily trainer"),
+    "photograph": ("shoot", "shooting", "photograph", "photographs", "photo", "photos", "camera", "lens", "viewfinder", "focus"),
     "drive": ("drive", "driving", "steering", "ride", "handling", "commute", "road trip", "autopilot"),
     "charge": ("charge", "charging", "supercharger", "charger", "battery", "range"),
     "sit": ("sit", "seating", "loung", "movie", "watch", "nap", "couch"),
@@ -216,6 +218,11 @@ _USAGE_MACRO_TEMPLATES: dict[str, tuple[tuple[str, ...], ...]] = {
         ("research", "order", "deliver", "configure", "drive", "charge", "recommend"),
         ("research", "drive", "charge", "recommend"),
     ),
+    "camera": (
+        ("research", "order", "deliver", "configure", "photograph", "recommend"),
+        ("research", "configure", "photograph", "clean", "recommend"),
+        ("research", "photograph", "recommend"),
+    ),
     "food": (
         ("research", "order", "deliver", "open", "taste", "eat", "recommend"),
         ("research", "order", "deliver", "open", "taste", "share", "recommend"),
@@ -234,6 +241,7 @@ _USAGE_MACRO_TEMPLATES: dict[str, tuple[tuple[str, ...], ...]] = {
 _USAGE_ALLOWED_ACTIONS: dict[str, tuple[str, ...]] = {
     "shoe": ("research", "order", "deliver", "unbox", "configure", "wear", "run", "clean", "return", "recommend"),
     "vehicle": ("research", "order", "deliver", "configure", "drive", "charge", "clean", "return", "recommend"),
+    "camera": ("research", "order", "deliver", "configure", "photograph", "clean", "return", "recommend"),
     "food": ("research", "order", "deliver", "unbox", "open", "taste", "eat", "share", "store", "return", "recommend"),
     "sofa": ("research", "order", "deliver", "unbox", "assemble", "configure", "sit", "clean", "wash", "reconfigure", "return", "recommend"),
     "generic": _USAGE_ACTION_ORDER,
@@ -577,40 +585,68 @@ def _clamp_score(value: float) -> float:
 
 
 def _product_usage_family(product_name: str, brand_name: str, texts: list[str]) -> str:
-    haystack = " ".join([product_name, brand_name, *texts]).lower()
+    label_haystack = " ".join([product_name, brand_name]).lower()
+    text_haystack = " ".join(texts).lower()
+    haystack = " ".join([label_haystack, text_haystack]).lower()
+    label_token_set = set(re.findall(r"[a-z0-9]+", label_haystack))
     token_set = set(re.findall(r"[a-z0-9]+", haystack))
 
-    def _matches(*terms: str) -> bool:
+    def _matches_in(scope: str, tokens: set[str], *terms: str) -> bool:
         for term in terms:
             normalized = str(term).strip().lower()
             if not normalized:
                 continue
             if " " in normalized:
-                if normalized in haystack:
+                if normalized in scope:
                     return True
-            elif normalized in token_set:
+            elif normalized in tokens:
                 return True
         return False
 
-    if any(
-        _matches(token)
-        for token in (
-            "tesla",
-            "model 3",
-            "miata",
-            "vehicle",
-            "car",
-            "sedan",
-            "drive",
-            "driving",
-            "steering",
-            "charging",
-            "charger",
-            "battery",
-            "autopilot",
-        )
-    ):
+    def _matches(*terms: str) -> bool:
+        return _matches_in(haystack, token_set, *terms)
+
+    camera_terms = (
+        "leica",
+        "m10",
+        "camera",
+        "cameras",
+        "photograph",
+        "photographs",
+        "photography",
+        "photo",
+        "photos",
+        "lens",
+        "viewfinder",
+        "rangefinder",
+        "focus",
+    )
+    vehicle_terms = (
+        "tesla",
+        "telsa",
+        "model 3",
+        "miata",
+        "vehicle",
+        "car",
+        "sedan",
+        "drive",
+        "driving",
+        "steering",
+        "charging",
+        "charger",
+        "battery",
+        "autopilot",
+    )
+
+    if _matches_in(label_haystack, label_token_set, *camera_terms):
+        return "camera"
+    if _matches_in(label_haystack, label_token_set, *vehicle_terms):
         return "vehicle"
+    if _matches(*vehicle_terms):
+        return "vehicle"
+    text_camera_terms = tuple(term for term in camera_terms if term not in {"camera", "cameras", "focus"})
+    if _matches(*text_camera_terms):
+        return "camera"
     if any(
         _matches(token)
         for token in (
@@ -1169,6 +1205,9 @@ class ProductFeedbackAgenticRunner:
                 _append_unique(actions, "drive")
             if any(token in lowered for token in ("charge", "charging", "supercharger", "charger", "battery", "range")):
                 _append_unique(actions, "charge")
+        if family == "camera":
+            if any(token in lowered for token in ("shoot", "shooting", "photograph", "photo", "camera", "lens", "viewfinder", "rangefinder", "focus")):
+                _append_unique(actions, "photograph")
         if family == "sofa":
             if any(token in lowered for token in ("movie", "watch", "nap", "family room", "sit")):
                 _append_unique(actions, "sit")
@@ -1200,6 +1239,11 @@ class ProductFeedbackAgenticRunner:
             if "charge" not in current and any(token in lowered for token in ("charge", "charging", "supercharger", "charger", "battery", "range")):
                 variants.append({"label": "add_charge", "source": "local_insert", "workflow_stages": _insert_action(current, "charge", before=("recommend", "return"))})
             if "return" not in current and any(token in lowered for token in ("return", "returned", "gave it back", "trade in")):
+                variants.append({"label": "add_return", "source": "local_insert", "workflow_stages": _insert_action(current, "return")})
+        if family == "camera":
+            if "photograph" not in current and any(token in lowered for token in ("shoot", "shooting", "photograph", "photo", "camera", "lens", "viewfinder", "rangefinder", "focus")):
+                variants.append({"label": "add_photograph", "source": "local_insert", "workflow_stages": _insert_action(current, "photograph", before=("clean", "recommend", "return"))})
+            if "return" not in current and any(token in lowered for token in ("return", "returned", "sent it back", "too difficult")):
                 variants.append({"label": "add_return", "source": "local_insert", "workflow_stages": _insert_action(current, "return")})
         if family == "food":
             if "open" not in current and any(token in lowered for token in ("open", "opened", "unwrap", "unwrapped", "first bite")):
