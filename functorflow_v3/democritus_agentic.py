@@ -23,6 +23,7 @@ from .repo_layout import (
     resolve_democritus_root,
     workspace_root,
 )
+from .unicausal_frontend import extract_unicausal_triples
 
 
 _MATPLOTLIB_RENDER_LOCK = threading.Lock()
@@ -57,6 +58,10 @@ class DemocritusAgenticConfig:
     statements_per_question: int = 2
     statement_batch_size: int = 16
     statement_max_tokens: int = 192
+    request_query: str = ""
+    causal_extractor: str = "legacy"
+    unicausal_min_confidence: float = 0.5
+    unicausal_require_query_anchor: bool = False
     manifold_mode: str = "full"
     topk: int = 200
     radii: str = "1,2,3"
@@ -81,6 +86,11 @@ class DemocritusAgenticConfig:
     llm_usage_log_path: Path | None = None
 
     def resolved(self) -> "DemocritusAgenticConfig":
+        causal_extractor = str(self.causal_extractor).strip().lower()
+        if causal_extractor not in {"legacy", "unicausal"}:
+            raise ValueError(
+                "causal_extractor must be either 'legacy' or 'unicausal'"
+            )
         return DemocritusAgenticConfig(
             outdir=self.outdir.resolve(),
             domain_name=self.domain_name,
@@ -95,6 +105,14 @@ class DemocritusAgenticConfig:
             statements_per_question=max(1, int(self.statements_per_question)),
             statement_batch_size=max(1, int(self.statement_batch_size)),
             statement_max_tokens=max(48, int(self.statement_max_tokens)),
+            request_query=" ".join(str(self.request_query).split()),
+            causal_extractor=causal_extractor,
+            unicausal_min_confidence=min(
+                1.0, max(0.0, float(self.unicausal_min_confidence))
+            ),
+            unicausal_require_query_anchor=bool(
+                self.unicausal_require_query_anchor
+            ),
             manifold_mode=self.manifold_mode,
             topk=self.topk,
             radii=self.radii,
@@ -883,12 +901,24 @@ class DemocritusAgenticRunner:
 
     def _run_triple_extraction_agent(self) -> tuple[str, ...]:
         output_path = self.outdir / "relational_triples.jsonl"
-        outputs = self._run_subprocess_agent(
-            "triple_extraction_agent",
-            [sys.executable, "-m", "scripts.relational_triple_extractor"],
-            cwd=self.outdir,
-            outputs=(output_path,),
-        )
+        if self.config.causal_extractor == "unicausal":
+            audit_path = self.outdir / "unicausal_frontend_audit.json"
+            extract_unicausal_triples(
+                self.outdir / "causal_statements.jsonl",
+                output_path,
+                audit_path,
+                query=self.config.request_query,
+                min_confidence=self.config.unicausal_min_confidence,
+                require_query_anchor=self.config.unicausal_require_query_anchor,
+            )
+            outputs = (str(output_path), str(audit_path))
+        else:
+            outputs = self._run_subprocess_agent(
+                "triple_extraction_agent",
+                [sys.executable, "-m", "scripts.relational_triple_extractor"],
+                cwd=self.outdir,
+                outputs=(output_path,),
+            )
         counterfactual_paths = write_democritus_counterfactual_artifacts(
             output_path,
             outdir=self.outdir / "counterfactuals",

@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "Please cite the associated Entropy article when using the Democritus implementation or reported benchmark."
+title: "CLIFF_CatAgi: public Democritus reproducibility implementation"
+type: software
+authors:
+  - family-names: Mahadevan
+    given-names: Sridhar
+repository-code: "https://github.com/sridharmahadevan/CLIFF_CatAgi"
+url: "https://github.com/sridharmahadevan/CLIFF_CatAgi"
+version: 0.2.0
+date-released: 2026-09-03
+preferred-citation:
+  type: article
+  authors:
+    - family-names: Mahadevan
+      given-names: Sridhar
+  title: "Democritus: Homotopy-Localized Causal Discourse Extraction from Language"
+  journal: Entropy
+  year: 2026
+  volume: 28
+  issue: 9
+  doi: "10.3390/e28090986"
+  url: "https://www.mdpi.com/1099-4300/28/9/986"

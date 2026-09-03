@@ -15,6 +15,28 @@ The key product idea is simple:
 
 This repo is intended to be the clean public-facing interface layer.
 
+## Entropy Publication Release
+
+This repository contains the public implementation and reproducibility surface
+for:
+
+> Sridhar Mahadevan. “Democritus: Homotopy-Localized Causal Discourse
+> Extraction from Language.” *Entropy* **2026**, *28*(9), 986.
+> [https://doi.org/10.3390/e28090986](https://doi.org/10.3390/e28090986)
+
+The article cites commit `c060d94759d01f0bf3471d85d4c6e1ad4e9589a5` as
+the CLIFF base version. The publication-aligned release extends that base with
+the frozen causal-extraction comparison, the optional UniCausal front end, and
+the associated regression coverage. The benchmark code and aggregate results
+are under `experiments/causal_extraction_benchmark/`.
+
+The AltLex test split and all other externally sourced datasets are deliberately
+excluded. Obtain them from their original custodians and review their terms
+before running the benchmark. Prediction files that reproduce source-text spans
+are also withheld because the upstream AltLex redistribution status is
+unresolved; the release retains aggregate metrics and cryptographic hashes of
+the frozen predictions reported in the paper.
+
 ## Core Product Picture
 
 CLIFF is best understood as a conscious interface sitting on top of a deeper
@@ -92,7 +114,7 @@ If you are new to the repo, start here first:
 | Route | What it does | Works with core repo only? | Optional repos / runtimes |
 | --- | --- | --- | --- |
 | `course_demo` | Runs textbook-linked demos, recommendations, project ideas, and code snippets | Partly | `Category-Theory-for-AGI-UMass-CMPSCI-692CT`; for Julia paths also `FunctorFlow.jl`, optionally `Julia FF`, and a Julia runtime |
-| `democritus` | Finds studies or documents, runs synthesis, and builds corpus-level claims dashboards | No | `Democritus_OpenAI`; OpenAI API access for LLM-backed stages |
+| `democritus` | Finds studies or documents, runs synthesis, and builds corpus-level claims dashboards; optionally validates causal statements with UniCausal | No | `Democritus_OpenAI`; OpenAI-compatible API access for LLM-backed stages; optional UniCausal models |
 | `basket_rocket_sec` | Recovers workflows from SEC filings and builds BASKET/ROCKET-style dashboards | No | `BASKET`, `brand_democritus_block_denoise` |
 | `company_similarity` | Compares companies through the diffusion/manifold pipeline and links back to the textbook | No | `brand_democritus_block_denoise` and a Python environment with its dependencies |
 | `product_feedback` | Builds product-feedback syntheses, workflows, and causal hypotheses with textbook pointers | Mostly | No extra repo for the basic route; external review sources may still matter depending on retrieval path |
@@ -344,6 +366,29 @@ Also needed:
 - `Democritus_OpenAI`
 - OpenAI API access for the LLM-backed steps
 
+Optional UniCausal support:
+
+```bash
+pip install -e '.[unicausal]'
+```
+
+Select the public UniCausal sequence/token models as a conservative extraction
+front end with:
+
+```bash
+python3 -m functorflow_v3.cliff \
+  --query "Analyze 5 recent studies on rising ocean temperatures" \
+  --route democritus \
+  --execution-mode deep \
+  --democritus-causal-extractor unicausal \
+  --democritus-unicausal-min-confidence 0.5 \
+  --democritus-unicausal-require-query-anchor
+```
+
+The legacy Democritus extractor remains the default. UniCausal mode writes a
+per-document `unicausal_frontend_audit.json` containing model identity,
+confidence, retention, span, and query-anchor diagnostics.
+
 Resolution options:
 
 - sibling repo beside `CLIFF_CatAgi`
@@ -358,6 +403,8 @@ Useful checks:
 
 ```bash
 python3 -m unittest tests.test_democritus_agentic tests.test_democritus_query_agentic
+python3 -m pytest tests/test_unicausal_frontend.py
+cd experiments/causal_extraction_benchmark && python3 -m unittest test_benchmark.py
 ```
 
 ### Writing Better Democritus Queries

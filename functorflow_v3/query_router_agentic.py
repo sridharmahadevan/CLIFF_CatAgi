@@ -242,6 +242,9 @@ class FF2QueryRouterConfig:
     democritus_retrieval_backend: str = "auto"
     democritus_max_docs: int = 0
     democritus_intra_document_shards: int = 1
+    democritus_causal_extractor: str = "legacy"
+    democritus_unicausal_min_confidence: float = 0.5
+    democritus_unicausal_require_query_anchor: bool = False
     democritus_manifold_mode: str = "full"
     democritus_topk: int = 200
     democritus_radii: str = "1,2,3"
@@ -324,6 +327,13 @@ class FF2QueryRouterConfig:
             democritus_retrieval_backend=self.democritus_retrieval_backend,
             democritus_max_docs=self.democritus_max_docs,
             democritus_intra_document_shards=max(1, int(self.democritus_intra_document_shards)),
+            democritus_causal_extractor=str(self.democritus_causal_extractor).strip().lower(),
+            democritus_unicausal_min_confidence=min(
+                1.0, max(0.0, float(self.democritus_unicausal_min_confidence))
+            ),
+            democritus_unicausal_require_query_anchor=bool(
+                self.democritus_unicausal_require_query_anchor
+            ),
             democritus_manifold_mode=self.democritus_manifold_mode,
             democritus_topk=max(1, int(self.democritus_topk)),
             democritus_radii=self.democritus_radii,
@@ -677,6 +687,9 @@ class FF2QueryRouter:
                 retrieval_backend=self.config.democritus_retrieval_backend,
                 max_docs=self.config.democritus_max_docs,
                 intra_document_shards=self.config.democritus_intra_document_shards,
+                causal_extractor=self.config.democritus_causal_extractor,
+                unicausal_min_confidence=self.config.democritus_unicausal_min_confidence,
+                unicausal_require_query_anchor=self.config.democritus_unicausal_require_query_anchor,
                 manifold_mode=self.config.democritus_manifold_mode,
                 topk=self.config.democritus_topk,
                 radii=self.config.democritus_radii,
@@ -1119,6 +1132,13 @@ def _build_router_from_args_with_outdir(
             democritus_retrieval_backend=args.democritus_retrieval_backend,
             democritus_max_docs=democritus_max_docs,
             democritus_intra_document_shards=args.democritus_intra_document_shards,
+            democritus_causal_extractor=getattr(args, "democritus_causal_extractor", "legacy"),
+            democritus_unicausal_min_confidence=getattr(
+                args, "democritus_unicausal_min_confidence", 0.5
+            ),
+            democritus_unicausal_require_query_anchor=bool(
+                getattr(args, "democritus_unicausal_require_query_anchor", False)
+            ),
             democritus_manifold_mode=getattr(args, "democritus_manifold_mode", "full"),
             democritus_topk=getattr(args, "democritus_topk", 200),
             democritus_radii=getattr(args, "democritus_radii", "1,2,3"),

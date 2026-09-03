@@ -253,6 +253,10 @@ def _build_worker_command(
         str(args.democritus_retrieval_backend),
         "--democritus-intra-document-shards",
         str(args.democritus_intra_document_shards),
+        "--democritus-causal-extractor",
+        str(getattr(args, "democritus_causal_extractor", "legacy")),
+        "--democritus-unicausal-min-confidence",
+        str(getattr(args, "democritus_unicausal_min_confidence", 0.5)),
         "--democritus-manifold-mode",
         str(getattr(args, "democritus_manifold_mode", "full")),
         "--democritus-topk",
@@ -288,6 +292,8 @@ def _build_worker_command(
         command.append("--cliff-defer-final-synthesis")
     if getattr(args, "democritus_input_pdf", ""):
         command.extend(["--democritus-input-pdf", str(args.democritus_input_pdf)])
+    if getattr(args, "democritus_unicausal_require_query_anchor", False):
+        command.append("--democritus-unicausal-require-query-anchor")
     if getattr(args, "democritus_input_pdf_dir", ""):
         command.extend(["--democritus-input-pdf-dir", str(args.democritus_input_pdf_dir)])
     if args.democritus_manifest:
@@ -840,6 +846,23 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--democritus-retrieval-backend", default="auto")
     parser.add_argument("--democritus-max-docs", type=int, default=None)
     parser.add_argument("--democritus-intra-document-shards", type=int, default=1)
+    parser.add_argument(
+        "--democritus-causal-extractor",
+        choices=("legacy", "unicausal"),
+        default="legacy",
+        help="Select the standard Democritus extractor or the conservative UniCausal front-end.",
+    )
+    parser.add_argument(
+        "--democritus-unicausal-min-confidence",
+        type=float,
+        default=0.5,
+        help="Minimum UniCausal causal-sentence confidence when that front-end is selected.",
+    )
+    parser.add_argument(
+        "--democritus-unicausal-require-query-anchor",
+        action="store_true",
+        help="Also require each accepted causal statement to share a content token with the Democritus query.",
+    )
     parser.add_argument("--democritus-manifold-mode", default="full", choices=("full", "lite", "moe"))
     parser.add_argument("--democritus-topk", type=int, default=200)
     parser.add_argument("--democritus-radii", default="1,2,3")

@@ -13,3 +13,7 @@ dist/
 *.egg-info/
 third_party/
 /tmp/
+
+# Local exploratory UniCausal drift runs are not part of the Entropy release.
+# Their saved outputs may contain source text and machine-specific paths.
+experiments/unicausal_frontend_drift/

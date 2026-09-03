@@ -358,6 +358,9 @@ class DemocritusBatchConfig:
     statements_per_question: int = 2
     statement_batch_size: int = 16
     statement_max_tokens: int = 192
+    causal_extractor: str = "legacy"
+    unicausal_min_confidence: float = 0.5
+    unicausal_require_query_anchor: bool = False
     manifold_mode: str = "full"
     topk: int = 200
     radii: str = "1,2,3"
@@ -391,6 +394,9 @@ class DemocritusBatchConfig:
             outdir=self.outdir,
             root_topic_strategy=self.root_topic_strategy,
             intra_document_shards=self.intra_document_shards,
+            causal_extractor=self.causal_extractor,
+            unicausal_min_confidence=self.unicausal_min_confidence,
+            unicausal_require_query_anchor=self.unicausal_require_query_anchor,
         ).resolved()
         max_workers = max(1, int(self.max_workers))
         intra_document_shards = max(1, int(self.intra_document_shards))
@@ -411,6 +417,9 @@ class DemocritusBatchConfig:
             statements_per_question=max(1, int(self.statements_per_question)),
             statement_batch_size=max(1, int(self.statement_batch_size)),
             statement_max_tokens=max(48, int(self.statement_max_tokens)),
+            causal_extractor=probe_config.causal_extractor,
+            unicausal_min_confidence=probe_config.unicausal_min_confidence,
+            unicausal_require_query_anchor=probe_config.unicausal_require_query_anchor,
             manifold_mode=self.manifold_mode,
             topk=max(1, int(self.topk)),
             radii=self.radii,
@@ -571,6 +580,10 @@ class DemocritusBatchAgenticRunner:
                 statements_per_question=self.config.statements_per_question,
                 statement_batch_size=self.config.statement_batch_size,
                 statement_max_tokens=self.config.statement_max_tokens,
+                request_query=self.config.request_query,
+                causal_extractor=self.config.causal_extractor,
+                unicausal_min_confidence=self.config.unicausal_min_confidence,
+                unicausal_require_query_anchor=self.config.unicausal_require_query_anchor,
                 manifold_mode=self.config.manifold_mode,
                 topk=self.config.topk,
                 radii=self.config.radii,

@@ -57,6 +57,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--democritus-retrieval-backend", default="auto")
     parser.add_argument("--democritus-max-docs", type=int, default=None)
     parser.add_argument("--democritus-intra-document-shards", type=int, default=1)
+    parser.add_argument(
+        "--democritus-causal-extractor",
+        choices=("legacy", "unicausal"),
+        default="legacy",
+    )
+    parser.add_argument("--democritus-unicausal-min-confidence", type=float, default=0.5)
+    parser.add_argument("--democritus-unicausal-require-query-anchor", action="store_true")
     parser.add_argument("--democritus-manifold-mode", default="full", choices=("full", "lite", "moe"))
     parser.add_argument("--democritus-topk", type=int, default=200)
     parser.add_argument("--democritus-radii", default="1,2,3")

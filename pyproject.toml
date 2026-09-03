@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "CLIFF_CatAgi"
-version = "0.1.0"
+version = "0.2.0"
 description = "CLIFF as a textbook-centric interface to Categories for AGI."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -48,6 +48,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+]
+unicausal = [
+    "transformers>=4.48",
 ]
 docs = []
 

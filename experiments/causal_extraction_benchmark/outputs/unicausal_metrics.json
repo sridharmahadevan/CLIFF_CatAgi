@@ -1,0 +1,38 @@
+{
+  "examples": 404,
+  "positive_examples": 115,
+  "negative_examples": 289,
+  "classification": {
+    "precision": 0.5197368421052632,
+    "recall": 0.6869565217391305,
+    "f1": 0.5917602996254682,
+    "accuracy": 0.7301980198019802,
+    "tp": 79,
+    "fp": 73,
+    "fn": 36,
+    "tn": 216
+  },
+  "cause_span": {
+    "precision": 0.3867435158501441,
+    "recall": 0.4315112540192926,
+    "f1": 0.40790273556231005
+  },
+  "effect_span": {
+    "precision": 0.4386271087841768,
+    "recall": 0.49377865094957435,
+    "f1": 0.46457178065311155
+  },
+  "span_macro_f1": 0.4362372581077108,
+  "directed_pair": {
+    "gold": 127,
+    "predicted": 195,
+    "exact_matches": 33,
+    "exact_f1": 0.2049689440993789,
+    "relaxed_matches": 60,
+    "relaxed_f1": 0.37267080745341613
+  },
+  "invalid_outputs": 0,
+  "missing_predictions": 0,
+  "runtime_seconds": 13.374356994000005,
+  "predictions_sha256": "19fbb48eed3ed064aad348a7dfcb809358cedcfb02ffad4ac0486c19935183c0"
+}

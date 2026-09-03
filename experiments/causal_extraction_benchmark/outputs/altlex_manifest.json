@@ -1,0 +1,9 @@
+{
+  "dataset_file": "altlex_test.csv",
+  "dataset_redistributed": false,
+  "dataset_sha256": "093ae83baf64339203130928b810e7208895335148cfef403a051195a2dee5ce",
+  "examples": 404,
+  "positive_examples": 115,
+  "negative_examples": 289,
+  "example_ids_sha256": "8f3b0702490db7444b48f6a27c8bc4c7add46931f249f73b990fc828f4bf4d62"
+}

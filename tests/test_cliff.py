@@ -171,6 +171,9 @@ class CLIFFTests(unittest.TestCase):
             democritus_retrieval_backend="auto",
             democritus_max_docs=None,
             democritus_intra_document_shards=1,
+            democritus_causal_extractor="unicausal",
+            democritus_unicausal_min_confidence=0.72,
+            democritus_unicausal_require_query_anchor=True,
             democritus_manifold_mode="moe",
             democritus_topk=144,
             democritus_radii="2,4",
@@ -229,6 +232,11 @@ class CLIFFTests(unittest.TestCase):
         self.assertIn("/tmp/uploaded_paper.pdf", command)
         self.assertIn("--democritus-input-pdf-dir", command)
         self.assertIn("/tmp/uploaded_pdfs", command)
+        self.assertIn("--democritus-causal-extractor", command)
+        self.assertIn("unicausal", command)
+        self.assertIn("--democritus-unicausal-min-confidence", command)
+        self.assertIn("0.72", command)
+        self.assertIn("--democritus-unicausal-require-query-anchor", command)
         self.assertIn("--democritus-manifold-mode", command)
         self.assertIn("moe", command)
         self.assertIn("--democritus-topk", command)
